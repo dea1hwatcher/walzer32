@@ -9,6 +9,7 @@ members = [
     "crates/transd-rt",
     "crates/transd-elf",
     "crates/transd-bridge",
+    "crates/transd-cli",
 ]
 
 [workspace.package]
