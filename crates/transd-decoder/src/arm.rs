@@ -42,6 +42,21 @@ impl ArmDecoder {
             return ArmInst::new(Cond::AL, Op::Nop, raw);
         }
 
+        // CLREX (ARMv7: 0xF57FF01F)
+        if raw == 0xF57F_F01F {
+            return ArmInst::new(Cond::AL, Op::Clrex, raw);
+        }
+
+        // DMB / DSB (ARMv7: 0xF57FF05x / 0xF57FF04x)
+        if (raw & 0xFFFF_FFF0) == 0xF57F_F050 || (raw & 0xFFFF_FFF0) == 0xF57F_F040 {
+            return ArmInst::new(Cond::AL, Op::MemoryBarrier { is_data: true }, raw);
+        }
+
+        // ISB (ARMv7: 0xF57FF06x)
+        if (raw & 0xFFFF_FFF0) == 0xF57F_F060 {
+            return ArmInst::new(Cond::AL, Op::MemoryBarrier { is_data: false }, raw);
+        }
+
         ArmInst::new(Cond::AL, Op::Unknown(raw), raw)
     }
 
@@ -62,10 +77,22 @@ impl ArmDecoder {
         let bit4 = (raw >> 4) & 1;
         let bit7 = (raw >> 7) & 1;
 
-        // Multiply or Halfword Transfer
+        // Multiply or Halfword Transfer or Synchronization Primitives
         if bit4 == 1 && bit7 == 1 {
             let bits_7_4 = (raw >> 4) & 0xF;
             if bits_7_4 == 0b1001 {
+                // Check for synchronization primitives (LDREX / STREX)
+                if (raw & 0x0FF0_0FFF) == 0x0190_0F9F {
+                    let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+                    let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+                    return Op::AtomicLoadEx { rd, rn };
+                }
+                if (raw & 0x0FF0_0FF0) == 0x0180_0F90 {
+                    let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+                    let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+                    let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+                    return Op::AtomicStoreEx { rd, rm, rn };
+                }
                 // Multiply / Multiply Long
                 return Self::decode_multiply(raw);
             } else {
@@ -409,6 +436,23 @@ impl ArmDecoder {
         let cp = (raw >> 8) & 0xF;
         if cp == 10 || cp == 11 {
             return Self::decode_vfp(raw, cp == 11);
+        }
+
+        if cp == 15 {
+            let is_mrc = ((raw >> 20) & 1) != 0;
+            let opc1 = ((raw >> 21) & 0x7) as u8;
+            let crn = ((raw >> 16) & 0xF) as u8;
+            let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let opc2 = ((raw >> 5) & 0x7) as u8;
+            let crm = (raw & 0xF) as u8;
+            return Op::Cp15Move {
+                is_mrc,
+                rd,
+                crn,
+                opc1,
+                crm,
+                opc2,
+            };
         }
 
         Op::Unknown(raw)

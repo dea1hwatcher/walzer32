@@ -3,7 +3,7 @@ pub mod gles;
 pub mod jni;
 pub mod trampoline;
 
-pub use bionic::{BionicBridge, BionicFuncId, LogMessage};
+pub use bionic::{BionicBridge, BionicFuncId, LogMessage, ThreadDescriptor};
 pub use gles::{
     DrawCallRecord, GlesBridge, GlesFuncId, GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT,
     GL_EXTENSIONS, GL_RENDERER, GL_SHADING_LANGUAGE_VERSION, GL_TRIANGLES, GL_VENDOR, GL_VERSION,

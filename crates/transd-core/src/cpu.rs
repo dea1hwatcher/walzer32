@@ -10,7 +10,9 @@ pub const OFFSET_PC: usize = 15 * 4; // 60
 pub const OFFSET_CPSR: usize = 64;   // 64
 pub const OFFSET_FPSCR: usize = 68;  // 68
 pub const OFFSET_VFP: usize = 72;    // 72 (8-byte aligned)
-pub const CPU_STATE_SIZE: usize = 72 + 32 * 8; // 328 bytes
+pub const OFFSET_TLS: usize = 72 + 32 * 8; // 328
+pub const OFFSET_EXCLUSIVE: usize = 332;   // 332
+pub const CPU_STATE_SIZE: usize = 336;     // 336 bytes
 
 /// Complete state of the ARM32 Guest CPU
 #[repr(C)]
@@ -24,6 +26,11 @@ pub struct CpuState {
     pub fpscr: u32,
     /// 32 VFP / NEON 64-bit registers (d0 - d31)
     pub vfp: [u64; 32],
+    /// Thread-Local Storage pointer (CP15 c13, c0, 3)
+    pub tls_ptr: u32,
+    /// Exclusive monitor reservation address (for LDREX/STREX)
+    /// 0xFFFF_FFFF if no reservation active
+    pub exclusive_addr: u32,
 }
 
 impl Default for CpuState {
@@ -33,6 +40,8 @@ impl Default for CpuState {
             cpsr: Cpsr::empty(),
             fpscr: 0,
             vfp: [0; 32],
+            tls_ptr: 0,
+            exclusive_addr: 0xFFFF_FFFF,
         }
     }
 }
@@ -183,6 +192,8 @@ mod tests {
         assert_eq!(std::mem::offset_of!(CpuState, cpsr), OFFSET_CPSR);
         assert_eq!(std::mem::offset_of!(CpuState, fpscr), OFFSET_FPSCR);
         assert_eq!(std::mem::offset_of!(CpuState, vfp), OFFSET_VFP);
+        assert_eq!(std::mem::offset_of!(CpuState, tls_ptr), OFFSET_TLS);
+        assert_eq!(std::mem::offset_of!(CpuState, exclusive_addr), OFFSET_EXCLUSIVE);
     }
 
     #[test]

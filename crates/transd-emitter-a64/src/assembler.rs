@@ -248,6 +248,52 @@ impl A64Assembler {
         let inst = 0xD400_0001 | ((imm16 as u32) << 5);
         self.emit(inst);
     }
+
+    // --- Atomics & Synchronization ---
+
+    /// LDXR Wt, [Xn] (Load exclusive 32-bit register)
+    pub fn ldxr_w(&mut self, rt: A64Reg, rn: A64Reg) {
+        let inst = 0x885F_7C00 | (rn.index() << 5) | rt.index();
+        self.emit(inst);
+    }
+
+    /// STXR Ws, Wt, [Xn] (Store exclusive 32-bit register)
+    pub fn stxr_w(&mut self, rs: A64Reg, rt: A64Reg, rn: A64Reg) {
+        let inst = 0x8800_7C00 | (rs.index() << 16) | (rn.index() << 5) | rt.index();
+        self.emit(inst);
+    }
+
+    /// CLREX (Clear exclusive monitor reservation)
+    pub fn clrex(&mut self) {
+        self.emit(0xD503_3F5F);
+    }
+
+    /// DMB ISH (Data Memory Barrier, Inner Shareable)
+    pub fn dmb_ish(&mut self) {
+        self.emit(0xD503_3BBF);
+    }
+
+    /// DSB ISH (Data Synchronization Barrier, Inner Shareable)
+    pub fn dsb_ish(&mut self) {
+        self.emit(0xD503_39BF);
+    }
+
+    /// ISB (Instruction Synchronization Barrier)
+    pub fn isb(&mut self) {
+        self.emit(0xD503_3FDF);
+    }
+
+    /// MRS Xt, TPIDR_EL0 (Read Thread ID Register)
+    pub fn mrs_tpidr_el0(&mut self, rt: A64Reg) {
+        let inst = 0xD53B_D040 | rt.index();
+        self.emit(inst);
+    }
+
+    /// MSR TPIDR_EL0, Xt (Write Thread ID Register)
+    pub fn msr_tpidr_el0(&mut self, rt: A64Reg) {
+        let inst = 0xD51B_D040 | rt.index();
+        self.emit(inst);
+    }
 }
 
 #[cfg(test)]
@@ -290,5 +336,28 @@ mod tests {
         // SUB w2, w0, w1
         asm.sub_w_reg(A64Reg::X2, A64Reg::X0, A64Reg::X1);
         assert_eq!(asm.code.len(), 2);
+    }
+
+    #[test]
+    fn test_asm_atomics_and_barriers() {
+        let mut asm = A64Assembler::new();
+        asm.ldxr_w(A64Reg::X0, A64Reg::X1);
+        asm.stxr_w(A64Reg::X2, A64Reg::X0, A64Reg::X1);
+        asm.clrex();
+        asm.dmb_ish();
+        asm.dsb_ish();
+        asm.isb();
+        asm.mrs_tpidr_el0(A64Reg::X0);
+        asm.msr_tpidr_el0(A64Reg::X0);
+
+        assert_eq!(asm.code.len(), 8);
+        assert_eq!(asm.code[0], 0x885F_7C20); // LDXR W0, [X1]
+        assert_eq!(asm.code[1], 0x8802_7C20); // STXR W2, W0, [X1]
+        assert_eq!(asm.code[2], 0xD503_3F5F); // CLREX
+        assert_eq!(asm.code[3], 0xD503_3BBF); // DMB ISH
+        assert_eq!(asm.code[4], 0xD503_39BF); // DSB ISH
+        assert_eq!(asm.code[5], 0xD503_3FDF); // ISB
+        assert_eq!(asm.code[6], 0xD53B_D040); // MRS X0, TPIDR_EL0
+        assert_eq!(asm.code[7], 0xD51B_D040); // MSR TPIDR_EL0, X0
     }
 }

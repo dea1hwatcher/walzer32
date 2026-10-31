@@ -544,6 +544,57 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
+            Op::AtomicLoadEx { rd, rn } => {
+                let addr = GuestAddr::new(cpu.reg(rn));
+                let val = mem.read_u32(addr)?;
+                cpu.exclusive_addr = addr.as_u32();
+                cpu.set_reg(rd, val);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::AtomicStoreEx { rd, rm, rn } => {
+                let addr = cpu.reg(rn);
+                if cpu.exclusive_addr == addr {
+                    let val = cpu.reg(rm);
+                    mem.write_u32(GuestAddr::new(addr), val)?;
+                    cpu.set_reg(rd, 0); // 0 indicates success in ARM STREX
+                    cpu.exclusive_addr = 0xFFFF_FFFF;
+                } else {
+                    cpu.set_reg(rd, 1); // 1 indicates exclusive reservation failed
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::Clrex => {
+                cpu.exclusive_addr = 0xFFFF_FFFF;
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::MemoryBarrier { .. } => {
+                std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::Cp15Move {
+                is_mrc,
+                rd,
+                crn,
+                crm,
+                opc2,
+                ..
+            } => {
+                // CP15 c13, c0, 3: TPIDRURW (User Read/Write Thread ID Register)
+                // CP15 c13, c0, 2: TPIDRURO (User Read-Only Thread ID Register)
+                if crn == 13 && crm == 0 && (opc2 == 3 || opc2 == 2) {
+                    if is_mrc {
+                        cpu.set_reg(rd, cpu.tls_ptr);
+                    } else {
+                        cpu.tls_ptr = cpu.reg(rd);
+                    }
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
             Op::Unknown(raw) => Err(InterpError::UnknownInstruction(raw)),
             _ => {
                 cpu.set_pc(next_pc);

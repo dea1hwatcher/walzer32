@@ -239,6 +239,27 @@ pub enum Op {
         rn: Reg,
         offset: i32,
     },
+    AtomicLoadEx {
+        rd: Reg,
+        rn: Reg,
+    },
+    AtomicStoreEx {
+        rd: Reg,
+        rm: Reg,
+        rn: Reg,
+    },
+    Clrex,
+    MemoryBarrier {
+        is_data: bool,
+    },
+    Cp15Move {
+        is_mrc: bool,
+        rd: Reg,
+        crn: u8,
+        opc1: u8,
+        crm: u8,
+        opc2: u8,
+    },
     Nop,
     Unknown(u32),
 }

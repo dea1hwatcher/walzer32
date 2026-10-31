@@ -1,3 +1,4 @@
+use std::sync::{Arc, RwLock};
 use byteorder::{ByteOrder, LittleEndian};
 use thiserror::Error;
 
@@ -26,6 +27,14 @@ pub trait Memory {
 
     fn read_bytes(&self, addr: GuestAddr, buf: &mut [u8]) -> Result<(), MemoryError>;
     fn write_bytes(&mut self, addr: GuestAddr, buf: &[u8]) -> Result<(), MemoryError>;
+
+    fn atomic_cmpxchg_u32(&mut self, addr: GuestAddr, expected: u32, new: u32) -> Result<u32, MemoryError> {
+        let cur = self.read_u32(addr)?;
+        if cur == expected {
+            self.write_u32(addr, new)?;
+        }
+        Ok(cur)
+    }
 }
 
 /// Simple Flat Memory for testing and reference emulation
@@ -141,5 +150,76 @@ impl Memory for FlatMemory {
         } else {
             Err(MemoryError::Unmapped(addr))
         }
+    }
+}
+
+/// Thread-safe shared guest memory for concurrent DBT execution
+#[derive(Clone)]
+pub struct SharedMemory {
+    inner: Arc<RwLock<FlatMemory>>,
+}
+
+impl SharedMemory {
+    pub fn new(base: GuestAddr, size: usize) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(FlatMemory::new(base, size))),
+        }
+    }
+
+    pub fn from_flat(flat: FlatMemory) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(flat)),
+        }
+    }
+}
+
+impl Memory for SharedMemory {
+    fn read_u8(&self, addr: GuestAddr) -> Result<u8, MemoryError> {
+        self.inner.read().unwrap().read_u8(addr)
+    }
+
+    fn read_u16(&self, addr: GuestAddr) -> Result<u16, MemoryError> {
+        self.inner.read().unwrap().read_u16(addr)
+    }
+
+    fn read_u32(&self, addr: GuestAddr) -> Result<u32, MemoryError> {
+        self.inner.read().unwrap().read_u32(addr)
+    }
+
+    fn read_u64(&self, addr: GuestAddr) -> Result<u64, MemoryError> {
+        self.inner.read().unwrap().read_u64(addr)
+    }
+
+    fn write_u8(&mut self, addr: GuestAddr, val: u8) -> Result<(), MemoryError> {
+        self.inner.write().unwrap().write_u8(addr, val)
+    }
+
+    fn write_u16(&mut self, addr: GuestAddr, val: u16) -> Result<(), MemoryError> {
+        self.inner.write().unwrap().write_u16(addr, val)
+    }
+
+    fn write_u32(&mut self, addr: GuestAddr, val: u32) -> Result<(), MemoryError> {
+        self.inner.write().unwrap().write_u32(addr, val)
+    }
+
+    fn write_u64(&mut self, addr: GuestAddr, val: u64) -> Result<(), MemoryError> {
+        self.inner.write().unwrap().write_u64(addr, val)
+    }
+
+    fn read_bytes(&self, addr: GuestAddr, buf: &mut [u8]) -> Result<(), MemoryError> {
+        self.inner.read().unwrap().read_bytes(addr, buf)
+    }
+
+    fn write_bytes(&mut self, addr: GuestAddr, buf: &[u8]) -> Result<(), MemoryError> {
+        self.inner.write().unwrap().write_bytes(addr, buf)
+    }
+
+    fn atomic_cmpxchg_u32(&mut self, addr: GuestAddr, expected: u32, new: u32) -> Result<u32, MemoryError> {
+        let mut guard = self.inner.write().unwrap();
+        let cur = guard.read_u32(addr)?;
+        if cur == expected {
+            guard.write_u32(addr, new)?;
+        }
+        Ok(cur)
     }
 }

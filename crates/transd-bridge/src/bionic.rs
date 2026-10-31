@@ -20,6 +20,16 @@ pub enum BionicFuncId {
     Strcmp = 11,
     Strcpy = 12,
     Abort = 13,
+
+    // Threading & Mutexes
+    PthreadCreate = 20,
+    PthreadJoin = 21,
+    PthreadSelf = 22,
+    PthreadMutexInit = 23,
+    PthreadMutexLock = 24,
+    PthreadMutexUnlock = 25,
+    PthreadMutexDestroy = 26,
+    PthreadOnce = 27,
 }
 
 impl BionicFuncId {
@@ -38,9 +48,28 @@ impl BionicFuncId {
             11 => Some(Self::Strcmp),
             12 => Some(Self::Strcpy),
             13 => Some(Self::Abort),
+            20 => Some(Self::PthreadCreate),
+            21 => Some(Self::PthreadJoin),
+            22 => Some(Self::PthreadSelf),
+            23 => Some(Self::PthreadMutexInit),
+            24 => Some(Self::PthreadMutexLock),
+            25 => Some(Self::PthreadMutexUnlock),
+            26 => Some(Self::PthreadMutexDestroy),
+            27 => Some(Self::PthreadOnce),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ThreadDescriptor {
+    pub id: u32,
+    pub start_routine: GuestAddr,
+    pub arg: u32,
+    pub stack_top: GuestAddr,
+    pub tls_ptr: GuestAddr,
+    pub retval: Option<u32>,
+    pub joined: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +86,10 @@ pub struct BionicBridge {
     pub heap_limit: GuestAddr,
     symbol_table: HashMap<String, GuestAddr>,
     pub logs: Vec<LogMessage>,
+
+    pub next_thread_id: u32,
+    pub current_thread_id: u32,
+    pub threads: HashMap<u32, ThreadDescriptor>,
 }
 
 impl BionicBridge {
@@ -67,6 +100,9 @@ impl BionicBridge {
             heap_limit: heap_start.add(heap_size),
             symbol_table: HashMap::new(),
             logs: Vec::new(),
+            next_thread_id: 1,
+            current_thread_id: 1,
+            threads: HashMap::new(),
         };
 
         bridge.register_known_symbols();
@@ -88,6 +124,14 @@ impl BionicBridge {
             ("strcmp", BionicFuncId::Strcmp),
             ("strcpy", BionicFuncId::Strcpy),
             ("abort", BionicFuncId::Abort),
+            ("pthread_create", BionicFuncId::PthreadCreate),
+            ("pthread_join", BionicFuncId::PthreadJoin),
+            ("pthread_self", BionicFuncId::PthreadSelf),
+            ("pthread_mutex_init", BionicFuncId::PthreadMutexInit),
+            ("pthread_mutex_lock", BionicFuncId::PthreadMutexLock),
+            ("pthread_mutex_unlock", BionicFuncId::PthreadMutexUnlock),
+            ("pthread_mutex_destroy", BionicFuncId::PthreadMutexDestroy),
+            ("pthread_once", BionicFuncId::PthreadOnce),
         ];
 
         for (name, id) in funcs {
@@ -112,6 +156,14 @@ impl BionicBridge {
             BionicFuncId::Strcmp,
             BionicFuncId::Strcpy,
             BionicFuncId::Abort,
+            BionicFuncId::PthreadCreate,
+            BionicFuncId::PthreadJoin,
+            BionicFuncId::PthreadSelf,
+            BionicFuncId::PthreadMutexInit,
+            BionicFuncId::PthreadMutexLock,
+            BionicFuncId::PthreadMutexUnlock,
+            BionicFuncId::PthreadMutexDestroy,
+            BionicFuncId::PthreadOnce,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -245,6 +297,90 @@ impl BionicBridge {
             }
             BionicFuncId::Abort => {
                 return Err(MemoryError::Unmapped(GuestAddr::new(0xDEAD_DEAD)));
+            }
+            BionicFuncId::PthreadCreate => {
+                let thread_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let _attr = cpu.reg(Reg::R1);
+                let start_routine = GuestAddr::new(cpu.reg(Reg::R2));
+                let arg = cpu.reg(Reg::R3);
+
+                let tid = self.next_thread_id;
+                self.next_thread_id += 1;
+
+                // Allocate thread stack: 256 KB
+                let stack_size = 256 * 1024;
+                let stack_base = self.heap_current;
+                self.heap_current = self.heap_current.add(stack_size);
+                let stack_top = stack_base.add(stack_size - 8);
+
+                // Allocate TLS: 1024 bytes
+                let tls_ptr = self.heap_current;
+                self.heap_current = self.heap_current.add(1024);
+
+                let desc = ThreadDescriptor {
+                    id: tid,
+                    start_routine,
+                    arg,
+                    stack_top,
+                    tls_ptr,
+                    retval: None,
+                    joined: false,
+                };
+                self.threads.insert(tid, desc);
+
+                if thread_ptr.as_u32() != 0 {
+                    mem.write_u32(thread_ptr, tid)?;
+                }
+
+                cpu.set_reg(Reg::R0, 0); // 0 = Success
+            }
+            BionicFuncId::PthreadJoin => {
+                let tid = cpu.reg(Reg::R0);
+                let retval_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+
+                if let Some(desc) = self.threads.get_mut(&tid) {
+                    desc.joined = true;
+                    if retval_ptr.as_u32() != 0 {
+                        mem.write_u32(retval_ptr, desc.retval.unwrap_or(0))?;
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 3); // ESRCH
+                }
+            }
+            BionicFuncId::PthreadSelf => {
+                cpu.set_reg(Reg::R0, self.current_thread_id);
+            }
+            BionicFuncId::PthreadMutexInit => {
+                let mutex_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if mutex_ptr.as_u32() != 0 {
+                    mem.write_u32(mutex_ptr, 0)?; // 0 = Unlocked
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadMutexLock => {
+                let mutex_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if mutex_ptr.as_u32() != 0 {
+                    mem.write_u32(mutex_ptr, 1)?; // 1 = Locked
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadMutexUnlock => {
+                let mutex_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if mutex_ptr.as_u32() != 0 {
+                    mem.write_u32(mutex_ptr, 0)?; // 0 = Unlocked
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadMutexDestroy => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadOnce => {
+                let once_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if once_ptr.as_u32() != 0 {
+                    mem.write_u32(once_ptr, 1)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
             }
             _ => {}
         }
