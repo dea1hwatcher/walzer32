@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/transd-core",
+    "crates/transd-decoder",
+    "crates/transd-ir",
+    "crates/transd-emitter-a64",
+    "crates/transd-interp",
+    "crates/transd-rt",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Transd Contributors"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+bitflags = "2.8"
+thiserror = "2.0"
+byteorder = "1.5"

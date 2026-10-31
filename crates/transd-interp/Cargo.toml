@@ -1,0 +1,10 @@
+[package]
+name = "transd-interp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+transd-core = { path = "../transd-core" }
+transd-decoder = { path = "../transd-decoder" }
+thiserror.workspace = true
