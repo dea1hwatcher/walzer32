@@ -114,6 +114,31 @@ pub enum MsrValue {
     Imm(u32),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VfpSize {
+    F32,
+    F64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VfpOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Abs,
+    Neg,
+    Sqrt,
+    Cmp,
+    CmpZero,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VfpReg {
+    S(u8), // s0..s31
+    D(u8), // d0..d31
+}
+
 /// Decoded ARM Instruction Operation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -188,6 +213,31 @@ pub enum Op {
         spsr: bool,
         mask: u8,
         val: MsrValue,
+    },
+    VfpAlu {
+        op: VfpOp,
+        size: VfpSize,
+        dst: VfpReg,
+        src1: VfpReg,
+        src2: VfpReg,
+    },
+    VfpMov {
+        size: VfpSize,
+        dst: VfpReg,
+        src: VfpReg,
+    },
+    VfpMovCore {
+        to_core: bool,
+        core_reg: Reg,
+        vfp_reg: VfpReg,
+    },
+    VfpMrsFpscr,
+    VfpLoadStore {
+        is_load: bool,
+        size: VfpSize,
+        vfp_reg: VfpReg,
+        rn: Reg,
+        offset: i32,
     },
     Nop,
     Unknown(u32),

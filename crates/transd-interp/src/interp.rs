@@ -371,6 +371,179 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
+            Op::VfpAlu {
+                op,
+                size,
+                dst,
+                src1,
+                src2,
+            } => {
+                match size {
+                    VfpSize::F32 => {
+                        let s1 = match src1 {
+                            VfpReg::S(idx) => cpu.s_reg(idx),
+                            _ => 0.0,
+                        };
+                        let s2 = match src2 {
+                            VfpReg::S(idx) => cpu.s_reg(idx),
+                            _ => 0.0,
+                        };
+
+                        let mut res = 0.0f32;
+                        match op {
+                            VfpOp::Add => res = s1 + s2,
+                            VfpOp::Sub => res = s1 - s2,
+                            VfpOp::Mul => res = s1 * s2,
+                            VfpOp::Div => res = s1 / s2,
+                            VfpOp::Abs => res = s1.abs(),
+                            VfpOp::Neg => res = -s1,
+                            VfpOp::Sqrt => res = s1.sqrt(),
+                            VfpOp::Cmp | VfpOp::CmpZero => {
+                                let comp_val = if op == VfpOp::CmpZero { 0.0 } else { s2 };
+                                let (n, z, c, v) = if s1.is_nan() || comp_val.is_nan() {
+                                    (false, false, true, true)
+                                } else if s1 == comp_val {
+                                    (false, true, true, false)
+                                } else if s1 < comp_val {
+                                    (true, false, false, false)
+                                } else {
+                                    (false, false, true, false)
+                                };
+
+                                let mut flags = 0u32;
+                                if n { flags |= 1 << 31; }
+                                if z { flags |= 1 << 30; }
+                                if c { flags |= 1 << 29; }
+                                if v { flags |= 1 << 28; }
+                                cpu.fpscr = (cpu.fpscr & 0x0FFF_FFFF) | flags;
+                            }
+                        }
+
+                        if !matches!(op, VfpOp::Cmp | VfpOp::CmpZero) {
+                            if let VfpReg::S(dst_idx) = dst {
+                                cpu.set_s_reg(dst_idx, res);
+                            }
+                        }
+                    }
+                    VfpSize::F64 => {
+                        let d1 = match src1 {
+                            VfpReg::D(idx) => cpu.d_reg(idx),
+                            _ => 0.0,
+                        };
+                        let d2 = match src2 {
+                            VfpReg::D(idx) => cpu.d_reg(idx),
+                            _ => 0.0,
+                        };
+
+                        let mut res = 0.0f64;
+                        match op {
+                            VfpOp::Add => res = d1 + d2,
+                            VfpOp::Sub => res = d1 - d2,
+                            VfpOp::Mul => res = d1 * d2,
+                            VfpOp::Div => res = d1 / d2,
+                            VfpOp::Abs => res = d1.abs(),
+                            VfpOp::Neg => res = -d1,
+                            VfpOp::Sqrt => res = d1.sqrt(),
+                            VfpOp::Cmp | VfpOp::CmpZero => {
+                                let comp_val = if op == VfpOp::CmpZero { 0.0 } else { d2 };
+                                let (n, z, c, v) = if d1.is_nan() || comp_val.is_nan() {
+                                    (false, false, true, true)
+                                } else if d1 == comp_val {
+                                    (false, true, true, false)
+                                } else if d1 < comp_val {
+                                    (true, false, false, false)
+                                } else {
+                                    (false, false, true, false)
+                                };
+
+                                let mut flags = 0u32;
+                                if n { flags |= 1 << 31; }
+                                if z { flags |= 1 << 30; }
+                                if c { flags |= 1 << 29; }
+                                if v { flags |= 1 << 28; }
+                                cpu.fpscr = (cpu.fpscr & 0x0FFF_FFFF) | flags;
+                            }
+                        }
+
+                        if !matches!(op, VfpOp::Cmp | VfpOp::CmpZero) {
+                            if let VfpReg::D(dst_idx) = dst {
+                                cpu.set_d_reg(dst_idx, res);
+                            }
+                        }
+                    }
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::VfpMovCore {
+                to_core,
+                core_reg,
+                vfp_reg,
+            } => {
+                if to_core {
+                    let val = match vfp_reg {
+                        VfpReg::S(idx) => cpu.s_reg(idx).to_bits(),
+                        _ => 0,
+                    };
+                    cpu.set_reg(core_reg, val);
+                } else {
+                    let val = cpu.reg(core_reg);
+                    if let VfpReg::S(idx) = vfp_reg {
+                        cpu.set_s_reg(idx, f32::from_bits(val));
+                    }
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::VfpMrsFpscr => {
+                let n = (cpu.fpscr & (1 << 31)) != 0;
+                let z = (cpu.fpscr & (1 << 30)) != 0;
+                let c = (cpu.fpscr & (1 << 29)) != 0;
+                let v = (cpu.fpscr & (1 << 28)) != 0;
+                cpu.cpsr.set(Cpsr::N, n);
+                cpu.cpsr.set(Cpsr::Z, z);
+                cpu.cpsr.set(Cpsr::C, c);
+                cpu.cpsr.set(Cpsr::V, v);
+
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::VfpLoadStore {
+                is_load,
+                size,
+                vfp_reg,
+                rn,
+                offset,
+            } => {
+                let addr = GuestAddr::new(cpu.reg(rn).wrapping_add(offset as u32));
+                if is_load {
+                    match (size, vfp_reg) {
+                        (VfpSize::F32, VfpReg::S(idx)) => {
+                            let bits = mem.read_u32(addr)?;
+                            cpu.set_s_reg(idx, f32::from_bits(bits));
+                        }
+                        (VfpSize::F64, VfpReg::D(idx)) => {
+                            let bits = mem.read_u64(addr)?;
+                            cpu.set_d_reg(idx, f64::from_bits(bits));
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match (size, vfp_reg) {
+                        (VfpSize::F32, VfpReg::S(idx)) => {
+                            let bits = cpu.s_reg(idx).to_bits();
+                            mem.write_u32(addr, bits)?;
+                        }
+                        (VfpSize::F64, VfpReg::D(idx)) => {
+                            let bits = cpu.d_reg(idx).to_bits();
+                            mem.write_u64(addr, bits)?;
+                        }
+                        _ => {}
+                    }
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
             Op::Unknown(raw) => Err(InterpError::UnknownInstruction(raw)),
             _ => {
                 cpu.set_pc(next_pc);
@@ -487,6 +660,42 @@ impl Interpreter {
 mod tests {
     use super::*;
     use transd_core::FlatMemory;
+
+    #[test]
+    fn test_interp_vfp_arithmetic_and_comparison() {
+        let mut cpu = CpuState::new();
+        let mut mem = FlatMemory::new(GuestAddr::new(0x1000), 0x1000);
+
+        // Set s1 = 1.5, s2 = 2.5
+        cpu.set_s_reg(1, 1.5);
+        cpu.set_s_reg(2, 2.5);
+
+        // 0x1000: VADD.F32 s0, s1, s2 -> s0 should be 4.0 (0xEE300A81)
+        // 0x1004: VCMP.F32 s0, s1     -> s0 (4.0) > s1 (1.5) (0xEEB40A60)
+        // 0x1008: VMRS APSR_nzcv, FPSCR -> (0xEEF1FA10)
+        // 0x100C: SVC 0
+        mem.write_u32(GuestAddr::new(0x1000), 0xEE30_0A81).unwrap();
+        mem.write_u32(GuestAddr::new(0x1004), 0xEEB4_0A60).unwrap();
+        mem.write_u32(GuestAddr::new(0x1008), 0xEEF1_FA10).unwrap();
+        mem.write_u32(GuestAddr::new(0x100C), 0xEF00_0000).unwrap();
+
+        cpu.set_pc(GuestAddr::new(0x1000));
+
+        // Step 1: VADD.F32
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.s_reg(0), 4.0);
+
+        // Step 2: VCMP.F32
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+
+        // Step 3: VMRS APSR_nzcv, FPSCR
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+
+        // Condition C=1, Z=0 means greater than!
+        assert!(cpu.cpsr.contains(Cpsr::C));
+        assert!(!cpu.cpsr.contains(Cpsr::Z));
+        assert!(cpu.check_cond(transd_core::Cond::GT));
+    }
 
     #[test]
     fn test_interp_basic_arm_addition() {

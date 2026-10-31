@@ -398,14 +398,134 @@ impl ArmDecoder {
         }
     }
 
-    /// Category 3: Coprocessor & Supervisor Call (SVC)
+    /// Category 3: Coprocessor, VFP, and Supervisor Call (SVC)
     fn decode_cat3(raw: u32) -> Op {
         let is_svc = ((raw >> 24) & 0xF) == 0xF;
         if is_svc {
             let imm24 = raw & 0x00FF_FFFF;
-            Op::Svc { imm: imm24 }
+            return Op::Svc { imm: imm24 };
+        }
+
+        let cp = (raw >> 8) & 0xF;
+        if cp == 10 || cp == 11 {
+            return Self::decode_vfp(raw, cp == 11);
+        }
+
+        Op::Unknown(raw)
+    }
+
+    /// Decodes VFPv3 (F32 and F64) instructions
+    fn decode_vfp(raw: u32, is_double: bool) -> Op {
+        let size = if is_double { VfpSize::F64 } else { VfpSize::F32 };
+
+        // VMRS APSR_nzcv, FPSCR: 0x_EF1_FA10
+        if (raw & 0x0FFF_FFFF) == 0x0EF1_FA10 {
+            return Op::VfpMrsFpscr;
+        }
+
+        // VMOV between core and single-precision float (s0..s31)
+        // VMOV Rd, Sn (0x_E10_0A10) / VMOV Sn, Rd (0x_E00_0A10)
+        if (raw & 0x0FE0_0F10) == 0x0E00_0A10 {
+            let to_core = ((raw >> 20) & 1) != 0;
+            let rt = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let vn = ((raw >> 16) & 0xF) as u8;
+            let n = ((raw >> 7) & 1) as u8;
+            let s_idx = (vn << 1) | n;
+            return Op::VfpMovCore {
+                to_core,
+                core_reg: rt,
+                vfp_reg: VfpReg::S(s_idx),
+            };
+        }
+
+        // VLDR / VSTR: bits [27:25] == 0b110, bit 24 is P, bit 23 is U
+        if ((raw >> 25) & 0x7) == 0b110 {
+            let is_load = ((raw >> 20) & 1) != 0;
+            let u = ((raw >> 23) & 1) != 0;
+            let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+            let imm8 = (raw & 0xFF) as i32 * 4;
+            let offset = if u { imm8 } else { -imm8 };
+
+            let vd = ((raw >> 12) & 0xF) as u8;
+            let d = ((raw >> 22) & 1) as u8;
+
+            let vfp_reg = if is_double {
+                let d_idx = (d << 4) | vd;
+                VfpReg::D(d_idx)
+            } else {
+                let s_idx = (vd << 1) | d;
+                VfpReg::S(s_idx)
+            };
+
+            return Op::VfpLoadStore {
+                is_load,
+                size,
+                vfp_reg,
+                rn,
+                offset,
+            };
+        }
+
+        // VFP Data Processing
+        let vd = ((raw >> 12) & 0xF) as u8;
+        let d = ((raw >> 22) & 1) as u8;
+        let vn = ((raw >> 16) & 0xF) as u8;
+        let n = ((raw >> 7) & 1) as u8;
+        let vm = (raw & 0xF) as u8;
+        let m = ((raw >> 5) & 1) as u8;
+
+        let (dst, src1, src2) = if is_double {
+            (
+                VfpReg::D((d << 4) | vd),
+                VfpReg::D((n << 4) | vn),
+                VfpReg::D((m << 4) | vm),
+            )
         } else {
-            Op::Unknown(raw)
+            (
+                VfpReg::S((vd << 1) | d),
+                VfpReg::S((vn << 1) | n),
+                VfpReg::S((vm << 1) | m),
+            )
+        };
+
+        // VCMP: bits [23:20] == 0b1011, bits [11:9] == 0b101
+        if ((raw >> 20) & 0xF) == 0b1011 && ((raw >> 9) & 0x7) == 0b101 {
+            let with_zero = ((raw >> 16) & 1) != 0;
+            let op = if with_zero {
+                VfpOp::CmpZero
+            } else {
+                VfpOp::Cmp
+            };
+            return Op::VfpAlu {
+                op,
+                size,
+                dst,
+                src1: dst,
+                src2,
+            };
+        }
+
+        // VADD: 0x0E30_0A00 (bits [23:20] == 0b0011, bit 6 == 0)
+        // VSUB: 0x0E30_0A40 (bits [23:20] == 0b0011, bit 6 == 1)
+        // VMUL: 0x0E20_0A00 (bits [23:20] == 0b0010, bit 6 == 0)
+        // VDIV: 0x0E80_0A00 (bits [23:20] == 0b1000, bit 6 == 0)
+        let op_code = (raw >> 20) & 0xF;
+        let bit6 = (raw >> 6) & 1;
+
+        let vfp_op = match (op_code, bit6) {
+            (0b0011, 0) => VfpOp::Add,
+            (0b0011, 1) => VfpOp::Sub,
+            (0b0010, 0) => VfpOp::Mul,
+            (0b1000, 0) => VfpOp::Div,
+            _ => return Op::Unknown(raw),
+        };
+
+        Op::VfpAlu {
+            op: vfp_op,
+            size,
+            dst,
+            src1,
+            src2,
         }
     }
 }
@@ -520,6 +640,26 @@ mod tests {
         // SVC 0 (0xEF000000)
         let inst = ArmDecoder::decode(0xEF00_0000);
         assert_eq!(inst.op, Op::Svc { imm: 0 });
+    }
+
+    #[test]
+    fn test_decode_vfp_ops() {
+        // VMRS APSR_nzcv, FPSCR -> 0xEEF1FA10
+        let inst = ArmDecoder::decode(0xEEF1_FA10);
+        assert_eq!(inst.op, Op::VfpMrsFpscr);
+
+        // VADD.F32 s0, s1, s2 -> 0xEE300A81
+        let inst2 = ArmDecoder::decode(0xEE30_0A81);
+        match inst2.op {
+            Op::VfpAlu { op, size, dst, src1, src2 } => {
+                assert_eq!(op, VfpOp::Add);
+                assert_eq!(size, VfpSize::F32);
+                assert_eq!(dst, VfpReg::S(0));
+                assert_eq!(src1, VfpReg::S(1));
+                assert_eq!(src2, VfpReg::S(2));
+            }
+            _ => panic!("Expected VFP Add"),
+        }
     }
 
     #[test]
