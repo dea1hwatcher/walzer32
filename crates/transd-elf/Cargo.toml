@@ -1,0 +1,10 @@
+[package]
+name = "transd-elf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+transd-core = { path = "../transd-core" }
+byteorder.workspace = true
+thiserror.workspace = true

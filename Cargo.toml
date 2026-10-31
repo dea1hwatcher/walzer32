@@ -7,6 +7,7 @@ members = [
     "crates/transd-emitter-a64",
     "crates/transd-interp",
     "crates/transd-rt",
+    "crates/transd-elf",
 ]
 
 [workspace.package]

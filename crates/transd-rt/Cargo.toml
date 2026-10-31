@@ -10,4 +10,6 @@ transd-decoder = { path = "../transd-decoder" }
 transd-ir = { path = "../transd-ir" }
 transd-emitter-a64 = { path = "../transd-emitter-a64" }
 transd-interp = { path = "../transd-interp" }
+transd-elf = { path = "../transd-elf" }
+byteorder.workspace = true
 thiserror.workspace = true
