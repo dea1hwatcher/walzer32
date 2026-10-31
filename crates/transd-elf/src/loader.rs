@@ -21,6 +21,51 @@ pub trait SymbolResolver {
     fn resolve(&self, name: &str) -> Option<GuestAddr>;
 }
 
+impl<T: SymbolResolver + ?Sized> SymbolResolver for &T {
+    fn resolve(&self, name: &str) -> Option<GuestAddr> {
+        (**self).resolve(name)
+    }
+}
+
+impl<A: SymbolResolver, B: SymbolResolver> SymbolResolver for (A, B) {
+    fn resolve(&self, name: &str) -> Option<GuestAddr> {
+        self.0.resolve(name).or_else(|| self.1.resolve(name))
+    }
+}
+
+/// Composite resolver chaining multiple symbol providers
+pub struct CompositeResolver<'a> {
+    resolvers: Vec<&'a dyn SymbolResolver>,
+}
+
+impl<'a> CompositeResolver<'a> {
+    pub fn new() -> Self {
+        Self {
+            resolvers: Vec::new(),
+        }
+    }
+
+    pub fn with(mut self, resolver: &'a dyn SymbolResolver) -> Self {
+        self.resolvers.push(resolver);
+        self
+    }
+
+    pub fn add(&mut self, resolver: &'a dyn SymbolResolver) {
+        self.resolvers.push(resolver);
+    }
+}
+
+impl<'a> SymbolResolver for CompositeResolver<'a> {
+    fn resolve(&self, name: &str) -> Option<GuestAddr> {
+        for r in &self.resolvers {
+            if let Some(addr) = r.resolve(name) {
+                return Some(addr);
+            }
+        }
+        None
+    }
+}
+
 /// A dummy resolver that returns None for all symbols
 pub struct NullResolver;
 impl SymbolResolver for NullResolver {

@@ -1,8 +1,8 @@
 use transd_bridge::{
-    invoke_guest, invoke_jni_onload, BionicBridge, JniBridge,
+    invoke_guest_full, invoke_jni_onload, BionicBridge, GlesBridge, JniBridge,
 };
 use transd_core::{FlatMemory, GuestAddr};
-use transd_elf::ElfLoader;
+use transd_elf::{CompositeResolver, ElfLoader};
 use transd_rt::DbtEngine;
 
 pub fn execute_so(
@@ -18,7 +18,7 @@ pub fn execute_so(
     let memory_size = 128 * 1024 * 1024; // 128 MB
     let mut mem = FlatMemory::new(memory_base, memory_size);
 
-    // 2. Initialize Bionic C bridge and JNI bridge
+    // 2. Initialize Bionic C bridge, JNI bridge, and GLES passthrough bridge
     let bionic_base = GuestAddr::new(0x2700_0000);
     let heap_base = GuestAddr::new(0x2710_0000);
     let mut bionic = BionicBridge::new(bionic_base, heap_base, 8 * 1024 * 1024);
@@ -28,9 +28,16 @@ pub fn execute_so(
     let mut jni = JniBridge::new(jni_base);
     jni.install(&mut mem)?;
 
+    let gles_base = GuestAddr::new(0x2708_0000);
+    let gles_heap = GuestAddr::new(0x2709_0000);
+    let mut gles = GlesBridge::new(gles_base, gles_heap);
+    gles.install_stubs(&mut mem)?;
+
+    let resolver = CompositeResolver::new().with(&bionic).with(&gles);
+
     // 3. Load 32-bit ELF library at load_base
     let load_base = GuestAddr::new(0x2000_0000);
-    let lib = ElfLoader::load(data, load_base, &mut mem, &bionic)?;
+    let lib = ElfLoader::load(data, load_base, &mut mem, &resolver)?;
 
     println!("Loaded library: {:?}", lib.soname.as_deref().unwrap_or("unnamed"));
     println!("Load Base:      {}", lib.load_base);
@@ -54,7 +61,7 @@ pub fn execute_so(
         println!("\n[Executing {} Constructors]", constructors.len());
         for (idx, &ctor) in constructors.iter().enumerate() {
             println!("  [{}] Invoking ctor at {}", idx, ctor);
-            invoke_guest(&mut engine, &mut bionic, &mut jni, ctor, &[])?;
+            invoke_guest_full(&mut engine, &mut bionic, &mut jni, Some(&mut gles), ctor, &[])?;
         }
     }
 
@@ -94,7 +101,7 @@ pub fn execute_so(
     let result = if func_name == "JNI_OnLoad" {
         invoke_jni_onload(&mut engine, &mut bionic, &mut jni, func_addr)?
     } else {
-        invoke_guest(&mut engine, &mut bionic, &mut jni, func_addr, args)?
+        invoke_guest_full(&mut engine, &mut bionic, &mut jni, Some(&mut gles), func_addr, args)?
     };
 
     let elapsed = start_time.elapsed();
@@ -109,6 +116,15 @@ pub fn execute_so(
         engine.cache.hits,
         engine.cache.misses
     );
+
+    if !gles.draw_calls.is_empty() || gles.swap_count > 0 {
+        println!("\n[Graphics (EGL/GLES) Passthrough Stats]");
+        println!("  Total draw calls: {}", gles.draw_calls.len());
+        println!("  Buffer swaps:     {}", gles.swap_count);
+        println!("  Active program:   {}", gles.active_program);
+        println!("  Viewport:         {:?}", gles.viewport);
+        println!("  Clear color:      {:?}", gles.clear_color);
+    }
 
     if !bionic.logs.is_empty() {
         println!("\n[Captured Android Logs (Logcat)]");

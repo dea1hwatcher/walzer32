@@ -1,6 +1,7 @@
 use transd_core::{GuestAddr, Memory, Reg};
 use transd_rt::{DbtEngine, EngineError};
 use crate::bionic::BionicBridge;
+use crate::gles::GlesBridge;
 use crate::jni::JniBridge;
 
 pub const SENTINEL_RETURN_ADDR: u32 = 0xDEAD_BEE0;
@@ -10,6 +11,18 @@ pub fn invoke_guest<M: Memory>(
     engine: &mut DbtEngine<M>,
     bionic: &mut BionicBridge,
     jni: &mut JniBridge,
+    func_addr: GuestAddr,
+    args: &[u32],
+) -> Result<u32, EngineError> {
+    invoke_guest_full(engine, bionic, jni, None, func_addr, args)
+}
+
+/// Invokes a 32-bit guest function with optional GLES passthrough support
+pub fn invoke_guest_full<M: Memory>(
+    engine: &mut DbtEngine<M>,
+    bionic: &mut BionicBridge,
+    jni: &mut JniBridge,
+    mut gles: Option<&mut GlesBridge>,
     func_addr: GuestAddr,
     args: &[u32],
 ) -> Result<u32, EngineError> {
@@ -49,18 +62,17 @@ pub fn invoke_guest<M: Memory>(
     engine.cpu.set_thumb(is_thumb);
     engine.cpu.set_pc(func_addr.instruction_addr());
 
-    // 5. Execution loop: handle Bionic & JNI SVC calls until returning to SENTINEL_RETURN_ADDR
+    // 5. Execution loop: handle Bionic, JNI & GLES SVC calls until returning to SENTINEL_RETURN_ADDR
     let mut steps = 0;
     while engine.cpu.pc() != GuestAddr::new(SENTINEL_RETURN_ADDR) {
         let pc = engine.cpu.pc();
         let thumb = engine.cpu.is_thumb();
 
-        // Check if current instruction is an SVC (Bionic or JNI stub)
+        // Check if current instruction is an SVC (Bionic, JNI, or GLES stub)
         if let Ok((inst, _)) = transd_decoder::decode_next(&engine.mem, pc, thumb) {
             if let transd_decoder::Op::Svc { imm } = inst.op {
                 // Try Bionic SVC
                 if bionic.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                    // Next instruction is BX LR
                     let next_pc = pc.add(4);
                     engine.cpu.set_pc(next_pc);
                     continue;
@@ -70,6 +82,14 @@ pub fn invoke_guest<M: Memory>(
                     let next_pc = pc.add(4);
                     engine.cpu.set_pc(next_pc);
                     continue;
+                }
+                // Try GLES SVC
+                if let Some(ref mut g) = gles {
+                    if g.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+                        let next_pc = pc.add(4);
+                        engine.cpu.set_pc(next_pc);
+                        continue;
+                    }
                 }
             }
         }
