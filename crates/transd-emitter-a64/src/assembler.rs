@@ -163,6 +163,17 @@ impl A64Assembler {
         self.subs_w_reg(A64Reg::SP, rn, rm);
     }
 
+    /// SUBS Xd, Xn, Xm (sets flags, 64-bit)
+    pub fn subs_x_reg(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0xEB00_0000 | (rm.index() << 16) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// CMP Xn, Xm -> SUBS XZR, Xn, Xm (64-bit)
+    pub fn cmp_x_reg(&mut self, rn: A64Reg, rm: A64Reg) {
+        self.subs_x_reg(A64Reg::SP, rn, rm);
+    }
+
     /// AND Wd, Wn, Wm
     pub fn and_w_reg(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg) {
         let inst = 0x0A00_0000 | (rm.index() << 16) | (rn.index() << 5) | rd.index();
@@ -202,6 +213,13 @@ impl A64Assembler {
     pub fn csel_w(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg, cond: Cond) {
         let cond_field = (cond as u32) & 0xF;
         let inst = 0x1A80_0000 | (rm.index() << 16) | (cond_field << 12) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// CSEL Xd, Xn, Xm, cond (64-bit)
+    pub fn csel_x(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg, cond: Cond) {
+        let cond_field = (cond as u32) & 0xF;
+        let inst = 0x9A80_0000 | (rm.index() << 16) | (cond_field << 12) | (rn.index() << 5) | rd.index();
         self.emit(inst);
     }
 
@@ -2141,5 +2159,16 @@ mod tests {
         asm.cbnz_w(A64Reg::X1, -4);
         assert_eq!(asm.code[0], 0x3400_0100);
         assert_eq!(asm.code[1], 0x35FF_FF81);
+    }
+
+    #[test]
+    fn test_asm_csel_and_cmp_x() {
+        let mut asm = A64Assembler::new();
+        asm.cmp_x_reg(A64Reg::X14, A64Reg::X12);
+        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X14, Cond::GT);
+        // cmp_x_reg: subs xzr, x14, x12 -> 0xEB0C_01DF
+        assert_eq!(asm.code[0], 0xEB0C_01DF);
+        // csel_x: csel x15, x12, x14, gt -> 0x9A8E_C18F
+        assert_eq!(asm.code[1], 0x9A8E_C18F);
     }
 }

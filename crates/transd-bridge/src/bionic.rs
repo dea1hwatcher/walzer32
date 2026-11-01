@@ -43,6 +43,42 @@ pub enum BionicFuncId {
 
     StackChkFail = 130,
 
+    // Thread-Local Storage Keys (pthread_key_t)
+    PthreadKeyCreate = 140,
+    PthreadKeyDelete = 141,
+    PthreadSetspecific = 142,
+    PthreadGetspecific = 143,
+
+    // Condition Variables (pthread_cond_t)
+    PthreadCondInit = 150,
+    PthreadCondWait = 151,
+    PthreadCondTimedwait = 152,
+    PthreadCondSignal = 153,
+    PthreadCondBroadcast = 154,
+    PthreadCondDestroy = 155,
+
+    // Read-Write Locks (pthread_rwlock_t)
+    PthreadRwlockInit = 160,
+    PthreadRwlockRdlock = 161,
+    PthreadRwlockWrlock = 162,
+    PthreadRwlockUnlock = 163,
+    PthreadRwlockDestroy = 164,
+
+    // Process & Thread Identity
+    Getpid = 170,
+    Gettid = 171,
+    Getuid = 172,
+    Geteuid = 173,
+    Getgid = 174,
+    Getegid = 175,
+
+    // Environment & Scheduling
+    Getenv = 180,
+    Setenv = 181,
+    SchedYield = 182,
+    Nanosleep = 183,
+    Usleep = 184,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -180,6 +216,32 @@ impl BionicFuncId {
             120 => Some(Self::CxaAtexit),
             121 => Some(Self::CxaFinalize),
             130 => Some(Self::StackChkFail),
+            140 => Some(Self::PthreadKeyCreate),
+            141 => Some(Self::PthreadKeyDelete),
+            142 => Some(Self::PthreadSetspecific),
+            143 => Some(Self::PthreadGetspecific),
+            150 => Some(Self::PthreadCondInit),
+            151 => Some(Self::PthreadCondWait),
+            152 => Some(Self::PthreadCondTimedwait),
+            153 => Some(Self::PthreadCondSignal),
+            154 => Some(Self::PthreadCondBroadcast),
+            155 => Some(Self::PthreadCondDestroy),
+            160 => Some(Self::PthreadRwlockInit),
+            161 => Some(Self::PthreadRwlockRdlock),
+            162 => Some(Self::PthreadRwlockWrlock),
+            163 => Some(Self::PthreadRwlockUnlock),
+            164 => Some(Self::PthreadRwlockDestroy),
+            170 => Some(Self::Getpid),
+            171 => Some(Self::Gettid),
+            172 => Some(Self::Getuid),
+            173 => Some(Self::Geteuid),
+            174 => Some(Self::Getgid),
+            175 => Some(Self::Getegid),
+            180 => Some(Self::Getenv),
+            181 => Some(Self::Setenv),
+            182 => Some(Self::SchedYield),
+            183 => Some(Self::Nanosleep),
+            184 => Some(Self::Usleep),
             _ => None,
         }
     }
@@ -223,6 +285,12 @@ pub struct BionicBridge {
     pub stack_chk_guard_addr: GuestAddr,
     pub stack_chk_failed: bool,
     pub atexit_handlers: Vec<(GuestAddr, u32, GuestAddr)>,
+    pub pthread_keys: HashMap<u32, Option<GuestAddr>>,
+    pub pthread_specific: HashMap<(u32, u32), u32>,
+    pub next_key_id: u32,
+    pub env_vars: HashMap<String, String>,
+    pub env_addrs: HashMap<String, GuestAddr>,
+    pub pid: u32,
 }
 
 impl BionicBridge {
@@ -244,6 +312,20 @@ impl BionicBridge {
             stack_chk_guard_addr: stub_base.add(0x700),
             stack_chk_failed: false,
             atexit_handlers: Vec::new(),
+            pthread_keys: HashMap::new(),
+            pthread_specific: HashMap::new(),
+            next_key_id: 1,
+            env_vars: {
+                let mut env = HashMap::new();
+                env.insert("ANDROID_DATA".to_string(), "/data".to_string());
+                env.insert("ANDROID_ROOT".to_string(), "/system".to_string());
+                env.insert("PATH".to_string(), "/sbin:/system/sbin:/system/bin:/system/xbin".to_string());
+                env.insert("TMPDIR".to_string(), "/data/local/tmp".to_string());
+                env.insert("LD_LIBRARY_PATH".to_string(), "/system/lib:/vendor/lib".to_string());
+                env
+            },
+            env_addrs: HashMap::new(),
+            pid: 1000,
         };
 
         bridge.register_known_symbols();
@@ -348,6 +430,42 @@ impl BionicBridge {
             ("__cxa_atexit", BionicFuncId::CxaAtexit),
             ("__cxa_finalize", BionicFuncId::CxaFinalize),
             ("__stack_chk_fail", BionicFuncId::StackChkFail),
+
+            // Thread-Local Storage Keys
+            ("pthread_key_create", BionicFuncId::PthreadKeyCreate),
+            ("pthread_key_delete", BionicFuncId::PthreadKeyDelete),
+            ("pthread_setspecific", BionicFuncId::PthreadSetspecific),
+            ("pthread_getspecific", BionicFuncId::PthreadGetspecific),
+
+            // Condition Variables
+            ("pthread_cond_init", BionicFuncId::PthreadCondInit),
+            ("pthread_cond_wait", BionicFuncId::PthreadCondWait),
+            ("pthread_cond_timedwait", BionicFuncId::PthreadCondTimedwait),
+            ("pthread_cond_signal", BionicFuncId::PthreadCondSignal),
+            ("pthread_cond_broadcast", BionicFuncId::PthreadCondBroadcast),
+            ("pthread_cond_destroy", BionicFuncId::PthreadCondDestroy),
+
+            // Read-Write Locks
+            ("pthread_rwlock_init", BionicFuncId::PthreadRwlockInit),
+            ("pthread_rwlock_rdlock", BionicFuncId::PthreadRwlockRdlock),
+            ("pthread_rwlock_wrlock", BionicFuncId::PthreadRwlockWrlock),
+            ("pthread_rwlock_unlock", BionicFuncId::PthreadRwlockUnlock),
+            ("pthread_rwlock_destroy", BionicFuncId::PthreadRwlockDestroy),
+
+            // Process & Thread Identity
+            ("getpid", BionicFuncId::Getpid),
+            ("gettid", BionicFuncId::Gettid),
+            ("getuid", BionicFuncId::Getuid),
+            ("geteuid", BionicFuncId::Geteuid),
+            ("getgid", BionicFuncId::Getgid),
+            ("getegid", BionicFuncId::Getegid),
+
+            // Environment & Scheduling
+            ("getenv", BionicFuncId::Getenv),
+            ("setenv", BionicFuncId::Setenv),
+            ("sched_yield", BionicFuncId::SchedYield),
+            ("nanosleep", BionicFuncId::Nanosleep),
+            ("usleep", BionicFuncId::Usleep),
         ];
 
         for (name, id) in funcs {
@@ -437,6 +555,32 @@ impl BionicBridge {
             BionicFuncId::CxaAtexit,
             BionicFuncId::CxaFinalize,
             BionicFuncId::StackChkFail,
+            BionicFuncId::PthreadKeyCreate,
+            BionicFuncId::PthreadKeyDelete,
+            BionicFuncId::PthreadSetspecific,
+            BionicFuncId::PthreadGetspecific,
+            BionicFuncId::PthreadCondInit,
+            BionicFuncId::PthreadCondWait,
+            BionicFuncId::PthreadCondTimedwait,
+            BionicFuncId::PthreadCondSignal,
+            BionicFuncId::PthreadCondBroadcast,
+            BionicFuncId::PthreadCondDestroy,
+            BionicFuncId::PthreadRwlockInit,
+            BionicFuncId::PthreadRwlockRdlock,
+            BionicFuncId::PthreadRwlockWrlock,
+            BionicFuncId::PthreadRwlockUnlock,
+            BionicFuncId::PthreadRwlockDestroy,
+            BionicFuncId::Getpid,
+            BionicFuncId::Gettid,
+            BionicFuncId::Getuid,
+            BionicFuncId::Geteuid,
+            BionicFuncId::Getgid,
+            BionicFuncId::Getegid,
+            BionicFuncId::Getenv,
+            BionicFuncId::Setenv,
+            BionicFuncId::SchedYield,
+            BionicFuncId::Nanosleep,
+            BionicFuncId::Usleep,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -1326,6 +1470,145 @@ impl BionicBridge {
                     text: "*** stack smashing detected ***: terminated".to_string(),
                 });
                 return Err(MemoryError::Unmapped(GuestAddr::new(0xDEAD_CAFE)));
+            }
+            BionicFuncId::PthreadKeyCreate => {
+                let key_out = GuestAddr::new(cpu.reg(Reg::R0));
+                let dtor = cpu.reg(Reg::R1);
+                let dtor_opt = if dtor != 0 { Some(GuestAddr::new(dtor)) } else { None };
+                let key = self.next_key_id;
+                self.next_key_id += 1;
+                self.pthread_keys.insert(key, dtor_opt);
+                if key_out.as_u32() != 0 {
+                    mem.write_u32(key_out, key)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadKeyDelete => {
+                let key = cpu.reg(Reg::R0);
+                self.pthread_keys.remove(&key);
+                self.pthread_specific.retain(|&(_, k), _| k != key);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadSetspecific => {
+                let key = cpu.reg(Reg::R0);
+                let val = cpu.reg(Reg::R1);
+                if !self.pthread_keys.contains_key(&key) {
+                    cpu.set_reg(Reg::R0, 22); // EINVAL
+                } else {
+                    self.pthread_specific.insert((self.current_thread_id, key), val);
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::PthreadGetspecific => {
+                let key = cpu.reg(Reg::R0);
+                let val = self.pthread_specific.get(&(self.current_thread_id, key)).copied().unwrap_or(0);
+                cpu.set_reg(Reg::R0, val);
+            }
+            BionicFuncId::PthreadCondInit => {
+                let cond_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if cond_ptr.as_u32() != 0 {
+                    mem.write_u32(cond_ptr, 0)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadCondWait | BionicFuncId::PthreadCondTimedwait => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadCondSignal | BionicFuncId::PthreadCondBroadcast | BionicFuncId::PthreadCondDestroy => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadRwlockInit => {
+                let rw_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if rw_ptr.as_u32() != 0 {
+                    mem.write_u32(rw_ptr, 0)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadRwlockRdlock | BionicFuncId::PthreadRwlockWrlock
+            | BionicFuncId::PthreadRwlockUnlock | BionicFuncId::PthreadRwlockDestroy => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Getpid => {
+                cpu.set_reg(Reg::R0, self.pid);
+            }
+            BionicFuncId::Gettid => {
+                cpu.set_reg(Reg::R0, self.current_thread_id);
+            }
+            BionicFuncId::Getuid | BionicFuncId::Geteuid | BionicFuncId::Getgid | BionicFuncId::Getegid => {
+                cpu.set_reg(Reg::R0, 10000); // AID_APP_START
+            }
+            BionicFuncId::Getenv => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if name_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    if let Some(val) = self.env_vars.get(&name).cloned() {
+                        let addr = if let Some(&cached_addr) = self.env_addrs.get(&name) {
+                            cached_addr
+                        } else {
+                            let alloc_addr = self.heap_current;
+                            let val_bytes = val.as_bytes();
+                            let alloc_len = val_bytes.len() + 1;
+                            let aligned_len = (alloc_len + 7) & !7;
+                            self.heap_current = self.heap_current.add(aligned_len as u32);
+                            mem.write_bytes(alloc_addr, val_bytes)?;
+                            mem.write_u8(alloc_addr.add(val_bytes.len() as u32), 0)?;
+                            self.env_addrs.insert(name, alloc_addr);
+                            alloc_addr
+                        };
+                        cpu.set_reg(Reg::R0, addr.as_u32());
+                    } else {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                }
+            }
+            BionicFuncId::Setenv => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let overwrite = cpu.reg(Reg::R2);
+                if name_ptr.as_u32() == 0 || val_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF); // -1
+                } else {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    let val = Self::read_c_string(mem, val_ptr)?;
+
+                    if overwrite != 0 || !self.env_vars.contains_key(&name) {
+                        self.env_vars.insert(name.clone(), val);
+                        self.env_addrs.remove(&name);
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::SchedYield => {
+                std::thread::yield_now();
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Nanosleep => {
+                let req_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let rem_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if req_ptr.as_u32() != 0 {
+                    let tv_sec = mem.read_u32(req_ptr)?;
+                    let tv_nsec = mem.read_u32(req_ptr.add(4))?;
+                    let total_nanos = (tv_sec as u64) * 1_000_000_000 + (tv_nsec as u64);
+                    let sleep_nanos = total_nanos.min(10_000_000);
+                    if sleep_nanos > 0 {
+                        std::thread::sleep(std::time::Duration::from_nanos(sleep_nanos));
+                    }
+                }
+                if rem_ptr.as_u32() != 0 {
+                    mem.write_u32(rem_ptr, 0)?;
+                    mem.write_u32(rem_ptr.add(4), 0)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Usleep => {
+                let usec = cpu.reg(Reg::R0) as u64;
+                let sleep_micros = usec.min(10_000);
+                if sleep_micros > 0 {
+                    std::thread::sleep(std::time::Duration::from_micros(sleep_micros));
+                }
+                cpu.set_reg(Reg::R0, 0);
             }
             _ => {}
         }

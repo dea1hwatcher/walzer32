@@ -3,7 +3,7 @@ use transd_core::{
     OFFSET_VFP,
 };
 use transd_decoder::{
-    AddrMode, AddrOffset, AluOp, ArmInst, BitFieldOp, BlockAddrMode, ByteRevOp, DspMulOp, ExtendOp, HighMulOp, MemSize, MulOp,
+    AddrMode, AddrOffset, AluOp, ArmInst, BitFieldOp, BitSatOp, BlockAddrMode, ByteRevOp, CoreSatOp, DspMulOp, ExtendOp, HighMulOp, MemSize, MulOp,
     NeonCvtOp, NeonOp, NeonPermuteOp, NeonRevOp, NeonSize, NeonWriteback, Op, Operand2, PkhOp, ShiftAmount,
     ShiftType, VfpCvtOp, VfpOp, VfpReg, VfpSize,
 };
@@ -679,6 +679,324 @@ impl A64Compiler {
                     let rd_offset = (rd.index() * 4) as u32;
                     asm.str_w_imm(dst_reg, A64Reg::X0, rd_offset);
                 }
+            }
+            Op::CoreSat { op, rd, rm, rn } => {
+                let rm_reg = load_guest_reg(asm, A64Reg::X9, *rm);
+                let rn_reg = load_guest_reg(asm, A64Reg::X10, *rn);
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+
+                match op {
+                    CoreSatOp::Qadd => {
+                        asm.sxtw_x(A64Reg::X12, rm_reg);
+                        asm.sxtw_x(A64Reg::X13, rn_reg);
+                        asm.add_x_reg(A64Reg::X14, A64Reg::X12, A64Reg::X13);
+
+                        asm.mov_imm64(A64Reg::X12, 0x7FFF_FFFF);
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X12);
+                        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X14, Cond::GT);
+
+                        asm.mov_imm64(A64Reg::X12, 0xFFFF_FFFF_8000_0000);
+                        asm.cmp_x_reg(A64Reg::X15, A64Reg::X12);
+                        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X15, Cond::LT);
+
+                        asm.mov_w_reg(dst_reg, A64Reg::X15);
+
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X15);
+                        let skip_b = asm.cursor();
+                        asm.b_cond(Cond::EQ, 0);
+                        asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        asm.mov_imm32(A64Reg::X13, 0x0800_0000);
+                        asm.orr_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X13);
+                        asm.str_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        let end_idx = asm.cursor();
+                        let offset = (end_idx as i32) - (skip_b as i32);
+                        asm.patch(skip_b, 0x5400_0000 | (((offset as u32) & 0x7FFFF) << 5) | (Cond::EQ as u32 & 0xF));
+                    }
+                    CoreSatOp::Qsub => {
+                        asm.sxtw_x(A64Reg::X12, rm_reg);
+                        asm.sxtw_x(A64Reg::X13, rn_reg);
+                        asm.sub_x_reg(A64Reg::X14, A64Reg::X12, A64Reg::X13);
+
+                        asm.mov_imm64(A64Reg::X12, 0x7FFF_FFFF);
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X12);
+                        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X14, Cond::GT);
+
+                        asm.mov_imm64(A64Reg::X12, 0xFFFF_FFFF_8000_0000);
+                        asm.cmp_x_reg(A64Reg::X15, A64Reg::X12);
+                        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X15, Cond::LT);
+
+                        asm.mov_w_reg(dst_reg, A64Reg::X15);
+
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X15);
+                        let skip_b = asm.cursor();
+                        asm.b_cond(Cond::EQ, 0);
+                        asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        asm.mov_imm32(A64Reg::X13, 0x0800_0000);
+                        asm.orr_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X13);
+                        asm.str_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        let end_idx = asm.cursor();
+                        let offset = (end_idx as i32) - (skip_b as i32);
+                        asm.patch(skip_b, 0x5400_0000 | (((offset as u32) & 0x7FFFF) << 5) | (Cond::EQ as u32 & 0xF));
+                    }
+                    CoreSatOp::Qdadd => {
+                        asm.sxtw_x(A64Reg::X13, rn_reg);
+                        asm.lsl_x_imm(A64Reg::X14, A64Reg::X13, 1);
+
+                        asm.mov_imm64(A64Reg::X12, 0x7FFF_FFFF);
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X12);
+                        asm.csel_x(A64Reg::X10, A64Reg::X12, A64Reg::X14, Cond::GT);
+
+                        asm.mov_imm64(A64Reg::X12, 0xFFFF_FFFF_8000_0000);
+                        asm.cmp_x_reg(A64Reg::X10, A64Reg::X12);
+                        asm.csel_x(A64Reg::X10, A64Reg::X12, A64Reg::X10, Cond::LT);
+
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X10);
+                        let skip_b1 = asm.cursor();
+                        asm.b_cond(Cond::EQ, 0);
+                        asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        asm.mov_imm32(A64Reg::X13, 0x0800_0000);
+                        asm.orr_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X13);
+                        asm.str_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        let end_idx1 = asm.cursor();
+                        let offset1 = (end_idx1 as i32) - (skip_b1 as i32);
+                        asm.patch(skip_b1, 0x5400_0000 | (((offset1 as u32) & 0x7FFFF) << 5) | (Cond::EQ as u32 & 0xF));
+
+                        asm.sxtw_x(A64Reg::X12, rm_reg);
+                        asm.add_x_reg(A64Reg::X14, A64Reg::X12, A64Reg::X10);
+
+                        asm.mov_imm64(A64Reg::X12, 0x7FFF_FFFF);
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X12);
+                        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X14, Cond::GT);
+
+                        asm.mov_imm64(A64Reg::X12, 0xFFFF_FFFF_8000_0000);
+                        asm.cmp_x_reg(A64Reg::X15, A64Reg::X12);
+                        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X15, Cond::LT);
+
+                        asm.mov_w_reg(dst_reg, A64Reg::X15);
+
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X15);
+                        let skip_b2 = asm.cursor();
+                        asm.b_cond(Cond::EQ, 0);
+                        asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        asm.mov_imm32(A64Reg::X13, 0x0800_0000);
+                        asm.orr_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X13);
+                        asm.str_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        let end_idx2 = asm.cursor();
+                        let offset2 = (end_idx2 as i32) - (skip_b2 as i32);
+                        asm.patch(skip_b2, 0x5400_0000 | (((offset2 as u32) & 0x7FFFF) << 5) | (Cond::EQ as u32 & 0xF));
+                    }
+                    CoreSatOp::Qdsub => {
+                        asm.sxtw_x(A64Reg::X13, rn_reg);
+                        asm.lsl_x_imm(A64Reg::X14, A64Reg::X13, 1);
+
+                        asm.mov_imm64(A64Reg::X12, 0x7FFF_FFFF);
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X12);
+                        asm.csel_x(A64Reg::X10, A64Reg::X12, A64Reg::X14, Cond::GT);
+
+                        asm.mov_imm64(A64Reg::X12, 0xFFFF_FFFF_8000_0000);
+                        asm.cmp_x_reg(A64Reg::X10, A64Reg::X12);
+                        asm.csel_x(A64Reg::X10, A64Reg::X12, A64Reg::X10, Cond::LT);
+
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X10);
+                        let skip_b1 = asm.cursor();
+                        asm.b_cond(Cond::EQ, 0);
+                        asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        asm.mov_imm32(A64Reg::X13, 0x0800_0000);
+                        asm.orr_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X13);
+                        asm.str_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        let end_idx1 = asm.cursor();
+                        let offset1 = (end_idx1 as i32) - (skip_b1 as i32);
+                        asm.patch(skip_b1, 0x5400_0000 | (((offset1 as u32) & 0x7FFFF) << 5) | (Cond::EQ as u32 & 0xF));
+
+                        asm.sxtw_x(A64Reg::X12, rm_reg);
+                        asm.sub_x_reg(A64Reg::X14, A64Reg::X12, A64Reg::X10);
+
+                        asm.mov_imm64(A64Reg::X12, 0x7FFF_FFFF);
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X12);
+                        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X14, Cond::GT);
+
+                        asm.mov_imm64(A64Reg::X12, 0xFFFF_FFFF_8000_0000);
+                        asm.cmp_x_reg(A64Reg::X15, A64Reg::X12);
+                        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X15, Cond::LT);
+
+                        asm.mov_w_reg(dst_reg, A64Reg::X15);
+
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X15);
+                        let skip_b2 = asm.cursor();
+                        asm.b_cond(Cond::EQ, 0);
+                        asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        asm.mov_imm32(A64Reg::X13, 0x0800_0000);
+                        asm.orr_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X13);
+                        asm.str_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        let end_idx2 = asm.cursor();
+                        let offset2 = (end_idx2 as i32) - (skip_b2 as i32);
+                        asm.patch(skip_b2, 0x5400_0000 | (((offset2 as u32) & 0x7FFFF) << 5) | (Cond::EQ as u32 & 0xF));
+                    }
+                }
+                store_guest_reg(asm, dst_reg, *rd);
+            }
+            Op::BitSat { op, rd, rn } => {
+                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+
+                match op {
+                    BitSatOp::Ssat { sat_imm, shift_type, shift_imm } => {
+                        match shift_type {
+                            ShiftType::Lsl => asm.lsl_w_imm(A64Reg::X12, rn_reg, *shift_imm),
+                            ShiftType::Asr => asm.asr_w_imm(A64Reg::X12, rn_reg, *shift_imm),
+                            _ => asm.mov_w_reg(A64Reg::X12, rn_reg),
+                        }
+                        asm.sxtw_x(A64Reg::X14, A64Reg::X12);
+
+                        let max_val = ((1i64 << (sat_imm - 1)) - 1) as u64;
+                        let min_val = (-(1i64 << (sat_imm - 1))) as u64;
+
+                        asm.mov_imm64(A64Reg::X12, max_val);
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X12);
+                        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X14, Cond::GT);
+
+                        asm.mov_imm64(A64Reg::X12, min_val);
+                        asm.cmp_x_reg(A64Reg::X15, A64Reg::X12);
+                        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X15, Cond::LT);
+
+                        asm.mov_w_reg(dst_reg, A64Reg::X15);
+
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X15);
+                        let skip_b = asm.cursor();
+                        asm.b_cond(Cond::EQ, 0);
+                        asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        asm.mov_imm32(A64Reg::X13, 0x0800_0000);
+                        asm.orr_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X13);
+                        asm.str_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        let end_idx = asm.cursor();
+                        let offset = (end_idx as i32) - (skip_b as i32);
+                        asm.patch(skip_b, 0x5400_0000 | (((offset as u32) & 0x7FFFF) << 5) | (Cond::EQ as u32 & 0xF));
+                    }
+                    BitSatOp::Usat { sat_imm, shift_type, shift_imm } => {
+                        match shift_type {
+                            ShiftType::Lsl => asm.lsl_w_imm(A64Reg::X12, rn_reg, *shift_imm),
+                            ShiftType::Asr => asm.asr_w_imm(A64Reg::X12, rn_reg, *shift_imm),
+                            _ => asm.mov_w_reg(A64Reg::X12, rn_reg),
+                        }
+                        asm.sxtw_x(A64Reg::X14, A64Reg::X12);
+
+                        let max_val = if *sat_imm >= 32 { 0xFFFF_FFFFu64 } else { (1u64 << sat_imm) - 1 };
+                        asm.mov_imm64(A64Reg::X12, max_val);
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X12);
+                        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X14, Cond::GT);
+
+                        asm.mov_imm64(A64Reg::X12, 0);
+                        asm.cmp_x_reg(A64Reg::X15, A64Reg::X12);
+                        asm.csel_x(A64Reg::X15, A64Reg::X12, A64Reg::X15, Cond::LT);
+
+                        asm.mov_w_reg(dst_reg, A64Reg::X15);
+
+                        asm.cmp_x_reg(A64Reg::X14, A64Reg::X15);
+                        let skip_b = asm.cursor();
+                        asm.b_cond(Cond::EQ, 0);
+                        asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        asm.mov_imm32(A64Reg::X13, 0x0800_0000);
+                        asm.orr_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X13);
+                        asm.str_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        let end_idx = asm.cursor();
+                        let offset = (end_idx as i32) - (skip_b as i32);
+                        asm.patch(skip_b, 0x5400_0000 | (((offset as u32) & 0x7FFFF) << 5) | (Cond::EQ as u32 & 0xF));
+                    }
+                    BitSatOp::Ssat16 { sat_imm } => {
+                        asm.sxth_w(A64Reg::X12, rn_reg);
+                        asm.sxtw_x(A64Reg::X12, A64Reg::X12);
+                        asm.asr_w_imm(A64Reg::X13, rn_reg, 16);
+                        asm.sxtw_x(A64Reg::X13, A64Reg::X13);
+
+                        let max_val = ((1i64 << (sat_imm - 1)) - 1) as u64;
+                        let min_val = (-(1i64 << (sat_imm - 1))) as u64;
+
+                        asm.mov_imm64(A64Reg::X14, max_val);
+                        asm.cmp_x_reg(A64Reg::X12, A64Reg::X14);
+                        asm.csel_x(A64Reg::X9, A64Reg::X14, A64Reg::X12, Cond::GT);
+                        asm.mov_imm64(A64Reg::X14, min_val);
+                        asm.cmp_x_reg(A64Reg::X9, A64Reg::X14);
+                        asm.csel_x(A64Reg::X9, A64Reg::X14, A64Reg::X9, Cond::LT);
+
+                        asm.mov_imm64(A64Reg::X14, max_val);
+                        asm.cmp_x_reg(A64Reg::X13, A64Reg::X14);
+                        asm.csel_x(A64Reg::X10, A64Reg::X14, A64Reg::X13, Cond::GT);
+                        asm.mov_imm64(A64Reg::X14, min_val);
+                        asm.cmp_x_reg(A64Reg::X10, A64Reg::X14);
+                        asm.csel_x(A64Reg::X10, A64Reg::X14, A64Reg::X10, Cond::LT);
+
+                        asm.uxth_w(A64Reg::X9, A64Reg::X9);
+                        asm.lsl_w_imm(A64Reg::X10, A64Reg::X10, 16);
+                        asm.orr_w_reg(dst_reg, A64Reg::X9, A64Reg::X10);
+
+                        asm.cmp_x_reg(A64Reg::X12, A64Reg::X9);
+                        let set_q1 = asm.cursor();
+                        asm.b_cond(Cond::NE, 0);
+                        asm.cmp_x_reg(A64Reg::X13, A64Reg::X10);
+                        let skip_b = asm.cursor();
+                        asm.b_cond(Cond::EQ, 0);
+
+                        let q_target = asm.cursor();
+                        let off1 = (q_target as i32) - (set_q1 as i32);
+                        asm.patch(set_q1, 0x5400_0000 | (((off1 as u32) & 0x7FFFF) << 5) | (Cond::NE as u32 & 0xF));
+
+                        asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        asm.mov_imm32(A64Reg::X13, 0x0800_0000);
+                        asm.orr_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X13);
+                        asm.str_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+
+                        let end_idx = asm.cursor();
+                        let offset = (end_idx as i32) - (skip_b as i32);
+                        asm.patch(skip_b, 0x5400_0000 | (((offset as u32) & 0x7FFFF) << 5) | (Cond::EQ as u32 & 0xF));
+                    }
+                    BitSatOp::Usat16 { sat_imm } => {
+                        asm.sxth_w(A64Reg::X12, rn_reg);
+                        asm.sxtw_x(A64Reg::X12, A64Reg::X12);
+                        asm.asr_w_imm(A64Reg::X13, rn_reg, 16);
+                        asm.sxtw_x(A64Reg::X13, A64Reg::X13);
+
+                        let max_val = if *sat_imm >= 16 { 0xFFFFu64 } else { (1u64 << sat_imm) - 1 };
+
+                        asm.mov_imm64(A64Reg::X14, max_val);
+                        asm.cmp_x_reg(A64Reg::X12, A64Reg::X14);
+                        asm.csel_x(A64Reg::X9, A64Reg::X14, A64Reg::X12, Cond::GT);
+                        asm.mov_imm64(A64Reg::X14, 0);
+                        asm.cmp_x_reg(A64Reg::X9, A64Reg::X14);
+                        asm.csel_x(A64Reg::X9, A64Reg::X14, A64Reg::X9, Cond::LT);
+
+                        asm.mov_imm64(A64Reg::X14, max_val);
+                        asm.cmp_x_reg(A64Reg::X13, A64Reg::X14);
+                        asm.csel_x(A64Reg::X10, A64Reg::X14, A64Reg::X13, Cond::GT);
+                        asm.mov_imm64(A64Reg::X14, 0);
+                        asm.cmp_x_reg(A64Reg::X10, A64Reg::X14);
+                        asm.csel_x(A64Reg::X10, A64Reg::X14, A64Reg::X10, Cond::LT);
+
+                        asm.uxth_w(A64Reg::X9, A64Reg::X9);
+                        asm.lsl_w_imm(A64Reg::X10, A64Reg::X10, 16);
+                        asm.orr_w_reg(dst_reg, A64Reg::X9, A64Reg::X10);
+
+                        asm.cmp_x_reg(A64Reg::X12, A64Reg::X9);
+                        let set_q1 = asm.cursor();
+                        asm.b_cond(Cond::NE, 0);
+                        asm.cmp_x_reg(A64Reg::X13, A64Reg::X10);
+                        let skip_b = asm.cursor();
+                        asm.b_cond(Cond::EQ, 0);
+
+                        let q_target = asm.cursor();
+                        let off1 = (q_target as i32) - (set_q1 as i32);
+                        asm.patch(set_q1, 0x5400_0000 | (((off1 as u32) & 0x7FFFF) << 5) | (Cond::NE as u32 & 0xF));
+
+                        asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+                        asm.mov_imm32(A64Reg::X13, 0x0800_0000);
+                        asm.orr_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X13);
+                        asm.str_w_imm(A64Reg::X12, A64Reg::X0, OFFSET_CPSR as u32);
+
+                        let end_idx = asm.cursor();
+                        let offset = (end_idx as i32) - (skip_b as i32);
+                        asm.patch(skip_b, 0x5400_0000 | (((offset as u32) & 0x7FFFF) << 5) | (Cond::EQ as u32 & 0xF));
+                    }
+                }
+                store_guest_reg(asm, dst_reg, *rd);
             }
             Op::Div {
                 signed,
@@ -2408,5 +2726,64 @@ mod tests {
         assert_eq!(compiled.guest_entry, GuestAddr::new(0x2000));
         assert!(!compiled.code_bytes.is_empty());
         assert!(!compiled.patch_sites.is_empty());
+    }
+
+    #[test]
+    fn test_compile_coresat_and_bitsat() {
+        let mut block = IrBlock::new(GuestAddr::new(0x5000), false);
+        // QADD r0, r1, r2
+        block.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::CoreSat {
+                op: CoreSatOp::Qadd,
+                rd: Reg::R0,
+                rm: Reg::R1,
+                rn: Reg::R2,
+            },
+            0,
+        ));
+        // QDADD r3, r4, r5
+        block.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::CoreSat {
+                op: CoreSatOp::Qdadd,
+                rd: Reg::R3,
+                rm: Reg::R4,
+                rn: Reg::R5,
+            },
+            0,
+        ));
+        // SSAT r6, #16, r7
+        block.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::BitSat {
+                op: BitSatOp::Ssat {
+                    sat_imm: 16,
+                    shift_type: ShiftType::Lsl,
+                    shift_imm: 0,
+                },
+                rd: Reg::R6,
+                rn: Reg::R7,
+            },
+            0,
+        ));
+        // USAT16 r0, #8, r1
+        block.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::BitSat {
+                op: BitSatOp::Usat16 {
+                    sat_imm: 8,
+                },
+                rd: Reg::R0,
+                rn: Reg::R1,
+            },
+            0,
+        ));
+        block.exit = BlockExit::Direct(GuestAddr::new(0x5010));
+
+        let compiled = A64Compiler::compile(&block);
+        assert_eq!(compiled.inst_count, 4);
+        assert!(!compiled.code_bytes.is_empty());
+        assert_eq!(compiled.patch_sites.len(), 1);
     }
 }
