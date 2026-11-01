@@ -28,6 +28,44 @@ bitflags! {
     }
 }
 
+impl Cpsr {
+    /// Get the current Thumb-2 IT block state (ITSTATE[7:0])
+    /// IT[7:2] in CPSR[15:10], IT[1:0] in CPSR[26:25]
+    #[inline(always)]
+    pub fn itstate(self) -> u8 {
+        let bits10_15 = (self.bits() >> 10) & 0x3F;
+        let bits25_26 = (self.bits() >> 25) & 0x03;
+        ((bits10_15 << 2) | bits25_26) as u8
+    }
+
+    /// Set the Thumb-2 IT block state
+    #[inline(always)]
+    pub fn set_itstate(&mut self, state: u8) {
+        let bits10_15 = ((state as u32) >> 2) & 0x3F;
+        let bits25_26 = (state as u32) & 0x03;
+        let mask = (0x3F << 10) | (0x03 << 25);
+        *self = Cpsr::from_bits_retain((self.bits() & !mask) | (bits10_15 << 10) | (bits25_26 << 25));
+    }
+
+    /// Advances the IT state after executing an instruction inside an IT block.
+    /// Returns the condition code for the instruction just about to be executed.
+    pub fn advance_itstate(&mut self) -> Option<Cond> {
+        let it = self.itstate();
+        if it == 0 {
+            return None;
+        }
+        let cond = Cond::from_u8(it >> 4);
+        // Advance ITSTATE: shift bits [4:0] left by 1
+        let next_it = (it & 0xE0) | ((it << 1) & 0x1F);
+        if (next_it & 0x0F) == 0 {
+            self.set_itstate(0);
+        } else {
+            self.set_itstate(next_it);
+        }
+        Some(cond)
+    }
+}
+
 /// ARM Condition Codes (4-bit field in instructions)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]

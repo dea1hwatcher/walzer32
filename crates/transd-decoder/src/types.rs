@@ -139,6 +139,24 @@ pub enum VfpReg {
     D(u8), // d0..d31
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeonOp {
+    Add,
+    Sub,
+    Mul,
+    And,
+    Orr,
+    Eor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeonSize {
+    I8,
+    I16,
+    I32,
+    F32,
+}
+
 /// Decoded ARM Instruction Operation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -259,6 +277,24 @@ pub enum Op {
         opc1: u8,
         crm: u8,
         opc2: u8,
+    },
+    It {
+        firstcond: Cond,
+        mask: u8,
+    },
+    NeonAlu {
+        op: NeonOp,
+        size: NeonSize,
+        is_quad: bool,
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    NeonLoadStore {
+        is_load: bool,
+        is_quad: bool,
+        reg: u8,
+        rn: Reg,
     },
     Nop,
     Unknown(u32),

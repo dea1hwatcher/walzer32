@@ -37,7 +37,15 @@ impl Interpreter {
         let next_pc = pc.add(inst_len as u32);
 
         // 2. Evaluate Condition
-        if !cpu.check_cond(inst.cond) {
+        let mut cond = inst.cond;
+        let in_it_block = is_thumb && cpu.cpsr.itstate() != 0;
+        if is_thumb && !matches!(inst.op, Op::It { .. }) {
+            if let Some(it_cond) = cpu.cpsr.advance_itstate() {
+                cond = it_cond;
+            }
+        }
+
+        if !cpu.check_cond(cond) {
             cpu.set_pc(next_pc);
             return Ok(StepResult::Continue);
         }
@@ -50,11 +58,14 @@ impl Interpreter {
             }
             Op::Alu {
                 op,
-                set_flags,
+                mut set_flags,
                 rd,
                 rn,
                 op2,
             } => {
+                if in_it_block && !op.is_test() {
+                    set_flags = false;
+                }
                 let op2_val = Self::eval_op2(cpu, op2);
                 let rn_val = if rn.is_pc() {
                     // ARM PC-relative reads: PC + 8 in ARM, PC + 4 in Thumb
@@ -272,18 +283,28 @@ impl Interpreter {
                         (MemSize::Halfword, false) => mem.read_u16(GuestAddr::new(eff_addr))? as u32,
                         (MemSize::Halfword, true) => mem.read_u16(GuestAddr::new(eff_addr))? as i16 as i32 as u32,
                         (MemSize::Word, _) => mem.read_u32(GuestAddr::new(eff_addr))?,
-                        _ => 0,
+                        (MemSize::Doubleword, _) => {
+                            let v0 = mem.read_u32(GuestAddr::new(eff_addr))?;
+                            let v1 = mem.read_u32(GuestAddr::new(eff_addr.wrapping_add(4)))?;
+                            cpu.set_reg(rd, v0);
+                            if let Some(rd2) = Reg::from_u8(rd.index() as u8 + 1) {
+                                cpu.set_reg(rd2, v1);
+                            }
+                            v0
+                        }
                     };
 
-                    if rd.is_pc() {
-                        let target = GuestAddr::new(val & !1);
-                        cpu.set_pc(target);
-                        if (val & 1) != 0 {
-                            cpu.set_thumb(true);
+                    if size != MemSize::Doubleword {
+                        if rd.is_pc() {
+                            let target = GuestAddr::new(val & !1);
+                            cpu.set_pc(target);
+                            if (val & 1) != 0 {
+                                cpu.set_thumb(true);
+                            }
+                            return Ok(StepResult::Branch { target });
+                        } else {
+                            cpu.set_reg(rd, val);
                         }
-                        return Ok(StepResult::Branch { target });
-                    } else {
-                        cpu.set_reg(rd, val);
                     }
                 } else {
                     let val = cpu.reg(rd);
@@ -291,7 +312,16 @@ impl Interpreter {
                         MemSize::Byte => mem.write_u8(GuestAddr::new(eff_addr), val as u8)?,
                         MemSize::Halfword => mem.write_u16(GuestAddr::new(eff_addr), val as u16)?,
                         MemSize::Word => mem.write_u32(GuestAddr::new(eff_addr), val)?,
-                        _ => {}
+                        MemSize::Doubleword => {
+                            let v0 = val;
+                            let v1 = if let Some(rd2) = Reg::from_u8(rd.index() as u8 + 1) {
+                                cpu.reg(rd2)
+                            } else {
+                                0
+                            };
+                            mem.write_u32(GuestAddr::new(eff_addr), v0)?;
+                            mem.write_u32(GuestAddr::new(eff_addr.wrapping_add(4)), v1)?;
+                        }
                     }
                 }
 
@@ -595,6 +625,113 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
+            Op::It { firstcond, mask } => {
+                let itstate = ((firstcond as u8) << 4) | (mask & 0xF);
+                cpu.cpsr.set_itstate(itstate);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonAlu {
+                op,
+                size,
+                is_quad,
+                dst,
+                src1,
+                src2,
+            } => {
+                let count = if is_quad { 2 } else { 1 };
+                for i in 0..count {
+                    let d_idx = (dst as usize) + i;
+                    let s1_idx = (src1 as usize) + i;
+                    let s2_idx = (src2 as usize) + i;
+                    if d_idx < 32 && s1_idx < 32 && s2_idx < 32 {
+                        let a = cpu.vfp[s1_idx];
+                        let b = cpu.vfp[s2_idx];
+                        let res = match (op, size) {
+                            (NeonOp::And, _) => a & b,
+                            (NeonOp::Orr, _) => a | b,
+                            (NeonOp::Eor, _) => a ^ b,
+                            (NeonOp::Add, NeonSize::I32) => {
+                                let a0 = (a & 0xFFFF_FFFF) as u32;
+                                let a1 = (a >> 32) as u32;
+                                let b0 = (b & 0xFFFF_FFFF) as u32;
+                                let b1 = (b >> 32) as u32;
+                                let r0 = a0.wrapping_add(b0) as u64;
+                                let r1 = (a1.wrapping_add(b1) as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Sub, NeonSize::I32) => {
+                                let a0 = (a & 0xFFFF_FFFF) as u32;
+                                let a1 = (a >> 32) as u32;
+                                let b0 = (b & 0xFFFF_FFFF) as u32;
+                                let b1 = (b >> 32) as u32;
+                                let r0 = a0.wrapping_sub(b0) as u64;
+                                let r1 = (a1.wrapping_sub(b1) as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Mul, NeonSize::I32) => {
+                                let a0 = (a & 0xFFFF_FFFF) as u32;
+                                let a1 = (a >> 32) as u32;
+                                let b0 = (b & 0xFFFF_FFFF) as u32;
+                                let b1 = (b >> 32) as u32;
+                                let r0 = a0.wrapping_mul(b0) as u64;
+                                let r1 = (a1.wrapping_mul(b1) as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Add, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for byte_idx in 0..8 {
+                                    let ab = ((a >> (byte_idx * 8)) & 0xFF) as u8;
+                                    let bb = ((b >> (byte_idx * 8)) & 0xFF) as u8;
+                                    let rb = (ab.wrapping_add(bb) as u64) << (byte_idx * 8);
+                                    r |= rb;
+                                }
+                                r
+                            }
+                            (NeonOp::Sub, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for byte_idx in 0..8 {
+                                    let ab = ((a >> (byte_idx * 8)) & 0xFF) as u8;
+                                    let bb = ((b >> (byte_idx * 8)) & 0xFF) as u8;
+                                    let rb = (ab.wrapping_sub(bb) as u64) << (byte_idx * 8);
+                                    r |= rb;
+                                }
+                                r
+                            }
+                            _ => a,
+                        };
+                        cpu.vfp[d_idx] = res;
+                    }
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonLoadStore {
+                is_load,
+                is_quad,
+                reg,
+                rn,
+            } => {
+                let base_addr = cpu.reg(rn);
+                let count = if is_quad { 2 } else { 1 };
+                for i in 0..count {
+                    let d_idx = (reg as usize) + i;
+                    let addr = GuestAddr::new(base_addr.wrapping_add((i * 8) as u32));
+                    if d_idx < 32 {
+                        if is_load {
+                            let lo = mem.read_u32(addr)? as u64;
+                            let hi = (mem.read_u32(addr.add(4))? as u64) << 32;
+                            cpu.vfp[d_idx] = lo | hi;
+                        } else {
+                            let val = cpu.vfp[d_idx];
+                            mem.write_u32(addr, (val & 0xFFFF_FFFF) as u32)?;
+                            mem.write_u32(addr.add(4), (val >> 32) as u32)?;
+                        }
+                    }
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
             Op::Unknown(raw) => Err(InterpError::UnknownInstruction(raw)),
             _ => {
                 cpu.set_pc(next_pc);
@@ -844,5 +981,138 @@ mod tests {
         assert_eq!(cpu.pc(), GuestAddr::new(0x1050));
         assert!(cpu.is_thumb());
         assert_eq!(res, StepResult::Branch { target: GuestAddr::new(0x1050) });
+    }
+
+    #[test]
+    fn test_interp_thumb_it_block() {
+        let mut cpu = CpuState::new();
+        let mut mem = FlatMemory::new(GuestAddr::new(0x1000), 0x2000);
+
+        cpu.set_thumb(true);
+
+        // Sequence at 0x1000:
+        // 0x1000: CMP r0, #0      -> 0x2800 (CMP r0, #0)
+        // 0x1002: ITE EQ          -> 0xBF0C (firstcond=EQ, mask=1100 for ITE)
+        // 0x1004: MOV r1, #10     -> 0x210A (executed if EQ)
+        // 0x1006: MOV r1, #20     -> 0x2114 (executed if NE)
+        // 0x1008: SVC 0           -> 0xDF00
+        mem.write_u16(GuestAddr::new(0x1000), 0x2800).unwrap();
+        mem.write_u16(GuestAddr::new(0x1002), 0xBF0C).unwrap();
+        mem.write_u16(GuestAddr::new(0x1004), 0x210A).unwrap();
+        mem.write_u16(GuestAddr::new(0x1006), 0x2114).unwrap();
+        mem.write_u16(GuestAddr::new(0x1008), 0xDF00).unwrap();
+
+        // Case A: r0 = 0 -> condition EQ holds -> r1 becomes 10
+        cpu.set_reg(Reg::R0, 0);
+        cpu.set_pc(GuestAddr::new(0x1000));
+
+        // 1. CMP
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert!(cpu.cpsr.contains(Cpsr::Z));
+
+        // 2. ITE EQ
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_ne!(cpu.cpsr.itstate(), 0);
+
+        // 3. MOV r1, #10 (Then - should execute!)
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.reg(Reg::R1), 10);
+
+        // 4. MOV r1, #20 (Else - should be SKIPPED!)
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.reg(Reg::R1), 10); // Still 10!
+        assert_eq!(cpu.cpsr.itstate(), 0); // IT block finished
+
+        // Case B: r0 = 5 -> condition EQ does NOT hold -> r1 becomes 20
+        cpu.set_reg(Reg::R0, 5);
+        cpu.set_reg(Reg::R1, 0);
+        cpu.set_pc(GuestAddr::new(0x1000));
+
+        // CMP
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert!(!cpu.cpsr.contains(Cpsr::Z));
+
+        // ITE EQ
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+
+        // MOV r1, #10 (Then - skipped)
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.reg(Reg::R1), 0);
+
+        // MOV r1, #20 (Else - executed!)
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.reg(Reg::R1), 20);
+        assert_eq!(cpu.cpsr.itstate(), 0);
+    }
+
+    #[test]
+    fn test_interp_ldrd_strd() {
+        let mut cpu = CpuState::new();
+        let mut mem = FlatMemory::new(GuestAddr::new(0x1000), 0x2000);
+
+        // Base memory address in r0 = 0x1500
+        cpu.set_reg(Reg::R0, 0x1500);
+        // Values in r2, r3
+        cpu.set_reg(Reg::R2, 0x1122_3344);
+        cpu.set_reg(Reg::R3, 0x5566_7788);
+
+        // 0x1000: STRD r2, [r0, #8] (0xE1C020F8)
+        // 0x1004: LDRD r4, [r0, #8] (0xE1C040D8)
+        // 0x1008: SVC 0
+        mem.write_u32(GuestAddr::new(0x1000), 0xE1C0_20F8).unwrap();
+        mem.write_u32(GuestAddr::new(0x1004), 0xE1C0_40D8).unwrap();
+        mem.write_u32(GuestAddr::new(0x1008), 0xEF00_0000).unwrap();
+
+        cpu.set_pc(GuestAddr::new(0x1000));
+
+        // 1. STRD
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(mem.read_u32(GuestAddr::new(0x1508)).unwrap(), 0x1122_3344);
+        assert_eq!(mem.read_u32(GuestAddr::new(0x150C)).unwrap(), 0x5566_7788);
+
+        // 2. LDRD into r4, r5
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.reg(Reg::R4), 0x1122_3344);
+        assert_eq!(cpu.reg(Reg::R5), 0x5566_7788);
+    }
+
+    #[test]
+    fn test_interp_neon_alu_and_load_store() {
+        let mut cpu = CpuState::new();
+        let mut mem = FlatMemory::new(GuestAddr::new(0x1000), 0x2000);
+
+        // Write two 32-bit ints [100, 200] at 0x1500
+        mem.write_u32(GuestAddr::new(0x1500), 100).unwrap();
+        mem.write_u32(GuestAddr::new(0x1504), 200).unwrap();
+
+        cpu.set_reg(Reg::R0, 0x1500); // load ptr
+        cpu.set_reg(Reg::R1, 0x1600); // store ptr
+
+        // Preset d1 with [300, 400]
+        cpu.vfp[1] = 300 | ((400 as u64) << 32);
+
+        // 0x1000: VLD1.32 {d0}, [r0] (0xF4200700)
+        // 0x1004: VADD.I32 d2, d0, d1 (0xF2202801) -> [400, 600]
+        // 0x1008: VST1.32 {d2}, [r1] (0xF4012700)
+        mem.write_u32(GuestAddr::new(0x1000), 0xF420_0700).unwrap();
+        mem.write_u32(GuestAddr::new(0x1004), 0xF220_2801).unwrap();
+        mem.write_u32(GuestAddr::new(0x1008), 0xF401_2700).unwrap();
+
+        cpu.set_pc(GuestAddr::new(0x1000));
+
+        // 1. VLD1
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.vfp[0] & 0xFFFF_FFFF, 100);
+        assert_eq!(cpu.vfp[0] >> 32, 200);
+
+        // 2. VADD.I32
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.vfp[2] & 0xFFFF_FFFF, 400); // 100 + 300
+        assert_eq!(cpu.vfp[2] >> 32, 600);        // 200 + 400
+
+        // 3. VST1
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(mem.read_u32(GuestAddr::new(0x1600)).unwrap(), 400);
+        assert_eq!(mem.read_u32(GuestAddr::new(0x1604)).unwrap(), 600);
     }
 }

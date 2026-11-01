@@ -565,6 +565,16 @@ impl ThumbDecoder {
                 let imm8 = (hw & 0xFF) as u16;
                 ArmInst::new(Cond::AL, Op::Bkpt { imm: imm8 }, raw)
             }
+            // If-Then (IT) and hints (NOP, YIELD, etc.)
+            0b1111 => {
+                let mask = (hw & 0xF) as u8;
+                if mask != 0 {
+                    let firstcond = Cond::from_u8(((hw >> 4) & 0xF) as u8);
+                    ArmInst::new(Cond::AL, Op::It { firstcond, mask }, raw)
+                } else {
+                    ArmInst::new(Cond::AL, Op::Nop, raw)
+                }
+            }
             _ => ArmInst::new(Cond::AL, Op::Unknown(raw), raw),
         }
     }
@@ -660,6 +670,39 @@ impl ThumbDecoder {
         // NOP.W hint (0xF3AF 8000)
         if hw1 == 0xF3AF && (hw2 & 0xFF00) == 0x8000 {
             return ArmInst::new(Cond::AL, Op::Nop, raw);
+        }
+
+        // Thumb-2 LDRD / STRD (immediate): 1110 100P U1W0 Rn ...
+        if (hw1 & 0xFE40) == 0xE840 {
+            let p = ((hw1 >> 8) & 1) != 0;
+            let u = ((hw1 >> 7) & 1) != 0;
+            let w = ((hw1 >> 5) & 1) != 0;
+            let is_load = ((hw1 >> 4) & 1) != 0;
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let imm8 = ((hw2 & 0xFF) as u32) * 4;
+            let offset = AddrOffset::Imm(imm8);
+            let addr_mode = if p {
+                if w {
+                    AddrMode::PreIndex { offset, add: u }
+                } else {
+                    AddrMode::Offset { offset, add: u }
+                }
+            } else {
+                AddrMode::PostIndex { offset, add: u }
+            };
+            return ArmInst::new(
+                Cond::AL,
+                Op::LoadStore {
+                    is_load,
+                    size: MemSize::Doubleword,
+                    signed: false,
+                    rd,
+                    rn,
+                    addr_mode,
+                },
+                raw,
+            );
         }
 
         ArmInst::new(Cond::AL, Op::Unknown(raw), raw)

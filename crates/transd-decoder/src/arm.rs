@@ -57,6 +57,105 @@ impl ArmDecoder {
             return ArmInst::new(Cond::AL, Op::MemoryBarrier { is_data: false }, raw);
         }
 
+        // NEON Data Processing (3-register same: 1111 001x ...)
+        if (raw & 0xFE00_0000) == 0xF200_0000 {
+            let d_bit = (raw >> 22) & 1;
+            let n_bit = (raw >> 7) & 1;
+            let m_bit = (raw >> 5) & 1;
+            let q_bit = (raw >> 6) & 1;
+
+            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let vn = ((raw >> 16) & 0xF) | (n_bit << 4);
+            let vm = (raw & 0xF) | (m_bit << 4);
+
+            let is_quad = q_bit != 0;
+            let size_bits = (raw >> 20) & 0x3;
+            let size = match size_bits {
+                0b00 => NeonSize::I8,
+                0b01 => NeonSize::I16,
+                0b10 => NeonSize::I32,
+                _ => NeonSize::F32,
+            };
+
+            let op_code = (raw >> 8) & 0xF;
+            let bit24 = (raw >> 24) & 1;
+            let bit4 = (raw >> 4) & 1;
+
+            // VADD / VSUB: op_code == 0b1000, bit4 == 0
+            if op_code == 0b1000 && bit4 == 0 {
+                let is_sub = (raw & (1 << 9)) != 0;
+                let op = if is_sub { NeonOp::Sub } else { NeonOp::Add };
+                return ArmInst::new(
+                    Cond::AL,
+                    Op::NeonAlu {
+                        op,
+                        size,
+                        is_quad,
+                        dst: vd as u8,
+                        src1: vn as u8,
+                        src2: vm as u8,
+                    },
+                    raw,
+                );
+            }
+
+            // VMUL: op_code == 0b1001, bit4 == 1
+            if op_code == 0b1001 && bit4 == 1 {
+                return ArmInst::new(
+                    Cond::AL,
+                    Op::NeonAlu {
+                        op: NeonOp::Mul,
+                        size,
+                        is_quad,
+                        dst: vd as u8,
+                        src1: vn as u8,
+                        src2: vm as u8,
+                    },
+                    raw,
+                );
+            }
+
+            // VAND / VORR / VEOR
+            if op_code == 0b0001 && bit4 == 1 {
+                let op = match (bit24, size_bits) {
+                    (0, 0b00) => NeonOp::And,
+                    (0, 0b10) => NeonOp::Orr,
+                    (1, _) => NeonOp::Eor,
+                    _ => NeonOp::Orr,
+                };
+                return ArmInst::new(
+                    Cond::AL,
+                    Op::NeonAlu {
+                        op,
+                        size,
+                        is_quad,
+                        dst: vd as u8,
+                        src1: vn as u8,
+                        src2: vm as u8,
+                    },
+                    raw,
+                );
+            }
+        }
+
+        // NEON Load/Store (VLD1 / VST1: 1111 0100 ...)
+        if (raw & 0xFF10_0000) == 0xF400_0000 || (raw & 0xFF10_0000) == 0xF410_0000 {
+            let is_load = (raw & (1 << 21)) != 0;
+            let d_bit = (raw >> 22) & 1;
+            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+            return ArmInst::new(
+                Cond::AL,
+                Op::NeonLoadStore {
+                    is_load,
+                    is_quad: false,
+                    reg: vd as u8,
+                    rn,
+                },
+                raw,
+            );
+        }
+
         ArmInst::new(Cond::AL, Op::Unknown(raw), raw)
     }
 
@@ -287,11 +386,23 @@ impl ArmDecoder {
         let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
         let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
 
-        let (size, signed) = match op_bits {
-            0b01 => (MemSize::Halfword, false), // LDRH / STRH
-            0b10 => (MemSize::Byte, true),      // LDRSB
-            0b11 => (MemSize::Halfword, true),  // LDRSH
-            _ => (MemSize::Word, false),
+        let (size, signed, is_load) = match op_bits {
+            0b01 => (MemSize::Halfword, false, is_load), // LDRH / STRH
+            0b10 => {
+                if is_load {
+                    (MemSize::Byte, true, true)          // LDRSB
+                } else {
+                    (MemSize::Doubleword, false, true)   // LDRD (load dual)
+                }
+            }
+            0b11 => {
+                if is_load {
+                    (MemSize::Halfword, true, true)      // LDRSH
+                } else {
+                    (MemSize::Doubleword, false, false)  // STRD (store dual)
+                }
+            }
+            _ => (MemSize::Word, false, is_load),
         };
 
         let offset = if is_imm {
