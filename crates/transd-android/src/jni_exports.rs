@@ -1,0 +1,136 @@
+use std::ffi::c_void;
+use transd_core::GuestAddr;
+use crate::session::{get_or_init_session, reset_session};
+
+// Standard JNI 64-bit primitive types matching Android NDK
+pub type JNIEnv = *mut c_void;
+pub type JClass = *mut c_void;
+pub type JString = *mut c_void;
+pub type JObject = *mut c_void;
+pub type JInt = i32;
+pub type JLong = i64;
+
+/// JNI Return codes
+pub const JNI_OK: JInt = 0;
+pub const JNI_ERR_GENERIC: JInt = -1;
+pub const JNI_ERR_NOT_FOUND: JInt = -2;
+pub const JNI_ERR_LOAD_FAIL: JInt = -3;
+
+/// JNI Export: Initialize Transd DBT Engine from Android Application
+///
+/// Java Signature:
+///   public static native int nativeInit(String apkPath);
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeInit(
+    _env: JNIEnv,
+    _clazz: JClass,
+    _apk_path: JString,
+) -> JInt {
+    match get_or_init_session() {
+        Ok(_) => JNI_OK,
+        Err(_) => JNI_ERR_GENERIC,
+    }
+}
+
+/// JNI Export: Load a 32-bit ELF shared library by raw bytes or name
+///
+/// Java Signature:
+///   public static native int nativeLoadLibraryBytes(String name, byte[] elfBytes);
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeLoadLibraryBytes(
+    _env: JNIEnv,
+    _clazz: JClass,
+    name_str: *const u8,
+    name_len: usize,
+    bytes_ptr: *const u8,
+    bytes_len: usize,
+) -> JInt {
+    if name_str.is_null() || bytes_ptr.is_null() || bytes_len == 0 {
+        return JNI_ERR_GENERIC;
+    }
+
+    let name = match std::str::from_utf8(unsafe { std::slice::from_raw_parts(name_str, name_len) }) {
+        Ok(s) => s,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    let elf_slice = unsafe { std::slice::from_raw_parts(bytes_ptr, bytes_len) };
+
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    let session = match guard.as_mut() {
+        Some(s) => s,
+        None => return JNI_ERR_GENERIC,
+    };
+
+    match session.load_library_bytes(name, elf_slice) {
+        Ok(_) => JNI_OK,
+        Err(_) => JNI_ERR_LOAD_FAIL,
+    }
+}
+
+/// JNI Export: Call a 32-bit native guest function by virtual address
+///
+/// Java Signature:
+///   public static native int nativeCallMethod(long fnAddr, int arg0, int arg1, int arg2, int arg3);
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeCallMethod(
+    _env: JNIEnv,
+    _clazz: JClass,
+    fn_addr: JLong,
+    arg0: JInt,
+    arg1: JInt,
+    arg2: JInt,
+    arg3: JInt,
+) -> JInt {
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    let session = match guard.as_mut() {
+        Some(s) => s,
+        None => return JNI_ERR_GENERIC,
+    };
+
+    let args = [arg0 as u32, arg1 as u32, arg2 as u32, arg3 as u32];
+    match session.call_native(GuestAddr::new(fn_addr as u32), &args) {
+        Ok(ret) => ret as JInt,
+        Err(_) => JNI_ERR_GENERIC,
+    }
+}
+
+/// JNI Export: Query loaded library count and registered natives
+///
+/// Java Signature:
+///   public static native int nativeGetStatus();
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeGetStatus(
+    _env: JNIEnv,
+    _clazz: JClass,
+) -> JInt {
+    let guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    match guard.as_ref() {
+        Some(s) => s.loaded_libraries.len() as JInt,
+        None => 0,
+    }
+}
+
+/// JNI Export: Reset and clean up session
+///
+/// Java Signature:
+///   public static native void nativeReset();
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeReset(
+    _env: JNIEnv,
+    _clazz: JClass,
+) {
+    reset_session();
+}

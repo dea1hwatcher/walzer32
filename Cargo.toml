@@ -11,6 +11,7 @@ members = [
     "crates/transd-bridge",
     "crates/transd-apk",
     "crates/transd-cli",
+    "crates/transd-android",
 ]
 
 [workspace.package]

@@ -24,7 +24,7 @@ pub enum EngineStepResult {
     Breakpoint { imm: u16 },
 }
 
-pub trait SyscallHandler {
+pub trait SyscallHandler: Send {
     fn handle_syscall(
         &mut self,
         args: SyscallArgs,
