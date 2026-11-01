@@ -1,5 +1,6 @@
 mod adb;
 mod apk_cmd;
+mod bench;
 mod info;
 mod runner;
 
@@ -35,12 +36,20 @@ COMMANDS:
     devices
         Inspect connected Android devices via ADB to determine 32-bit vs ARM64-only status
 
+    bench <file.so> [OPTIONS]
+        Benchmark execution throughput (MIPS), compilation latency, and JIT caching
+        Options:
+            --func <name>     Function to benchmark
+            --args <a,b,...>  Comma-separated integer arguments
+            --iter <count>    Number of benchmark iterations (default: 100)
+
     help
         Print this help message
 
 EXAMPLES:
     transd-cli info libnative.so
     transd-cli run libcalc.so --func add_and_square --args 3,4
+    transd-cli bench libcalc.so --func add_and_square --args 3,4 --iter 500
     transd-cli apk game.apk
     transd-cli apk game.apk --run --func JNI_OnLoad
 "#,
@@ -253,6 +262,93 @@ fn main() {
         }
         "devices" => {
             adb::check_adb_devices();
+        }
+        "bench" => {
+            if args.len() < 3 {
+                eprintln!("Error: missing file path for 'bench' command");
+                eprintln!("Usage: transd-cli bench <file.so> [--func <name>] [--args 1,2,3] [--iter <count>]");
+                process::exit(1);
+            }
+            let file_path = &args[2];
+            let mut target_func = None;
+            let mut parsed_args = Vec::new();
+            let mut iterations = 100u32;
+
+            let mut idx = 3;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--func" => {
+                        if idx + 1 < args.len() {
+                            target_func = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --func requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    "--iter" => {
+                        if idx + 1 < args.len() {
+                            if let Ok(it) = args[idx + 1].parse::<u32>() {
+                                iterations = it;
+                            } else {
+                                eprintln!("Error: invalid iteration count '{}'", args[idx + 1]);
+                                process::exit(1);
+                            }
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --iter requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    "--args" => {
+                        if idx + 1 < args.len() {
+                            let arg_strs: Vec<&str> = args[idx + 1].split(',').collect();
+                            for s in arg_strs {
+                                match s.trim().parse::<u32>() {
+                                    Ok(v) => parsed_args.push(v),
+                                    Err(_) => {
+                                        if let Some(hex_str) = s.trim().strip_prefix("0x") {
+                                            if let Ok(v) = u32::from_str_radix(hex_str, 16) {
+                                                parsed_args.push(v);
+                                                continue;
+                                            }
+                                        }
+                                        eprintln!("Error: invalid argument '{}'", s);
+                                        process::exit(1);
+                                    }
+                                }
+                            }
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --args requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    unknown => {
+                        eprintln!("Error: unknown option '{}'", unknown);
+                        print_usage();
+                        process::exit(1);
+                    }
+                }
+            }
+
+            match fs::read(file_path) {
+                Ok(data) => {
+                    match bench::run_benchmark(file_path, &data, target_func, &parsed_args, iterations) {
+                        Ok(_) => {
+                            process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("Benchmark Error: {}", e);
+                            process::exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error reading file '{}': {}", file_path, e);
+                    process::exit(1);
+                }
+            }
         }
         unknown => {
             eprintln!("Error: unknown command '{}'", unknown);

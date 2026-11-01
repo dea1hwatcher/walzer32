@@ -122,6 +122,27 @@ fn test_cli_info_and_run_e2e() {
     assert!(stdout.contains("Return value: 121 (0x00000079)"));
     assert!(stdout.contains("=== Execution Completed ==="));
 
+    // 3. Test `transd-cli bench <file.so> --func add_and_square --args 5,6 --iter 25`
+    let bench_output = Command::new(cli_exe)
+        .arg("bench")
+        .arg(&test_so_path)
+        .arg("--func")
+        .arg("add_and_square")
+        .arg("--args")
+        .arg("5,6")
+        .arg("--iter")
+        .arg("25")
+        .output()
+        .expect("Failed to execute transd-cli bench");
+
+    assert!(bench_output.status.success());
+    let bench_stdout = String::from_utf8_lossy(&bench_output.stdout);
+    assert!(bench_stdout.contains("Transd DBT Benchmark & Profiler"));
+    assert!(bench_stdout.contains("Benchmark Iterations: 25"));
+    assert!(bench_stdout.contains("Throughput:"));
+    assert!(bench_stdout.contains("MIPS"));
+    assert!(bench_stdout.contains("=== Benchmark Results ==="));
+
     // Cleanup
     let _ = std::fs::remove_file(test_so_path);
 }
