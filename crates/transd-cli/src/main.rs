@@ -1,3 +1,4 @@
+mod apk_cmd;
 mod info;
 mod runner;
 
@@ -22,13 +23,22 @@ COMMANDS:
             --func <name>     Exported function name to call (default: JNI_OnLoad)
             --args <a,b,...>  Comma-separated 32-bit integer arguments
 
+    apk <file.apk> [OPTIONS]
+        Inspect and execute an Android APK package
+        Options:
+            --run             Extract and execute the primary 32-bit ARM native library
+            --lib <name.so>   Specify which .so inside the APK to execute
+            --func <name>     Function/JNI symbol to invoke
+            --args <a,b,...>  Comma-separated integer arguments
+
     help
         Print this help message
 
 EXAMPLES:
     transd-cli info libnative.so
     transd-cli run libcalc.so --func add_and_square --args 3,4
-    transd-cli run libgame.so --func JNI_OnLoad
+    transd-cli apk game.apk
+    transd-cli apk game.apk --run --func JNI_OnLoad
 "#,
         env!("CARGO_PKG_VERSION")
     );
@@ -132,6 +142,101 @@ fn main() {
                         }
                         Err(e) => {
                             eprintln!("Execution Error: {}", e);
+                            process::exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error reading file '{}': {}", file_path, e);
+                    process::exit(1);
+                }
+            }
+        }
+        "apk" => {
+            if args.len() < 3 {
+                eprintln!("Error: missing file path for 'apk' command");
+                eprintln!("Usage: transd-cli apk <file.apk> [--run] [--lib <name.so>] [--func <name>]");
+                process::exit(1);
+            }
+            let file_path = &args[2];
+
+            let mut run_app = false;
+            let mut target_lib = None;
+            let mut target_func = None;
+            let mut parsed_args = Vec::new();
+
+            let mut idx = 3;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--run" => {
+                        run_app = true;
+                        idx += 1;
+                    }
+                    "--lib" => {
+                        if idx + 1 < args.len() {
+                            target_lib = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --lib requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    "--func" => {
+                        if idx + 1 < args.len() {
+                            target_func = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --func requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    "--args" => {
+                        if idx + 1 < args.len() {
+                            let arg_strs = args[idx + 1].split(',');
+                            for s in arg_strs {
+                                match s.trim().parse::<u32>() {
+                                    Ok(v) => parsed_args.push(v),
+                                    Err(_) => {
+                                        if let Some(hex_str) = s.trim().strip_prefix("0x") {
+                                            if let Ok(v) = u32::from_str_radix(hex_str, 16) {
+                                                parsed_args.push(v);
+                                                continue;
+                                            }
+                                        }
+                                        eprintln!("Error: invalid argument '{}'", s);
+                                        process::exit(1);
+                                    }
+                                }
+                            }
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --args requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    unknown => {
+                        eprintln!("Error: unknown option '{}'", unknown);
+                        print_usage();
+                        process::exit(1);
+                    }
+                }
+            }
+
+            match fs::read(file_path) {
+                Ok(data) => {
+                    match apk_cmd::handle_apk_command(
+                        file_path,
+                        &data,
+                        run_app,
+                        target_lib,
+                        target_func,
+                        &parsed_args,
+                    ) {
+                        Ok(code) => {
+                            process::exit(code as i32);
+                        }
+                        Err(e) => {
+                            eprintln!("APK Error: {}", e);
                             process::exit(1);
                         }
                     }

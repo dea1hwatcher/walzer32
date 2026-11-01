@@ -190,4 +190,56 @@ impl<'a> ElfParser<'a> {
         std::str::from_utf8(&slice[..null_pos])
             .map_err(|_| ElfError::MalformedDynamic("Invalid UTF-8 in string table".into()))
     }
+
+    /// Extracts exported dynamic symbol names
+    pub fn dynamic_symbol_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let dyn_entries = match self.parse_dynamic_table() {
+            Ok(e) => e,
+            Err(_) => return names,
+        };
+
+        let mut symtab_vaddr = None;
+        let mut strtab_vaddr = None;
+        let mut syment = 16usize;
+
+        for d in &dyn_entries {
+            match d.d_tag {
+                DT_SYMTAB => symtab_vaddr = Some(d.d_val),
+                DT_STRTAB => strtab_vaddr = Some(d.d_val),
+                DT_SYMENT => syment = d.d_val as usize,
+                _ => {}
+            }
+        }
+
+        if let (Some(sym_va), Some(str_va)) = (symtab_vaddr, strtab_vaddr) {
+            if let (Some(sym_off), Some(str_off)) = (self.vaddr_to_offset(sym_va), self.vaddr_to_offset(str_va)) {
+                for i in 1..4096 {
+                    let off = sym_off + i * syment;
+                    if off + syment > self.data.len() {
+                        break;
+                    }
+                    let st_name = LittleEndian::read_u32(&self.data[off..off + 4]) as usize;
+                    let st_value = LittleEndian::read_u32(&self.data[off + 4..off + 8]);
+                    let st_shndx = LittleEndian::read_u16(&self.data[off + 14..off + 16]);
+                    if st_name == 0 && st_value == 0 {
+                        break;
+                    }
+                    if st_shndx != SHN_UNDEF {
+                        if let Ok(name) = self.read_string_at(str_off + st_name) {
+                            if !name.is_empty() {
+                                names.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    /// Checks if a given dynamic symbol exists in the ELF
+    pub fn find_dynamic_symbol(&self, name: &str) -> Option<String> {
+        self.dynamic_symbol_names().into_iter().find(|n| n == name)
+    }
 }

@@ -1,0 +1,11 @@
+[package]
+name = "transd-apk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+transd-core = { path = "../transd-core" }
+transd-elf = { path = "../transd-elf" }
+byteorder.workspace = true
+thiserror.workspace = true

@@ -17,5 +17,6 @@ transd-interp = { path = "../transd-interp" }
 transd-rt = { path = "../transd-rt" }
 transd-elf = { path = "../transd-elf" }
 transd-bridge = { path = "../transd-bridge" }
+transd-apk = { path = "../transd-apk" }
 byteorder.workspace = true
 thiserror.workspace = true
