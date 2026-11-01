@@ -486,3 +486,59 @@ pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativePrecompileLib
         JNI_ERR_GENERIC
     }
 }
+
+/// JNI Export: Enable multi-core background asynchronous JIT compilation
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeEnableAsyncJit(
+    _env: JNIEnv,
+    _clazz: JClass,
+    worker_threads: JInt,
+) -> JInt {
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_mut() {
+        session.enable_async_jit(worker_threads.max(0) as usize);
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Disable background asynchronous JIT compilation
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeDisableAsyncJit(
+    _env: JNIEnv,
+    _clazz: JClass,
+) -> JInt {
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_mut() {
+        session.disable_async_jit();
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Flush all pending background JIT compilations
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeFlushAsyncJit(
+    _env: JNIEnv,
+    _clazz: JClass,
+    timeout_ms: JInt,
+) -> JInt {
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_mut() {
+        let promoted = session.flush_async_jit(std::time::Duration::from_millis(timeout_ms.max(1) as u64));
+        promoted as JInt
+    } else {
+        JNI_ERR_GENERIC
+    }
+}

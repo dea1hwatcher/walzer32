@@ -351,6 +351,34 @@ impl TransdSession {
             key_code,
         });
     }
+
+    /// Enables multi-core background asynchronous JIT compilation for zero-jank execution
+    pub fn enable_async_jit(&mut self, worker_threads: usize) {
+        let threads = if worker_threads == 0 {
+            std::thread::available_parallelism().map(|p| p.get()).unwrap_or(2).min(4)
+        } else {
+            worker_threads
+        };
+        self.engine.enable_async_jit(transd_rt::AsyncJitConfig {
+            worker_threads: threads,
+            ..Default::default()
+        });
+    }
+
+    /// Disables background asynchronous JIT compilation
+    pub fn disable_async_jit(&mut self) {
+        self.engine.disable_async_jit();
+    }
+
+    /// Flushes pending background JIT compilations
+    pub fn flush_async_jit(&mut self, timeout: std::time::Duration) -> usize {
+        self.engine.flush_async_jit(timeout)
+    }
+
+    /// Returns background JIT statistics if active
+    pub fn async_jit_stats(&self) -> Option<transd_rt::AsyncJitStats> {
+        self.engine.async_jit_stats()
+    }
 }
 
 // Global static session protected by Mutex for JNI C ABI entry points

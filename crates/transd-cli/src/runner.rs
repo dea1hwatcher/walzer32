@@ -45,8 +45,9 @@ pub fn execute_so(
     println!("Virtual Size:   {:.2} KB", lib.total_size as f64 / 1024.0);
     println!("Exported syms:  {} symbols", lib.symbols.len());
 
-    // 4. Initialize DBT Engine
+    // 4. Initialize DBT Engine with asynchronous background JIT compilation
     let mut engine = DbtEngine::new(mem);
+    engine.enable_async_jit(transd_rt::AsyncJitConfig::default());
 
     // Set initial stack pointer at top of guest memory space (8-byte aligned)
     engine.cpu.set_sp(0x27FF_F000);
@@ -129,6 +130,16 @@ pub fn execute_so(
                 engine.cache.hits,
                 engine.cache.misses
             );
+
+            if let Some(stats) = engine.async_jit_stats() {
+                println!(
+                    "Async JIT:    {} superblocks compiled ({} enqueued, {} deduped, {} workers)",
+                    stats.jobs_completed,
+                    stats.jobs_enqueued,
+                    stats.dedup_filtered,
+                    stats.worker_count
+                );
+            }
 
             if !gles.draw_calls.is_empty() || gles.swap_count > 0 {
                 println!("\n[Graphics (EGL/GLES) Passthrough Stats]");

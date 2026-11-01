@@ -360,6 +360,7 @@ pub struct DbtEngine<M: Memory> {
     pub syscall_handler: Box<dyn SyscallHandler>,
     pub total_insts_executed: u64,
     pub telemetry: crate::telemetry::TelemetryManager,
+    pub async_jit: Option<crate::async_jit::AsyncJit>,
 }
 
 impl<M: Memory> DbtEngine<M> {
@@ -372,7 +373,61 @@ impl<M: Memory> DbtEngine<M> {
             syscall_handler: Box::new(DefaultSyscallHandler::default()),
             total_insts_executed: 0,
             telemetry: crate::telemetry::TelemetryManager::new(),
+            async_jit: None,
         }
+    }
+
+    /// Initializes a new DBT engine with asynchronous background JIT compilation enabled
+    pub fn with_async_jit(mem: M, config: crate::async_jit::AsyncJitConfig) -> Self {
+        let mut engine = Self::new(mem);
+        engine.enable_async_jit(config);
+        engine
+    }
+
+    /// Enables multi-core background asynchronous JIT compilation
+    pub fn enable_async_jit(&mut self, config: crate::async_jit::AsyncJitConfig) {
+        self.async_jit = Some(crate::async_jit::AsyncJit::new(config));
+    }
+
+    /// Disables background asynchronous JIT compilation and cleanly joins worker threads
+    pub fn disable_async_jit(&mut self) {
+        if let Some(mut jit) = self.async_jit.take() {
+            jit.shutdown();
+        }
+    }
+
+    /// Polls and promotes any completed background JIT superblocks into executable pool and cache.
+    /// Returns the number of superblocks promoted.
+    pub fn poll_background_jit(&mut self) -> usize {
+        if let Some(jit) = &mut self.async_jit {
+            let results = jit.drain_results();
+            let mut count = 0;
+            for res in results {
+                if self.cache.lookup(res.entry).is_some() && !self.cache.has_superblock(res.entry) {
+                    if let Ok(committed) = self.pool.commit_block(&res.compiled.code_bytes) {
+                        self.cache.insert_superblock(res.entry, res.compiled, committed.code_ptr);
+                        self.telemetry.record_tier2_compilation();
+                        count += 1;
+                    }
+                }
+            }
+            count
+        } else {
+            0
+        }
+    }
+
+    /// Waits for all currently queued background JIT compilations to complete and promotes them.
+    pub fn flush_async_jit(&mut self, timeout: std::time::Duration) -> usize {
+        if let Some(jit) = &self.async_jit {
+            let _ = jit.wait_for_idle(timeout);
+        }
+        self.poll_background_jit()
+    }
+
+    /// Returns telemetry and statistics for the background JIT compilation pool if enabled.
+    pub fn async_jit_stats(&self) -> Option<crate::async_jit::AsyncJitStats> {
+        self.async_jit.as_ref().map(|j| j.stats())
     }
 
     /// Access the Virtual File System (VFS) of the engine
@@ -460,6 +515,9 @@ impl<M: Memory> DbtEngine<M> {
         let pc = self.cpu.pc();
         let is_thumb = self.cpu.is_thumb();
 
+        // 0. Poll background JIT results and promote completed superblocks
+        self.poll_background_jit();
+
         // 1. JIT Compilation Check (lift, compile, and commit basic block)
         if self.cache.lookup(pc).is_none() {
             self.telemetry.record_cache_miss();
@@ -478,13 +536,21 @@ impl<M: Memory> DbtEngine<M> {
             self.telemetry.record_cache_hit();
             // 1b. Tier-2 JIT Superblock Promotion for hot loops and traces
             if self.cache.record_exec(pc) && !self.cache.has_superblock(pc) {
-                if let Ok(mut sb) = TraceBuilder::build_trace(&self.mem, pc, is_thumb) {
-                    if sb.block_count > 1 || sb.is_loop {
-                        SuperblockOptimizer::optimize(&mut sb);
-                        let compiled = A64Compiler::compile_superblock(&sb);
-                        self.telemetry.record_tier2_compilation();
-                        if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
-                            self.cache.insert_superblock(pc, compiled, committed.code_ptr);
+                if let Some(jit) = &self.async_jit {
+                    // Offload trace building and optimization to background thread pool
+                    if let Some(code) = crate::async_jit::CodeSnapshot::capture(&self.mem, pc, jit.config().code_window_size) {
+                        jit.enqueue(pc, is_thumb, code);
+                    }
+                } else {
+                    // Synchronous Tier-2 fallback when async JIT is not enabled
+                    if let Ok(mut sb) = TraceBuilder::build_trace(&self.mem, pc, is_thumb) {
+                        if sb.block_count > 1 || sb.is_loop {
+                            SuperblockOptimizer::optimize(&mut sb);
+                            let compiled = A64Compiler::compile_superblock(&sb);
+                            self.telemetry.record_tier2_compilation();
+                            if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
+                                self.cache.insert_superblock(pc, compiled, committed.code_ptr);
+                            }
                         }
                     }
                 }
@@ -573,6 +639,9 @@ impl<M: Memory> DbtEngine<M> {
 
     /// Flushes and resets the entire JIT code cache
     pub fn invalidate_all(&mut self) {
+        if let Some(jit) = &self.async_jit {
+            jit.clear();
+        }
         self.cache.clear();
     }
 
@@ -639,6 +708,7 @@ impl<M: Memory> DbtEngine<M> {
                     steps += 1;
                 }
                 EngineStepResult::Halted { exit_code } => {
+                    self.poll_background_jit();
                     return Ok(exit_code);
                 }
                 EngineStepResult::Breakpoint { imm } => {
@@ -647,6 +717,7 @@ impl<M: Memory> DbtEngine<M> {
             }
         }
 
+        self.poll_background_jit();
         Err(EngineError::Trap("Max execution steps reached".into()))
     }
 }

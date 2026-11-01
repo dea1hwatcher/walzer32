@@ -1,4 +1,5 @@
 pub mod aot_cache;
+pub mod async_jit;
 pub mod cache;
 pub mod engine;
 pub mod futex;
@@ -14,6 +15,10 @@ pub mod vfs;
 pub use aot_cache::{
     calculate_crc32, calculate_sha256, AotBlockRecord, AotCacheError, AotCacheHeader, AotDiskCache,
     AotScanner, AOT_CACHE_MAGIC, AOT_CACHE_VERSION, AOT_HEADER_SIZE, AOT_TARGET_ARCH_AARCH64,
+};
+pub use async_jit::{
+    AsyncJit, AsyncJitConfig, AsyncJitStats, CodeSnapshot, CompilationJob, CompilationQueue,
+    CompilationResult,
 };
 pub use cache::{ConcurrentJitCache, JitCache};
 pub use engine::{DbtEngine, DefaultSyscallHandler, EngineError, EngineStepResult, SyscallHandler};
