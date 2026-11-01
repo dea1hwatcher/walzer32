@@ -15,6 +15,8 @@ use transd_core::GuestAddr;
 pub enum FaultOrigin {
     /// Attempt to access NULL or first page (0x0..0x1000)
     GuestNullPointer { fault_addr: usize },
+    /// Write trap to a write-protected guest code page (Self-Modifying Code)
+    GuestCodeWriteTrap { fault_addr: usize, guest_addr: GuestAddr },
     /// Out-of-bounds or invalid access within guest memory arena
     GuestArenaViolation { fault_addr: usize, guest_addr: GuestAddr },
     /// Fault occurred outside guest arena (real host crash)
@@ -83,6 +85,22 @@ impl SignalManager {
         }
 
         FaultOrigin::HostInternal { fault_addr }
+    }
+
+    /// Classifies a fault address with write and code-page awareness for SMC write trapping
+    pub fn classify_fault_with_access(
+        &self,
+        fault_addr: usize,
+        is_write: bool,
+        is_code_page: bool,
+    ) -> FaultOrigin {
+        let base_origin = self.classify_fault(fault_addr);
+        match base_origin {
+            FaultOrigin::GuestArenaViolation { fault_addr, guest_addr } if is_write && is_code_page => {
+                FaultOrigin::GuestCodeWriteTrap { fault_addr, guest_addr }
+            }
+            other => other,
+        }
     }
 
     /// Installs POSIX signal handlers on Unix/Android targets
@@ -190,6 +208,23 @@ mod tests {
         assert_eq!(
             mgr.classify_fault(fault),
             FaultOrigin::HostInternal { fault_addr: fault }
+        );
+    }
+
+    #[test]
+    fn test_classify_guest_code_write_trap() {
+        let base = 0x7000_0000;
+        let size = 0x1000_0000;
+        let mgr = SignalManager::new(base, size);
+
+        let fault = base + 0x0010_2000;
+        let origin = mgr.classify_fault_with_access(fault, true, true);
+        assert_eq!(
+            origin,
+            FaultOrigin::GuestCodeWriteTrap {
+                fault_addr: fault,
+                guest_addr: GuestAddr::new(0x0010_2000),
+            }
         );
     }
 

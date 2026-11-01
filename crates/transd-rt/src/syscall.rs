@@ -26,6 +26,7 @@ pub mod nr {
     pub const OPENAT: u32 = 322;
     pub const CLOCK_GETTIME: u32 = 263;
     pub const CLONE: u32 = 120;
+    pub const ARM_CACHE_FLUSH: u32 = 0xF0002;
     pub const ARM_SET_TLS: u32 = 0xF0005;
 }
 

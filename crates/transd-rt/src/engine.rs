@@ -102,6 +102,12 @@ impl SyscallHandler for DefaultSyscallHandler {
                 cpu.set_reg(Reg::R0, 0);
                 Ok(None)
             }
+            nr::ARM_CACHE_FLUSH => {
+                // ARM Linux cacheflush syscall: arg0 = start, arg1 = end, arg2 = flags
+                // Success returns 0
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
             nr::FUTEX => {
                 let uaddr = GuestAddr::new(args.arg0);
                 let op = args.arg1 & !futex_op::PRIVATE_FLAG;
@@ -204,6 +210,11 @@ impl<M: Memory> DbtEngine<M> {
                         let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
                         self.total_insts_executed += inst_count;
                         let args = SyscallArgs::from_cpu(&self.cpu);
+                        if args.nr == nr::ARM_CACHE_FLUSH {
+                            let start = GuestAddr::new(args.arg0);
+                            let len = (args.arg1.saturating_sub(args.arg0)) as usize;
+                            self.cache.invalidate_range(start, len);
+                        }
                         if let Some(exit_code) = self
                             .syscall_handler
                             .handle_syscall(args, &mut self.cpu, &mut self.mem)?
@@ -232,6 +243,11 @@ impl<M: Memory> DbtEngine<M> {
             StepResult::Bkpt { imm } => Ok(EngineStepResult::Breakpoint { imm }),
             StepResult::Svc { .. } => {
                 let args = SyscallArgs::from_cpu(&self.cpu);
+                if args.nr == nr::ARM_CACHE_FLUSH {
+                    let start = GuestAddr::new(args.arg0);
+                    let len = (args.arg1.saturating_sub(args.arg0)) as usize;
+                    self.cache.invalidate_range(start, len);
+                }
                 if let Some(exit_code) = self
                     .syscall_handler
                     .handle_syscall(args, &mut self.cpu, &mut self.mem)?
@@ -242,6 +258,30 @@ impl<M: Memory> DbtEngine<M> {
                 }
             }
         }
+    }
+
+    /// Invalidates all JIT compiled blocks overlapping the given guest virtual address range
+    pub fn invalidate_range(&mut self, start: GuestAddr, len: usize) -> usize {
+        self.cache.invalidate_range(start, len)
+    }
+
+    /// Flushes and resets the entire JIT code cache
+    pub fn invalidate_all(&mut self) {
+        self.cache.clear();
+    }
+
+    /// Writes u32 to guest memory with automatic Self-Modifying Code (SMC) cache invalidation
+    pub fn write_guest_u32(&mut self, addr: GuestAddr, val: u32) -> Result<(), transd_core::MemoryError> {
+        self.mem.write_u32(addr, val)?;
+        self.cache.invalidate_range(addr, 4);
+        Ok(())
+    }
+
+    /// Writes a slice of bytes to guest memory with automatic Self-Modifying Code (SMC) cache invalidation
+    pub fn write_guest_bytes(&mut self, addr: GuestAddr, buf: &[u8]) -> Result<(), transd_core::MemoryError> {
+        self.mem.write_bytes(addr, buf)?;
+        self.cache.invalidate_range(addr, buf.len());
+        Ok(())
     }
 
     /// Links and chains direct branches between two compiled blocks in executable memory

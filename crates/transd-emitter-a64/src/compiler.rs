@@ -38,6 +38,7 @@ pub struct CompiledBlock {
     pub is_thumb: bool,
     pub code_bytes: Vec<u8>,
     pub inst_count: usize,
+    pub guest_byte_size: usize,
     pub patch_sites: Vec<PatchSite>,
     pub exit: BlockExit,
 }
@@ -69,6 +70,7 @@ impl A64Compiler {
             is_thumb: block.is_thumb,
             code_bytes: asm.to_bytes(),
             inst_count: block.insts.len(),
+            guest_byte_size: block.byte_size,
             patch_sites,
             exit: block.exit.clone(),
         }

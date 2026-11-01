@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use transd_core::GuestAddr;
 use transd_emitter_a64::{CompiledBlock, PatchTarget};
+use crate::jit_memory::flush_icache;
 use crate::jit_pool::HostCodePtr;
 
-/// Direct JIT Code Cache managing compiled blocks and inter-block jump chaining
+/// Direct JIT Code Cache managing compiled blocks, inter-block jump chaining,
+/// page tracking for Self-Modifying Code (SMC), and reverse unchaining.
 #[derive(Default)]
 pub struct JitCache {
     /// Mapping from Guest entry address to compiled block metadata
@@ -12,10 +14,16 @@ pub struct JitCache {
     pub code_ptrs: HashMap<GuestAddr, HostCodePtr>,
     /// Control-flow graph edges (source guest address -> target guest addresses)
     pub outgoing_edges: HashMap<GuestAddr, Vec<GuestAddr>>,
+    /// Reverse control-flow graph edges (target guest address -> set of source guest addresses)
+    pub incoming_edges: HashMap<GuestAddr, HashSet<GuestAddr>>,
+    /// Page table mapping 4KB page PFN (`addr >> 12`) to guest block entry addresses spanning that page
+    pub page_to_blocks: HashMap<u32, HashSet<GuestAddr>>,
     /// Hit, miss, and chaining statistics
     pub hits: u64,
     pub misses: u64,
     pub chained_jumps: u64,
+    pub unchained_jumps: u64,
+    pub smc_invalidations: u64,
 }
 
 impl JitCache {
@@ -40,14 +48,39 @@ impl JitCache {
     }
 
     pub fn insert(&mut self, addr: GuestAddr, block: CompiledBlock) {
+        self.register_pages_for(addr, block.guest_byte_size);
         self.blocks.insert(addr, block);
         self.resolve_chaining_for(addr);
     }
 
     pub fn insert_committed(&mut self, addr: GuestAddr, block: CompiledBlock, ptr: HostCodePtr) {
         self.code_ptrs.insert(addr, ptr);
+        self.register_pages_for(addr, block.guest_byte_size);
         self.blocks.insert(addr, block);
         self.resolve_chaining_for(addr);
+    }
+
+    fn register_pages_for(&mut self, addr: GuestAddr, size: usize) {
+        let start_page = addr.as_u32() >> 12;
+        let end_addr = addr.as_u32().saturating_add(size.max(1) as u32 - 1);
+        let end_page = end_addr >> 12;
+        for pfn in start_page..=end_page {
+            self.page_to_blocks.entry(pfn).or_default().insert(addr);
+        }
+    }
+
+    fn unregister_pages_for(&mut self, addr: GuestAddr, size: usize) {
+        let start_page = addr.as_u32() >> 12;
+        let end_addr = addr.as_u32().saturating_add(size.max(1) as u32 - 1);
+        let end_page = end_addr >> 12;
+        for pfn in start_page..=end_page {
+            if let Some(set) = self.page_to_blocks.get_mut(&pfn) {
+                set.remove(&addr);
+            }
+            if self.page_to_blocks.get(&pfn).is_some_and(|s| s.is_empty()) {
+                self.page_to_blocks.remove(&pfn);
+            }
+        }
     }
 
     /// Resolves block chaining links whenever a new block is added
@@ -63,6 +96,7 @@ impl JitCache {
                 };
                 if self.blocks.contains_key(&target_addr) {
                     new_edges.push(target_addr);
+                    self.incoming_edges.entry(target_addr).or_default().insert(addr);
                     self.chained_jumps += 1;
                 }
             }
@@ -85,22 +119,132 @@ impl JitCache {
                 };
                 if target_addr == addr {
                     self.outgoing_edges.entry(src_addr).or_default().push(addr);
+                    self.incoming_edges.entry(addr).or_default().insert(src_addr);
                     self.chained_jumps += 1;
                 }
             }
         }
     }
 
+    /// Unchains all caller blocks that have direct branches jumping to `target`.
+    /// Restores the original fallback exit stub in executable memory and flushes instruction cache.
+    pub fn unchain_incoming(&mut self, target: GuestAddr) {
+        if let Some(callers) = self.incoming_edges.remove(&target) {
+            for src_addr in callers {
+                if let (Some(src_block), Some(src_ptr)) = (self.blocks.get(&src_addr), self.code_ptrs.get(&src_addr)) {
+                    for site in &src_block.patch_sites {
+                        let site_target = match site.target {
+                            PatchTarget::Direct(t) => t,
+                            PatchTarget::BranchTaken { target: t, .. } => t,
+                            PatchTarget::BranchFallthrough(t) => t,
+                        };
+                        if site_target == target && site.byte_offset + 4 <= src_block.code_bytes.len() {
+                            unsafe {
+                                let dest = (src_ptr.0 as usize + site.byte_offset) as *mut u8;
+                                std::ptr::copy_nonoverlapping(
+                                    src_block.code_bytes[site.byte_offset..].as_ptr(),
+                                    dest,
+                                    4,
+                                );
+                                flush_icache(dest, 4);
+                            }
+                            self.unchained_jumps += 1;
+                        }
+                    }
+                }
+                if let Some(out) = self.outgoing_edges.get_mut(&src_addr) {
+                    out.retain(|&dst| dst != target);
+                }
+            }
+        }
+    }
+
+    /// Invalidates a single basic block by address, unchaining any incoming jumps
+    pub fn invalidate_block(&mut self, addr: GuestAddr) -> bool {
+        self.unchain_incoming(addr);
+
+        if let Some(targets) = self.outgoing_edges.remove(&addr) {
+            for target in targets {
+                if let Some(incoming) = self.incoming_edges.get_mut(&target) {
+                    incoming.remove(&addr);
+                }
+            }
+        }
+
+        if let Some(block) = self.blocks.remove(&addr) {
+            self.unregister_pages_for(addr, block.guest_byte_size);
+            self.code_ptrs.remove(&addr);
+            self.smc_invalidations += 1;
+            true
+        } else {
+            self.code_ptrs.remove(&addr);
+            false
+        }
+    }
+
+    /// Invalidates any compiled blocks overlapping the guest address range `[start, start + len)`
+    pub fn invalidate_range(&mut self, start: GuestAddr, len: usize) -> usize {
+        if len == 0 {
+            return 0;
+        }
+        let end = start.as_u32().saturating_add(len as u32);
+        let start_page = start.as_u32() >> 12;
+        let end_page = (end.saturating_sub(1)) >> 12;
+
+        let mut candidate_blocks = HashSet::new();
+        for pfn in start_page..=end_page {
+            if let Some(set) = self.page_to_blocks.get(&pfn) {
+                candidate_blocks.extend(set.iter().copied());
+            }
+        }
+
+        let mut count = 0;
+        for entry in candidate_blocks {
+            if let Some(block) = self.blocks.get(&entry) {
+                let block_start = entry.as_u32();
+                let block_end = block_start.saturating_add(block.guest_byte_size.max(1) as u32);
+                if block_start < end && block_end > start.as_u32() && self.invalidate_block(entry) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Invalidates all blocks residing on a specific 4KB page
+    pub fn invalidate_page(&mut self, pfn: u32) -> usize {
+        let blocks = self.page_to_blocks.get(&pfn).cloned();
+        let mut count = 0;
+        if let Some(blocks) = blocks {
+            for addr in blocks {
+                if self.invalidate_block(addr) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Returns true if the given 4KB page contains compiled JIT blocks
+    pub fn is_code_page(&self, pfn: u32) -> bool {
+        self.page_to_blocks.contains_key(&pfn)
+    }
+
+    /// Legacy invalidate wrapper
     pub fn invalidate(&mut self, addr: GuestAddr) {
-        self.blocks.remove(&addr);
-        self.code_ptrs.remove(&addr);
-        self.outgoing_edges.remove(&addr);
+        self.invalidate_block(addr);
     }
 
     pub fn clear(&mut self) {
+        let addrs: Vec<GuestAddr> = self.blocks.keys().copied().collect();
+        for addr in addrs {
+            self.unchain_incoming(addr);
+        }
         self.blocks.clear();
         self.code_ptrs.clear();
         self.outgoing_edges.clear();
+        self.incoming_edges.clear();
+        self.page_to_blocks.clear();
         self.chained_jumps = 0;
     }
 
@@ -142,6 +286,26 @@ impl ConcurrentJitCache {
         cache.insert_committed(addr, block, ptr);
     }
 
+    pub fn invalidate_block(&self, addr: GuestAddr) -> bool {
+        let mut cache = self.inner.write().unwrap();
+        cache.invalidate_block(addr)
+    }
+
+    pub fn invalidate_range(&self, start: GuestAddr, len: usize) -> usize {
+        let mut cache = self.inner.write().unwrap();
+        cache.invalidate_range(start, len)
+    }
+
+    pub fn invalidate_page(&self, pfn: u32) -> usize {
+        let mut cache = self.inner.write().unwrap();
+        cache.invalidate_page(pfn)
+    }
+
+    pub fn is_code_page(&self, pfn: u32) -> bool {
+        let cache = self.inner.read().unwrap();
+        cache.is_code_page(pfn)
+    }
+
     pub fn count(&self) -> usize {
         self.inner.read().unwrap().count()
     }
@@ -167,6 +331,7 @@ mod tests {
             is_thumb: false,
             code_bytes: vec![0; 16],
             inst_count: 3,
+            guest_byte_size: 16,
             patch_sites: vec![PatchSite {
                 byte_offset: 12,
                 target: PatchTarget::Direct(GuestAddr::new(0x1020)),
@@ -184,6 +349,7 @@ mod tests {
             is_thumb: false,
             code_bytes: vec![0; 16],
             inst_count: 2,
+            guest_byte_size: 16,
             patch_sites: vec![],
             exit: BlockExit::Direct(GuestAddr::new(0x1040)),
         };
@@ -192,5 +358,55 @@ mod tests {
         cache.insert(GuestAddr::new(0x1020), block_b);
         assert!(cache.chained_jumps >= 1);
         assert!(cache.outgoing_edges.get(&GuestAddr::new(0x1000)).unwrap().contains(&GuestAddr::new(0x1020)));
+        assert!(cache.incoming_edges.get(&GuestAddr::new(0x1020)).unwrap().contains(&GuestAddr::new(0x1000)));
+    }
+
+    #[test]
+    fn test_jit_cache_smc_range_and_unchaining() {
+        let mut cache = JitCache::new();
+
+        let block_a = CompiledBlock {
+            guest_entry: GuestAddr::new(0x2000),
+            is_thumb: false,
+            code_bytes: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            inst_count: 4,
+            guest_byte_size: 16,
+            patch_sites: vec![PatchSite {
+                byte_offset: 12,
+                target: PatchTarget::Direct(GuestAddr::new(0x2030)),
+            }],
+            exit: BlockExit::Direct(GuestAddr::new(0x2030)),
+        };
+
+        let block_b = CompiledBlock {
+            guest_entry: GuestAddr::new(0x2030),
+            is_thumb: false,
+            code_bytes: vec![20; 16],
+            inst_count: 4,
+            guest_byte_size: 16,
+            patch_sites: vec![],
+            exit: BlockExit::Direct(GuestAddr::new(0x2080)),
+        };
+
+        let mut fake_jit_mem = vec![0u8; 64];
+        let ptr_a = HostCodePtr(fake_jit_mem.as_mut_ptr());
+
+        cache.insert_committed(GuestAddr::new(0x2000), block_a, ptr_a);
+        cache.insert(GuestAddr::new(0x2030), block_b);
+
+        assert_eq!(cache.count(), 2);
+        assert!(cache.is_code_page(0x2000 >> 12));
+        assert!(cache.outgoing_edges.get(&GuestAddr::new(0x2000)).unwrap().contains(&GuestAddr::new(0x2030)));
+
+        // Now guest modifies code at 0x2034 (inside Block B: 0x2030..0x2040)
+        let invalidated = cache.invalidate_range(GuestAddr::new(0x2034), 4);
+        assert_eq!(invalidated, 1);
+        assert_eq!(cache.count(), 1);
+        assert!(cache.lookup(GuestAddr::new(0x2030)).is_none());
+        assert!(cache.lookup(GuestAddr::new(0x2000)).is_some());
+
+        // Verify incoming edges to 0x2030 were cleared and outgoing edge from 0x2000 was removed
+        assert!(cache.incoming_edges.get(&GuestAddr::new(0x2030)).is_none());
+        assert!(cache.outgoing_edges.get(&GuestAddr::new(0x2000)).unwrap().is_empty());
     }
 }
