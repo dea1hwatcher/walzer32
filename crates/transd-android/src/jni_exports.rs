@@ -431,3 +431,58 @@ pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeGetAudioOverr
         0
     }
 }
+
+
+/// JNI Export: Set AOT Cache Directory
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeSetAotCacheDir(
+    _env: JNIEnv,
+    _clazz: JClass,
+    path_ptr: *const u8,
+    path_len: usize,
+) -> JInt {
+    if path_ptr.is_null() || path_len == 0 {
+        return JNI_ERR_GENERIC;
+    }
+    let path_str = match std::str::from_utf8(unsafe { std::slice::from_raw_parts(path_ptr, path_len) }) {
+        Ok(s) => s,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_mut() {
+        session.set_aot_cache_dir(path_str);
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Precompile Library Ahead-Of-Time
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativePrecompileLibrary(
+    _env: JNIEnv,
+    _clazz: JClass,
+    name_ptr: *const u8,
+    name_len: usize,
+    max_blocks: JInt,
+) -> JInt {
+    if name_ptr.is_null() || name_len == 0 {
+        return JNI_ERR_GENERIC;
+    }
+    let name_str = match std::str::from_utf8(unsafe { std::slice::from_raw_parts(name_ptr, name_len) }) {
+        Ok(s) => s,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_mut() {
+        session.precompile_library(name_str, (max_blocks.max(1)) as usize) as JInt
+    } else {
+        JNI_ERR_GENERIC
+    }
+}

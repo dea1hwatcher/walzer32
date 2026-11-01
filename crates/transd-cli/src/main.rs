@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::process;
-use transd_cli::{adb, apk_cmd, bench, info, package, runner};
+use transd_cli::{adb, aot_cmd, apk_cmd, bench, info, package, runner};
 
 fn print_usage() {
     println!(
@@ -57,6 +57,12 @@ COMMANDS:
         Options:
             -s, --device <id>         Target device serial
             --activity <name>         Activity name to launch (auto-detected for APK)
+
+    aot <file.so> [OPTIONS]
+        Ahead-Of-Time (AOT) pre-compile a 32-bit ARM ELF library into a .transd_cache file
+        Options:
+            -o, --output <file>       Output cache file path
+            --max-blocks <count>      Max blocks to discover and compile (default: 10000)
 
     bench <file.so> [OPTIONS]
         Benchmark execution throughput (MIPS), compilation latency, and JIT caching
@@ -588,6 +594,56 @@ fn main() {
 
             if let Err(e) = adb::launch_app(device_id, target, activity) {
                 eprintln!("ADB Launch Error: {}", e);
+                process::exit(1);
+            }
+        }
+        "aot" => {
+            if args.len() < 3 {
+                eprintln!("Error: missing file path for 'aot' command");
+                eprintln!("Usage: transd-cli aot <file.so> [-o output.transd_cache] [--max-blocks 10000]");
+                process::exit(1);
+            }
+            let so_path = &args[2];
+            let mut output_path = None;
+            let mut max_blocks = 10000;
+
+            let mut idx = 3;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "-o" | "--output" => {
+                        if idx + 1 < args.len() {
+                            output_path = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: -o/--output requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    "--max-blocks" => {
+                        if idx + 1 < args.len() {
+                            match args[idx + 1].parse::<usize>() {
+                                Ok(n) => max_blocks = n,
+                                Err(_) => {
+                                    eprintln!("Error: invalid max-blocks number");
+                                    process::exit(1);
+                                }
+                            }
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --max-blocks requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    unknown => {
+                        eprintln!("Error: unknown option '{}'", unknown);
+                        print_usage();
+                        process::exit(1);
+                    }
+                }
+            }
+
+            if let Err(e) = aot_cmd::compile_aot(so_path, output_path, max_blocks) {
+                eprintln!("AOT Compiler Error: {}", e);
                 process::exit(1);
             }
         }

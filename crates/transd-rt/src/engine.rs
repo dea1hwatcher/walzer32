@@ -407,6 +407,52 @@ impl<M: Memory> DbtEngine<M> {
         self.telemetry.render_hud_overlay()
     }
 
+    /// Imports pre-compiled AOT blocks and superblocks from disk cache into executable JIT pool
+    pub fn import_aot_cache(&mut self, aot: &crate::aot_cache::AotDiskCache) -> Result<usize, crate::aot_cache::AotCacheError> {
+        aot.apply_to_engine(self)
+    }
+
+    /// Exports all compiled blocks and superblocks into an AotDiskCache
+    pub fn export_aot_cache(&self, binary_hash: [u8; 32], build_id: [u8; 20]) -> crate::aot_cache::AotDiskCache {
+        crate::aot_cache::AotDiskCache::extract_from_engine(self, binary_hash, build_id)
+    }
+
+    /// Loads an AOT cache file from disk, verifying expected hash if provided
+    pub fn load_aot_cache_file(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+        expected_hash: Option<&[u8; 32]>,
+    ) -> Result<usize, crate::aot_cache::AotCacheError> {
+        let aot = crate::aot_cache::AotDiskCache::load_from_file(path)?;
+        if let Some(expected) = expected_hash {
+            if &aot.header.binary_hash != expected {
+                let exp_str = expected.iter().map(|b| format!("{b:02x}")).collect();
+                let act_str = aot.header.binary_hash.iter().map(|b| format!("{b:02x}")).collect();
+                return Err(crate::aot_cache::AotCacheError::HashMismatch {
+                    expected: exp_str,
+                    actual: act_str,
+                });
+            }
+        }
+        self.import_aot_cache(&aot)
+    }
+
+    /// Saves the current engine compiled blocks to an AOT cache file on disk
+    pub fn save_aot_cache_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        binary_hash: [u8; 32],
+        build_id: [u8; 20],
+    ) -> Result<(), crate::aot_cache::AotCacheError> {
+        let aot = self.export_aot_cache(binary_hash, build_id);
+        aot.save_to_file(path)
+    }
+
+    /// Performs Ahead-Of-Time (AOT) pre-compilation from known entry points
+    pub fn precompile_aot(&mut self, entry_points: &[GuestAddr], max_blocks: usize) -> usize {
+        crate::aot_cache::AotScanner::compile_reachable(self, entry_points, max_blocks)
+    }
+
     /// Single step execution through DBT pipeline.
     /// On AArch64 devices, dispatches natively to compiled machine code.
     /// On dev-host x86_64, uses the verified interpreter execution engine.

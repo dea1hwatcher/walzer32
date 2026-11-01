@@ -62,6 +62,16 @@ pub fn run_benchmark(
     let mut engine = DbtEngine::new(mem);
     engine.cpu.set_sp(0x27FF_F000);
 
+    // If a persistent AOT translation cache exists, pre-load all blocks for zero cold-start latency
+    let default_cache_path = format!("{path}.transd_cache");
+    if std::path::Path::new(&default_cache_path).exists() {
+        let hash = transd_rt::calculate_sha256(data);
+        match engine.load_aot_cache_file(&default_cache_path, Some(&hash)) {
+            Ok(count) => println!("Preloaded {} AOT blocks from disk cache ({})", count, default_cache_path),
+            Err(e) => eprintln!("Warning: failed to load AOT cache: {}", e),
+        }
+    }
+
     // Constructors
     if let Some(init) = lib.init_func {
         invoke_guest_full(&mut engine, &mut bionic, &mut jni, Some(&mut gles), init, &[])?;

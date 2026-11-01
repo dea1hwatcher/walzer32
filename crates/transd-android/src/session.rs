@@ -36,6 +36,7 @@ pub struct TransdSession {
     pub jni: JniBridge,
     pub surface: SurfaceBridge,
     pub audio: AudioBridge,
+    pub aot_cache_dir: Option<std::path::PathBuf>,
     pub apk_bytes: Option<Vec<u8>>,
     pub loaded_libraries: HashMap<String, LoadedLibrary>,
     pub next_load_addr: GuestAddr,
@@ -87,6 +88,7 @@ impl TransdSession {
             jni,
             surface,
             audio,
+            aot_cache_dir: None,
             apk_bytes: None,
             loaded_libraries: HashMap::new(),
             next_load_addr: lib_load_base,
@@ -153,6 +155,34 @@ impl TransdSession {
 
         self.loaded_libraries.insert(name.to_string(), loaded.clone());
 
+        // Automatic AOT translation cache loading & pre-compilation
+        if let Some(ref dir) = self.aot_cache_dir {
+            let hash = transd_rt::calculate_sha256(elf_bytes);
+            let cache_filename = format!("{name}.transd_cache");
+            let cache_path = dir.join(cache_filename);
+
+            if cache_path.exists() {
+                let _ = self.engine.load_aot_cache_file(&cache_path, Some(&hash));
+            } else {
+                let mut entries = Vec::new();
+                if let Some(init) = loaded.init_func {
+                    entries.push(init);
+                }
+                for &init in &loaded.init_array {
+                    entries.push(init);
+                }
+                if loaded.entry_point.as_u32() != 0 {
+                    entries.push(loaded.entry_point);
+                }
+                for &addr in loaded.symbols.values() {
+                    entries.push(addr);
+                }
+
+                self.engine.precompile_aot(&entries, 5000);
+                let _ = self.engine.save_aot_cache_file(&cache_path, hash, [0u8; 20]);
+            }
+        }
+
         // Call JNI_OnLoad if present
         if let Some(onload_addr) = loaded.find_symbol("JNI_OnLoad") {
             let _ = invoke_jni_onload(
@@ -209,6 +239,43 @@ impl TransdSession {
     /// Returns total number of audio overruns encountered
     pub fn get_audio_overruns(&self) -> u64 {
         self.audio.overrun_count()
+    }
+
+    /// Sets directory for reading and writing persistent AOT translation caches
+    pub fn set_aot_cache_dir(&mut self, dir: impl Into<std::path::PathBuf>) {
+        self.aot_cache_dir = Some(dir.into());
+    }
+
+    /// Pre-compiles all reachable basic blocks and hot superblocks for a loaded library
+    pub fn precompile_library(&mut self, name: &str, max_blocks: usize) -> usize {
+        if let Some(loaded) = self.loaded_libraries.get(name) {
+            let mut entries = Vec::new();
+            if let Some(init) = loaded.init_func {
+                entries.push(init);
+            }
+            for &init in &loaded.init_array {
+                entries.push(init);
+            }
+            if loaded.entry_point.as_u32() != 0 {
+                entries.push(loaded.entry_point);
+            }
+            for &addr in loaded.symbols.values() {
+                entries.push(addr);
+            }
+            self.engine.precompile_aot(&entries, max_blocks)
+        } else {
+            0
+        }
+    }
+
+    /// Exports AOT disk cache for current session state
+    pub fn export_aot_cache(&self, binary_hash: [u8; 32], build_id: [u8; 20]) -> transd_rt::AotDiskCache {
+        self.engine.export_aot_cache(binary_hash, build_id)
+    }
+
+    /// Imports an AOT disk cache into session
+    pub fn import_aot_cache(&mut self, cache: &transd_rt::AotDiskCache) -> Result<usize, transd_rt::AotCacheError> {
+        self.engine.import_aot_cache(cache)
     }
 
     /// Get list of native methods registered via JNI env->RegisterNatives
