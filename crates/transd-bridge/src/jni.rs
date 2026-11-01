@@ -11,17 +11,43 @@ pub const JNI_VERSION_1_6: u32 = 0x00010006;
 pub const JNI_OK: u32 = 0;
 pub const JNI_ERR: u32 = 0xFFFF_FFFF;
 
-/// Standard JNI Function Table Indices
+/// Standard JNI Function Table Indices (per JNI spec table jni.h)
 pub mod jni_idx {
     pub const GET_VERSION: u32 = 4;
     pub const FIND_CLASS: u32 = 6;
+    pub const THROW_NEW: u32 = 14;
+    pub const EXCEPTION_CHECK: u32 = 228;
+    pub const EXCEPTION_CLEAR: u32 = 17;
+    pub const EXCEPTION_OCCURRED: u32 = 15;
+    pub const NEW_OBJECT: u32 = 28;
+    pub const GET_OBJECT_CLASS: u32 = 31;
     pub const GET_METHOD_ID: u32 = 33;
+    pub const CALL_OBJECT_METHOD: u32 = 34;
+    pub const CALL_BOOL_METHOD: u32 = 37;
     pub const CALL_INT_METHOD: u32 = 52;
     pub const CALL_VOID_METHOD: u32 = 64;
     pub const GET_STATIC_METHOD_ID: u32 = 113;
+    pub const CALL_STATIC_OBJECT_METHOD: u32 = 114;
+    pub const CALL_STATIC_INT_METHOD: u32 = 120;
+    pub const CALL_STATIC_VOID_METHOD: u32 = 126;
+    pub const GET_FIELD_ID: u32 = 94;
+    pub const GET_OBJECT_FIELD: u32 = 95;
+    pub const GET_BOOL_FIELD: u32 = 96;
+    pub const GET_INT_FIELD: u32 = 100;
+    pub const SET_INT_FIELD: u32 = 106;
+    pub const SET_OBJECT_FIELD: u32 = 104;
+    pub const GET_STATIC_FIELD_ID: u32 = 144;
+    pub const GET_STATIC_INT_FIELD: u32 = 150;
+    pub const NEW_GLOBAL_REF: u32 = 21;
+    pub const DELETE_GLOBAL_REF: u32 = 22;
+    pub const DELETE_LOCAL_REF: u32 = 23;
     pub const NEW_STRING_UTF: u32 = 166;
     pub const GET_STRING_UTF_CHARS: u32 = 168;
     pub const RELEASE_STRING_UTF_CHARS: u32 = 169;
+    pub const GET_ARRAY_LENGTH: u32 = 171;
+    pub const NEW_BYTE_ARRAY: u32 = 176;
+    pub const GET_BYTE_ARRAY_ELEMENTS: u32 = 184;
+    pub const RELEASE_BYTE_ARRAY_ELEMENTS: u32 = 192;
     pub const REGISTER_NATIVES: u32 = 215;
 }
 
@@ -55,8 +81,13 @@ pub struct JniBridge {
     pub strings: HashMap<u32, String>,
     pub string_addrs: HashMap<u32, GuestAddr>,
     pub classes: HashMap<String, u32>,
+    pub global_refs: HashMap<u32, u32>,
     pub registered_natives: Vec<RegisteredNativeMethod>,
     pub string_heap_cur: GuestAddr,
+    /// Pending exception handle (0 = no exception)
+    pub pending_exception: u32,
+    /// Byte arrays: handle -> guest address
+    pub byte_arrays: HashMap<u32, (GuestAddr, usize)>,
 }
 
 impl JniBridge {
@@ -90,8 +121,11 @@ impl JniBridge {
             strings: HashMap::new(),
             string_addrs: HashMap::new(),
             classes: HashMap::new(),
+            global_refs: HashMap::new(),
             registered_natives: Vec::new(),
             string_heap_cur,
+            pending_exception: 0,
+            byte_arrays: HashMap::new(),
         }
     }
 
@@ -189,41 +223,105 @@ impl JniBridge {
         mem: &mut impl Memory,
     ) -> Result<bool, MemoryError> {
         match func_idx {
+            // ── Version ────────────────────────────────────────────────────────
             jni_idx::GET_VERSION => {
-                // jint GetVersion(JNIEnv *env)
                 cpu.set_reg(Reg::R0, JNI_VERSION_1_6);
             }
+
+            // ── Class lookup ───────────────────────────────────────────────────
             jni_idx::FIND_CLASS => {
                 // jclass FindClass(JNIEnv *env, const char *name)
-                // r0 = env, r1 = name_ptr
                 let name_addr = GuestAddr::new(cpu.reg(Reg::R1));
                 let name = Self::read_c_string(mem, name_addr)?;
-
-                let handle = if let Some(&h) = self.classes.get(&name) {
-                    h
-                } else {
-                    let h = self.next_handle;
-                    self.next_handle += 1;
-                    self.classes.insert(name, h);
-                    h
-                };
+                let handle = self.intern_class(name);
                 cpu.set_reg(Reg::R0, handle);
             }
-            jni_idx::GET_METHOD_ID | jni_idx::GET_STATIC_METHOD_ID => {
-                // jmethodID GetMethodID(JNIEnv *env, jclass clazz, const char *name, const char *sig)
+            jni_idx::GET_OBJECT_CLASS => {
+                // jclass GetObjectClass(JNIEnv *env, jobject obj)
+                // We don't track obj->class mapping; return a generic handle
                 let handle = self.next_handle;
                 self.next_handle += 1;
                 cpu.set_reg(Reg::R0, handle);
             }
+
+            // ── Method IDs ────────────────────────────────────────────────────
+            jni_idx::GET_METHOD_ID | jni_idx::GET_STATIC_METHOD_ID => {
+                // jmethodID GetMethodID(JNIEnv, jclass, name, sig)
+                let handle = self.next_handle;
+                self.next_handle += 1;
+                cpu.set_reg(Reg::R0, handle);
+            }
+
+            // ── Method calls (stub: return 0 on dev host) ─────────────────────
+            jni_idx::CALL_OBJECT_METHOD | jni_idx::CALL_STATIC_OBJECT_METHOD => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            jni_idx::CALL_BOOL_METHOD => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            jni_idx::CALL_INT_METHOD | jni_idx::CALL_STATIC_INT_METHOD => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            jni_idx::CALL_VOID_METHOD | jni_idx::CALL_STATIC_VOID_METHOD => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            // ── Object lifecycle ──────────────────────────────────────────────
+            jni_idx::NEW_OBJECT => {
+                // jobject NewObject(JNIEnv, jclass, jmethodID, ...)
+                let handle = self.next_handle;
+                self.next_handle += 1;
+                cpu.set_reg(Reg::R0, handle);
+            }
+            jni_idx::NEW_GLOBAL_REF => {
+                // jobject NewGlobalRef(JNIEnv *env, jobject obj)
+                let obj = cpu.reg(Reg::R1);
+                // In our model, global refs share the same handle space.
+                // Just record the mapping and return the same handle.
+                self.global_refs.insert(obj, obj);
+                cpu.set_reg(Reg::R0, obj);
+            }
+            jni_idx::DELETE_GLOBAL_REF => {
+                let obj = cpu.reg(Reg::R1);
+                self.global_refs.remove(&obj);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            jni_idx::DELETE_LOCAL_REF => {
+                // Local refs are stack-scoped; we don't track them — no-op.
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            // ── Field IDs ─────────────────────────────────────────────────────
+            jni_idx::GET_FIELD_ID | jni_idx::GET_STATIC_FIELD_ID => {
+                let handle = self.next_handle;
+                self.next_handle += 1;
+                cpu.set_reg(Reg::R0, handle);
+            }
+
+            // ── Field access (stub: memory not backed, return 0) ───────────────
+            jni_idx::GET_OBJECT_FIELD | jni_idx::SET_OBJECT_FIELD => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            jni_idx::GET_BOOL_FIELD => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            jni_idx::GET_INT_FIELD | jni_idx::GET_STATIC_INT_FIELD => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            jni_idx::SET_INT_FIELD => {
+                // void SetIntField(JNIEnv, jobject, jfieldID, jint value)
+                // r3 = value — we accept it but don't store in a real Java heap
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            // ── Strings ────────────────────────────────────────────────────────
             jni_idx::NEW_STRING_UTF => {
                 // jstring NewStringUTF(JNIEnv *env, const char *bytes)
                 let bytes_addr = GuestAddr::new(cpu.reg(Reg::R1));
                 let text = Self::read_c_string(mem, bytes_addr)?;
-
                 let handle = self.next_handle;
                 self.next_handle += 1;
                 self.strings.insert(handle, text);
-
                 cpu.set_reg(Reg::R0, handle);
             }
             jni_idx::GET_STRING_UTF_CHARS => {
@@ -235,7 +333,7 @@ impl JniBridge {
                     let guest_str_addr = self.string_heap_cur;
                     let bytes = text.as_bytes();
                     mem.write_bytes(guest_str_addr, bytes)?;
-                    mem.write_u8(guest_str_addr.add(bytes.len() as u32), 0)?; // null terminator
+                    mem.write_u8(guest_str_addr.add(bytes.len() as u32), 0)?; // NUL terminator
 
                     self.string_heap_cur = guest_str_addr.add((bytes.len() as u32) + 4);
                     self.string_addrs.insert(handle, guest_str_addr);
@@ -250,20 +348,66 @@ impl JniBridge {
                 }
             }
             jni_idx::RELEASE_STRING_UTF_CHARS => {
-                // void ReleaseStringUTFChars(JNIEnv *env, jstring string, const char *utf)
                 cpu.set_reg(Reg::R0, 0);
             }
+
+            // ── Arrays ─────────────────────────────────────────────────────────
+            jni_idx::GET_ARRAY_LENGTH => {
+                let handle = cpu.reg(Reg::R1);
+                let len = self.byte_arrays.get(&handle).map(|&(_, l)| l as u32).unwrap_or(0);
+                cpu.set_reg(Reg::R0, len);
+            }
+            jni_idx::NEW_BYTE_ARRAY => {
+                // jbyteArray NewByteArray(JNIEnv *env, jsize length)
+                let len = cpu.reg(Reg::R1) as usize;
+                let handle = self.next_handle;
+                self.next_handle += 1;
+                // Allocate space in string heap (reuse for simplicity)
+                let arr_addr = self.string_heap_cur;
+                let zeros = vec![0u8; len];
+                mem.write_bytes(arr_addr, &zeros)?;
+                self.string_heap_cur = arr_addr.add(len as u32 + 4);
+                self.byte_arrays.insert(handle, (arr_addr, len));
+                cpu.set_reg(Reg::R0, handle);
+            }
+            jni_idx::GET_BYTE_ARRAY_ELEMENTS => {
+                // jbyte* GetByteArrayElements(JNIEnv, jbyteArray, jboolean *isCopy)
+                let handle = cpu.reg(Reg::R1);
+                let addr = self.byte_arrays.get(&handle).map(|&(a, _)| a.as_u32()).unwrap_or(0);
+                cpu.set_reg(Reg::R0, addr);
+            }
+            jni_idx::RELEASE_BYTE_ARRAY_ELEMENTS => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            // ── Exceptions ─────────────────────────────────────────────────────
+            jni_idx::EXCEPTION_CHECK => {
+                // jboolean ExceptionCheck(JNIEnv *env) — returns JNI_TRUE if pending
+                cpu.set_reg(Reg::R0, if self.pending_exception != 0 { 1 } else { 0 });
+            }
+            jni_idx::EXCEPTION_OCCURRED => {
+                // jthrowable ExceptionOccurred(JNIEnv *env)
+                cpu.set_reg(Reg::R0, self.pending_exception);
+            }
+            jni_idx::EXCEPTION_CLEAR => {
+                self.pending_exception = 0;
+                cpu.set_reg(Reg::R0, 0);
+            }
+            jni_idx::THROW_NEW => {
+                // jint ThrowNew(JNIEnv *env, jclass clazz, const char *message)
+                let exc_handle = self.next_handle;
+                self.next_handle += 1;
+                self.pending_exception = exc_handle;
+                cpu.set_reg(Reg::R0, JNI_OK);
+            }
+
+            // ── RegisterNatives ────────────────────────────────────────────────
             jni_idx::REGISTER_NATIVES => {
-                // jint RegisterNatives(JNIEnv *env, jclass clazz, const JNINativeMethod *methods, jint nMethods)
-                // r0 = env, r1 = clazz, r2 = methods, r3 = nMethods
+                // jint RegisterNatives(JNIEnv *env, jclass clazz, JNINativeMethod *methods, jint n)
                 let methods_addr = GuestAddr::new(cpu.reg(Reg::R2));
                 let n_methods = cpu.reg(Reg::R3);
 
-                // Each JNINativeMethod32 is:
-                // name: u32 (char*)
-                // signature: u32 (char*)
-                // fnPtr: u32 (void*)
-                // Total size: 12 bytes
+                // Each JNINativeMethod32: name(u32), signature(u32), fnPtr(u32) = 12 bytes
                 for i in 0..n_methods {
                     let entry_addr = methods_addr.add(i * 12);
                     let name_addr = GuestAddr::new(mem.read_u32(entry_addr)?);
@@ -282,13 +426,25 @@ impl JniBridge {
 
                 cpu.set_reg(Reg::R0, JNI_OK);
             }
+
             _ => {
-                // Default fallback returns 0
+                // Unhandled JNI function — return 0 (null/ok stub)
                 cpu.set_reg(Reg::R0, 0);
             }
         }
 
         Ok(true)
+    }
+
+    /// Intern a class name and return its handle (creating one if needed).
+    fn intern_class(&mut self, name: String) -> u32 {
+        if let Some(&h) = self.classes.get(&name) {
+            return h;
+        }
+        let h = self.next_handle;
+        self.next_handle += 1;
+        self.classes.insert(name, h);
+        h
     }
 
     fn read_c_string(mem: &impl Memory, addr: GuestAddr) -> Result<String, MemoryError> {

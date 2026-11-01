@@ -219,3 +219,67 @@ fn test_jni_onload_lifecycle() {
     let ver = invoke_jni_onload(&mut engine, &mut bionic, &mut jni, onload_addr).unwrap();
     assert_eq!(ver, JNI_VERSION_1_6);
 }
+
+#[test]
+fn test_jni_extended_bridge_apis() {
+    let mut mem = FlatMemory::new(GuestAddr::new(0x7000_0000), 0x200_000);
+
+    let bionic = BionicBridge::new(
+        GuestAddr::new(0x7000_0000),
+        GuestAddr::new(0x7010_0000),
+        0x100_000,
+    );
+    bionic.install_stubs(&mut mem).unwrap();
+
+    let mut jni = JniBridge::new(GuestAddr::new(0x7005_0000));
+    jni.install(&mut mem).unwrap();
+
+    let mut engine = DbtEngine::new(mem);
+
+    // 1. Direct unit test of Exception lifecycle
+    let mut cpu = transd_core::CpuState::new();
+    assert_eq!(jni.pending_exception, 0);
+
+    // ExceptionCheck when no exception -> 0
+    let check_imm = transd_bridge::JNI_SVC_MAGIC | transd_bridge::jni_idx::EXCEPTION_CHECK;
+    jni.handle_svc(check_imm, &mut cpu, &mut engine.mem).unwrap();
+    assert_eq!(cpu.reg(transd_core::Reg::R0), 0);
+
+    // ThrowNew -> pending_exception becomes non-zero
+    let throw_imm = transd_bridge::JNI_SVC_MAGIC | transd_bridge::jni_idx::THROW_NEW;
+    jni.handle_svc(throw_imm, &mut cpu, &mut engine.mem).unwrap();
+    assert_ne!(jni.pending_exception, 0);
+
+    // ExceptionCheck when exception pending -> 1
+    jni.handle_svc(check_imm, &mut cpu, &mut engine.mem).unwrap();
+    assert_eq!(cpu.reg(transd_core::Reg::R0), 1);
+
+    // ExceptionClear -> pending_exception becomes 0
+    let clear_imm = transd_bridge::JNI_SVC_MAGIC | transd_bridge::jni_idx::EXCEPTION_CLEAR;
+    jni.handle_svc(clear_imm, &mut cpu, &mut engine.mem).unwrap();
+    assert_eq!(jni.pending_exception, 0);
+
+    // 2. Test GlobalRef lifecycle
+    let global_imm = transd_bridge::JNI_SVC_MAGIC | transd_bridge::jni_idx::NEW_GLOBAL_REF;
+    cpu.set_reg(transd_core::Reg::R1, 105); // obj handle 105
+    jni.handle_svc(global_imm, &mut cpu, &mut engine.mem).unwrap();
+    assert_eq!(cpu.reg(transd_core::Reg::R0), 105);
+    assert_eq!(jni.global_refs.get(&105), Some(&105));
+
+    let del_global_imm = transd_bridge::JNI_SVC_MAGIC | transd_bridge::jni_idx::DELETE_GLOBAL_REF;
+    cpu.set_reg(transd_core::Reg::R1, 105);
+    jni.handle_svc(del_global_imm, &mut cpu, &mut engine.mem).unwrap();
+    assert!(jni.global_refs.get(&105).is_none());
+
+    // 3. Test ByteArray lifecycle
+    let new_arr_imm = transd_bridge::JNI_SVC_MAGIC | transd_bridge::jni_idx::NEW_BYTE_ARRAY;
+    cpu.set_reg(transd_core::Reg::R1, 256); // len 256
+    jni.handle_svc(new_arr_imm, &mut cpu, &mut engine.mem).unwrap();
+    let arr_handle = cpu.reg(transd_core::Reg::R0);
+    assert!(arr_handle >= 100);
+
+    let get_len_imm = transd_bridge::JNI_SVC_MAGIC | transd_bridge::jni_idx::GET_ARRAY_LENGTH;
+    cpu.set_reg(transd_core::Reg::R1, arr_handle);
+    jni.handle_svc(get_len_imm, &mut cpu, &mut engine.mem).unwrap();
+    assert_eq!(cpu.reg(transd_core::Reg::R0), 256);
+}

@@ -10,7 +10,10 @@ pub use gles::{
     GL_EXTENSIONS, GL_RENDERER, GL_SHADING_LANGUAGE_VERSION, GL_TRIANGLES, GL_VENDOR, GL_VERSION,
 };
 pub use host::{ArgMarshaller, HostBridge, RawFnPtr};
-pub use jni::{jni_idx, vm_idx, JniBridge, RegisteredNativeMethod, JNI_OK, JNI_VERSION_1_6};
+pub use jni::{
+    jni_idx, vm_idx, JniBridge, RegisteredNativeMethod, JNI_ERR, JNI_OK, JNI_SVC_MAGIC,
+    JNI_VERSION_1_1, JNI_VERSION_1_2, JNI_VERSION_1_4, JNI_VERSION_1_6,
+};
 pub use trampoline::{
     invoke_guest, invoke_guest_full, invoke_jni_method, invoke_jni_onload, SENTINEL_RETURN_ADDR,
 };

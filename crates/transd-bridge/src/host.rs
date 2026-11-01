@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_arg_marshaller_cstr() {
-        let mut mem = b"transd\0extra".to_vec();
+        let mem = b"transd\0extra".to_vec();
         let m = unsafe { ArgMarshaller::new(mem.as_ptr(), mem.len()) };
         let cs = m.cstr(0).unwrap();
         assert_eq!(cs.to_str().unwrap(), "transd");
