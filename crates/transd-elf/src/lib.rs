@@ -3,5 +3,8 @@ pub mod loader;
 pub mod parser;
 
 pub use header::*;
-pub use loader::{CompositeResolver, ElfLoader, LoadedLibrary, LoaderError, NullResolver, SymbolResolver};
+pub use loader::{
+    CompositeResolver, DsoRegistry, ElfLoader, LoadedLibrary, LoaderError, NullResolver,
+    SymbolBinding, SymbolInfo, SymbolResolver,
+};
 pub use parser::{ElfError, ElfParser};

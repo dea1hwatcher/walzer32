@@ -51,6 +51,21 @@ pub const DT_INIT_ARRAYSZ: u32 = 26;
 pub const DT_FINI_ARRAY: u32 = 27;
 pub const DT_FINI_ARRAYSZ: u32 = 28;
 pub const DT_GNU_HASH: u32 = 0x6fff_fef5;
+pub const DT_VERSYM: u32 = 0x6fff_fff0;
+pub const DT_VERDEF: u32 = 0x6fff_fffc;
+pub const DT_VERDEFNUM: u32 = 0x6fff_fffd;
+pub const DT_VERNEED: u32 = 0x6fff_fffe;
+pub const DT_VERNEEDNUM: u32 = 0x6fff_ffff;
+
+// GNU Versym flags & values
+pub const VERSYM_HIDDEN: u16 = 0x8000;
+pub const VERSYM_VERSION: u16 = 0x7fff;
+pub const VER_NDX_LOCAL: u16 = 0;
+pub const VER_NDX_GLOBAL: u16 = 1;
+
+// RTLD constants
+pub const RTLD_DEFAULT: u32 = 0;
+pub const RTLD_NEXT: u32 = 0xFFFF_FFFE;
 
 // ARM32 Relocation types
 pub const R_ARM_NONE: u8 = 0;

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use transd_core::{GuestAddr, Memory, MemoryError, Reg};
-use transd_elf::SymbolResolver;
+use transd_elf::{DsoRegistry, SymbolResolver, RTLD_DEFAULT, RTLD_NEXT};
 
 pub const BIONIC_SVC_MAGIC: u32 = 0xB10000;
 
@@ -59,6 +59,12 @@ pub enum BionicFuncId {
     Floor = 59,
     Ceil = 60,
     Fabs = 61,
+
+    // Dynamic Linking (libdl)
+    Dlopen = 70,
+    Dlsym = 71,
+    Dlclose = 72,
+    Dlerror = 73,
 }
 
 impl BionicFuncId {
@@ -108,6 +114,10 @@ impl BionicFuncId {
             59 => Some(Self::Floor),
             60 => Some(Self::Ceil),
             61 => Some(Self::Fabs),
+            70 => Some(Self::Dlopen),
+            71 => Some(Self::Dlsym),
+            72 => Some(Self::Dlclose),
+            73 => Some(Self::Dlerror),
             _ => None,
         }
     }
@@ -142,6 +152,10 @@ pub struct BionicBridge {
     pub next_thread_id: u32,
     pub current_thread_id: u32,
     pub threads: HashMap<u32, ThreadDescriptor>,
+
+    pub dso_registry: DsoRegistry,
+    pub last_dlerror: Option<String>,
+    pub dlerror_addr: GuestAddr,
 }
 
 impl BionicBridge {
@@ -155,10 +169,18 @@ impl BionicBridge {
             next_thread_id: 1,
             current_thread_id: 1,
             threads: HashMap::new(),
+            dso_registry: DsoRegistry::new(),
+            last_dlerror: None,
+            dlerror_addr: stub_base.add(0x800),
         };
 
         bridge.register_known_symbols();
         bridge
+    }
+
+    /// Registers a loaded DSO into the in-process linker registry
+    pub fn register_library(&mut self, lib: transd_elf::LoadedLibrary) -> u32 {
+        self.dso_registry.register(lib)
     }
 
     fn register_known_symbols(&mut self) {
@@ -211,6 +233,12 @@ impl BionicBridge {
             ("floor", BionicFuncId::Floor),
             ("ceil", BionicFuncId::Ceil),
             ("fabs", BionicFuncId::Fabs),
+
+            // Dynamic Linking (libdl)
+            ("dlopen", BionicFuncId::Dlopen),
+            ("dlsym", BionicFuncId::Dlsym),
+            ("dlclose", BionicFuncId::Dlclose),
+            ("dlerror", BionicFuncId::Dlerror),
         ];
 
         for (name, id) in funcs {
@@ -266,6 +294,10 @@ impl BionicBridge {
             BionicFuncId::Floor,
             BionicFuncId::Ceil,
             BionicFuncId::Fabs,
+            BionicFuncId::Dlopen,
+            BionicFuncId::Dlsym,
+            BionicFuncId::Dlclose,
+            BionicFuncId::Dlerror,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -671,6 +703,88 @@ impl BionicBridge {
                 cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
                 cpu.set_d_reg(0, res);
             }
+
+            // ── Dynamic Linking (libdl) ─────────────────────────────────────────
+            BionicFuncId::Dlopen => {
+                let filename_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let _flags = cpu.reg(Reg::R1);
+
+                if filename_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, RTLD_DEFAULT);
+                } else {
+                    let filename = Self::read_c_string(mem, filename_ptr)?;
+                    let basename = filename.rsplit('/').next().unwrap_or(&filename);
+
+                    if basename == "libc.so"
+                        || basename == "libm.so"
+                        || basename == "libdl.so"
+                        || basename == "liblog.so"
+                    {
+                        cpu.set_reg(Reg::R0, 0xB100_0001);
+                    } else if let Some((h, _)) = self.dso_registry.find_by_soname(basename) {
+                        cpu.set_reg(Reg::R0, h);
+                    } else if let Some((h, _)) = self.dso_registry.find_by_soname(&filename) {
+                        cpu.set_reg(Reg::R0, h);
+                    } else {
+                        self.last_dlerror =
+                            Some(format!("dlopen failed: library \"{}\" not found", filename));
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                }
+            }
+            BionicFuncId::Dlsym => {
+                let handle = cpu.reg(Reg::R0);
+                let symbol_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let sym_name = Self::read_c_string(mem, symbol_ptr)?;
+
+                let resolved = if handle == RTLD_DEFAULT || handle == 0xFFFF_FFFF {
+                    self.dso_registry
+                        .dlsym(RTLD_DEFAULT, &sym_name, None)
+                        .or_else(|| self.symbol_table.get(&sym_name).copied())
+                } else if handle == RTLD_NEXT {
+                    self.dso_registry
+                        .dlsym(RTLD_NEXT, &sym_name, None)
+                } else if handle == 0xB100_0001 {
+                    self.symbol_table.get(&sym_name).copied()
+                } else {
+                    self.dso_registry
+                        .dlsym(handle, &sym_name, None)
+                        .or_else(|| self.symbol_table.get(&sym_name).copied())
+                };
+
+                if let Some(addr) = resolved {
+                    cpu.set_reg(Reg::R0, addr.as_u32());
+                } else {
+                    self.last_dlerror = Some(format!("undefined symbol \"{}\"", sym_name));
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::Dlclose => {
+                let handle = cpu.reg(Reg::R0);
+                if handle == RTLD_DEFAULT
+                    || handle == 0xB100_0001
+                    || self.dso_registry.get(handle).is_some()
+                {
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    self.last_dlerror = Some(format!("invalid library handle {}", handle));
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+            BionicFuncId::Dlerror => {
+                if let Some(err) = self.last_dlerror.take() {
+                    let mut bytes = err.into_bytes();
+                    bytes.push(0);
+                    if bytes.len() > 512 {
+                        bytes.truncate(511);
+                        bytes.push(0);
+                    }
+                    mem.write_bytes(self.dlerror_addr, &bytes)?;
+                    cpu.set_reg(Reg::R0, self.dlerror_addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
             _ => {}
         }
 
@@ -694,6 +808,9 @@ impl BionicBridge {
 
 impl SymbolResolver for BionicBridge {
     fn resolve(&self, name: &str) -> Option<GuestAddr> {
-        self.symbol_table.get(name).copied()
+        if let Some(&addr) = self.symbol_table.get(name) {
+            return Some(addr);
+        }
+        self.dso_registry.resolve(name)
     }
 }
