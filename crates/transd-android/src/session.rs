@@ -4,7 +4,7 @@ use thiserror::Error;
 use transd_apk::{ApkError, ApkPackage};
 use transd_bridge::{
     invoke_guest, invoke_jni_onload, BionicBridge, GlesBridge, JniBridge,
-    RegisteredNativeMethod,
+    RegisteredNativeMethod, SurfaceBridge, TouchEvent, KeyEvent,
 };
 use transd_core::{FlatMemory, GuestAddr};
 use transd_elf::{CompositeResolver, ElfLoader, LoadedLibrary, LoaderError, SymbolResolver};
@@ -34,6 +34,7 @@ pub struct TransdSession {
     pub bionic: BionicBridge,
     pub gles: GlesBridge,
     pub jni: JniBridge,
+    pub surface: SurfaceBridge,
     pub apk_bytes: Option<Vec<u8>>,
     pub loaded_libraries: HashMap<String, LoadedLibrary>,
     pub next_load_addr: GuestAddr,
@@ -69,6 +70,8 @@ impl TransdSession {
         let jni = JniBridge::new(jni_base);
         jni.install(&mut mem)?;
 
+        let surface = SurfaceBridge::new();
+
         let mut engine = DbtEngine::new(mem);
         engine.cpu.set_sp(stack_top.as_u32() - 0x1000);
 
@@ -77,6 +80,7 @@ impl TransdSession {
             bionic,
             gles,
             jni,
+            surface,
             apk_bytes: None,
             loaded_libraries: HashMap::new(),
             next_load_addr: lib_load_base,
@@ -157,13 +161,54 @@ impl TransdSession {
     pub fn registered_natives(&self) -> &[RegisteredNativeMethod] {
         &self.jni.registered_natives
     }
+
+    /// Handles SurfaceCreated lifecycle event from Android UI thread
+    pub fn on_surface_created(&mut self, window_ptr: usize, width: u32, height: u32) {
+        self.surface.on_surface_created(window_ptr, width, height);
+    }
+
+    /// Handles SurfaceChanged viewport dimension update
+    pub fn on_surface_changed(&mut self, width: u32, height: u32) {
+        self.surface.on_surface_changed(width, height);
+    }
+
+    /// Handles SurfaceDestroyed event
+    pub fn on_surface_destroyed(&mut self) {
+        self.surface.on_surface_destroyed();
+    }
+
+    /// Triggers frame render in guest DBT if a render callback is registered
+    pub fn on_draw_frame(&mut self) -> Result<(), SessionError> {
+        if let Some(render_fn) = self.surface.draw_frame_fn {
+            let _ = self.call_native(render_fn, &[])?;
+        }
+        Ok(())
+    }
+
+    /// Forwards touch input event into guest touch queue
+    pub fn on_touch_event(&mut self, action: u32, x: f32, y: f32, pointer_id: u32) {
+        self.surface.push_touch_event(TouchEvent {
+            action,
+            x,
+            y,
+            pointer_id,
+        });
+    }
+
+    /// Forwards key input event into guest key queue
+    pub fn on_key_event(&mut self, action: u32, key_code: u32) {
+        self.surface.push_key_event(KeyEvent {
+            action,
+            key_code,
+        });
+    }
 }
 
 // Global static session protected by Mutex for JNI C ABI entry points
 static GLOBAL_SESSION: Mutex<Option<TransdSession>> = Mutex::new(None);
 
 pub fn get_or_init_session() -> Result<std::sync::MutexGuard<'static, Option<TransdSession>>, SessionError> {
-    let mut guard = GLOBAL_SESSION.lock().unwrap();
+    let mut guard = GLOBAL_SESSION.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         // Default 128MB arena starting at 0x7000_0000
         let session = TransdSession::new(GuestAddr::new(0x7000_0000), 0x800_0000)?;
@@ -173,6 +218,6 @@ pub fn get_or_init_session() -> Result<std::sync::MutexGuard<'static, Option<Tra
 }
 
 pub fn reset_session() {
-    let mut guard = GLOBAL_SESSION.lock().unwrap();
+    let mut guard = GLOBAL_SESSION.lock().unwrap_or_else(|e| e.into_inner());
     *guard = None;
 }

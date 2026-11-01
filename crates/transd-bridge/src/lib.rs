@@ -4,6 +4,7 @@ pub mod gles;
 pub mod host;
 pub mod jni;
 pub mod jni_thunk;
+pub mod surface;
 pub mod trampoline;
 pub mod vulkan;
 
@@ -19,6 +20,7 @@ pub use jni::{
     JNI_VERSION_1_1, JNI_VERSION_1_2, JNI_VERSION_1_4, JNI_VERSION_1_6,
 };
 pub use jni_thunk::{JniThunk, JniThunkGenerator};
+pub use surface::{KeyEvent, SurfaceBridge, TouchEvent, GUEST_SURFACE_HANDLE};
 pub use trampoline::{
     invoke_guest, invoke_guest_full, invoke_jni_method, invoke_jni_onload, SENTINEL_RETURN_ADDR,
 };

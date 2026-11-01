@@ -55,6 +55,36 @@ object TransdEngine {
     external fun nativeReset()
 
     /**
+     * Notify DBT of SurfaceView creation and establish 32-bit native window mapping.
+     */
+    external fun nativeSurfaceCreated(surface: Any, width: Int, height: Int): Int
+
+    /**
+     * Notify DBT of SurfaceView dimension changes.
+     */
+    external fun nativeSurfaceChanged(width: Int, height: Int): Int
+
+    /**
+     * Notify DBT of SurfaceView destruction.
+     */
+    external fun nativeSurfaceDestroyed(): Int
+
+    /**
+     * Execute a single frame render tick in guest DBT.
+     */
+    external fun nativeDrawFrame(): Int
+
+    /**
+     * Forward touch input events to guest touch queue.
+     */
+    external fun nativeTouchEvent(action: Int, x: Float, y: Float, pointerId: Int): Int
+
+    /**
+     * Forward key input events to guest key queue.
+     */
+    external fun nativeKeyEvent(action: Int, keyCode: Int): Int
+
+    /**
      * High-level loader helper: loads a 32-bit .so from assets or file and resolves entry point.
      */
     fun loadLibraryFromBytes(name: String, bytes: ByteArray): Boolean {

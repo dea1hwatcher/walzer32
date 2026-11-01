@@ -9,6 +9,7 @@ pub type JString = *mut c_void;
 pub type JObject = *mut c_void;
 pub type JInt = i32;
 pub type JLong = i64;
+pub type JFloat = f32;
 
 /// JNI Return codes
 pub const JNI_OK: JInt = 0;
@@ -133,4 +134,125 @@ pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeReset(
     _clazz: JClass,
 ) {
     reset_session();
+}
+
+/// JNI Export: SurfaceView created - establishes native window and assigns 32-bit guest handle
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeSurfaceCreated(
+    _env: JNIEnv,
+    _clazz: JClass,
+    surface: JObject,
+    width: JInt,
+    height: JInt,
+) -> JInt {
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_mut() {
+        session.on_surface_created(surface as usize, width as u32, height as u32);
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: SurfaceView changed - updates viewport dimensions
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeSurfaceChanged(
+    _env: JNIEnv,
+    _clazz: JClass,
+    width: JInt,
+    height: JInt,
+) -> JInt {
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_mut() {
+        session.on_surface_changed(width as u32, height as u32);
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: SurfaceView destroyed
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeSurfaceDestroyed(
+    _env: JNIEnv,
+    _clazz: JClass,
+) -> JInt {
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_mut() {
+        session.on_surface_destroyed();
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Triggers frame render in guest DBT
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeDrawFrame(
+    _env: JNIEnv,
+    _clazz: JClass,
+) -> JInt {
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_mut() {
+        match session.on_draw_frame() {
+            Ok(()) => JNI_OK,
+            Err(_) => JNI_ERR_GENERIC,
+        }
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Forwards touch event to guest touch queue
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeTouchEvent(
+    _env: JNIEnv,
+    _clazz: JClass,
+    action: JInt,
+    x: JFloat,
+    y: JFloat,
+    pointer_id: JInt,
+) -> JInt {
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_mut() {
+        session.on_touch_event(action as u32, x, y, pointer_id as u32);
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Forwards key event to guest key queue
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeKeyEvent(
+    _env: JNIEnv,
+    _clazz: JClass,
+    action: JInt,
+    key_code: JInt,
+) -> JInt {
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_mut() {
+        session.on_key_event(action as u32, key_code as u32);
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
 }
