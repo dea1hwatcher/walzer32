@@ -916,6 +916,208 @@ impl Interpreter {
                                 }
                                 r
                             }
+                            (NeonOp::Sqadd, NeonSize::I32) => {
+                                let a0 = ((a as u32) as i32).saturating_add((b as u32) as i32) as u32 as u64;
+                                let a1 = (((a >> 32) as i32).saturating_add((b >> 32) as i32) as u32 as u64) << 32;
+                                a0 | a1
+                            }
+                            (NeonOp::Sqadd, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak = (a >> (k * 16)) as i16;
+                                    let bk = (b >> (k * 16)) as i16;
+                                    let rk = (ak.saturating_add(bk) as u16 as u64) << (k * 16);
+                                    r |= rk;
+                                }
+                                r
+                            }
+                            (NeonOp::Sqadd, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..8 {
+                                    let ak = (a >> (k * 8)) as i8;
+                                    let bk = (b >> (k * 8)) as i8;
+                                    let rk = (ak.saturating_add(bk) as u8 as u64) << (k * 8);
+                                    r |= rk;
+                                }
+                                r
+                            }
+                            (NeonOp::Uqadd, NeonSize::I32) => {
+                                let a0 = (a as u32).saturating_add(b as u32) as u64;
+                                let a1 = (((a >> 32) as u32).saturating_add((b >> 32) as u32) as u64) << 32;
+                                a0 | a1
+                            }
+                            (NeonOp::Uqadd, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak = (a >> (k * 16)) as u16;
+                                    let bk = (b >> (k * 16)) as u16;
+                                    let rk = (ak.saturating_add(bk) as u64) << (k * 16);
+                                    r |= rk;
+                                }
+                                r
+                            }
+                            (NeonOp::Uqadd, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..8 {
+                                    let ak = (a >> (k * 8)) as u8;
+                                    let bk = (b >> (k * 8)) as u8;
+                                    let rk = (ak.saturating_add(bk) as u64) << (k * 8);
+                                    r |= rk;
+                                }
+                                r
+                            }
+                            (NeonOp::Sqsub, NeonSize::I32) => {
+                                let a0 = ((a as u32) as i32).saturating_sub((b as u32) as i32) as u32 as u64;
+                                let a1 = (((a >> 32) as i32).saturating_sub((b >> 32) as i32) as u32 as u64) << 32;
+                                a0 | a1
+                            }
+                            (NeonOp::Sqsub, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak = (a >> (k * 16)) as i16;
+                                    let bk = (b >> (k * 16)) as i16;
+                                    let rk = (ak.saturating_sub(bk) as u16 as u64) << (k * 16);
+                                    r |= rk;
+                                }
+                                r
+                            }
+                            (NeonOp::Sqsub, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..8 {
+                                    let ak = (a >> (k * 8)) as i8;
+                                    let bk = (b >> (k * 8)) as i8;
+                                    let rk = (ak.saturating_sub(bk) as u8 as u64) << (k * 8);
+                                    r |= rk;
+                                }
+                                r
+                            }
+                            (NeonOp::Uqsub, NeonSize::I32) => {
+                                let a0 = (a as u32).saturating_sub(b as u32) as u64;
+                                let a1 = (((a >> 32) as u32).saturating_sub((b >> 32) as u32) as u64) << 32;
+                                a0 | a1
+                            }
+                            (NeonOp::Uqsub, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak = (a >> (k * 16)) as u16;
+                                    let bk = (b >> (k * 16)) as u16;
+                                    let rk = (ak.saturating_sub(bk) as u64) << (k * 16);
+                                    r |= rk;
+                                }
+                                r
+                            }
+                            (NeonOp::Uqsub, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..8 {
+                                    let ak = (a >> (k * 8)) as u8;
+                                    let bk = (b >> (k * 8)) as u8;
+                                    let rk = (ak.saturating_sub(bk) as u64) << (k * 8);
+                                    r |= rk;
+                                }
+                                r
+                            }
+                            (NeonOp::Sqshl, NeonSize::I32) => {
+                                let mut r = 0u64;
+                                for k in 0..2 {
+                                    let val = (a >> (k * 32)) as i32;
+                                    let shift = (b >> (k * 32)) as i8;
+                                    let res = if shift >= 32 {
+                                        if val < 0 { i32::MIN } else if val > 0 { i32::MAX } else { 0 }
+                                    } else if shift >= 0 {
+                                        let shifted = (val as i64) << shift;
+                                        shifted.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+                                    } else {
+                                        val >> ((-shift).min(31))
+                                    };
+                                    r |= (res as u32 as u64) << (k * 32);
+                                }
+                                r
+                            }
+                            (NeonOp::Sqshl, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let val = (a >> (k * 16)) as i16;
+                                    let shift = (b >> (k * 16)) as i8;
+                                    let res = if shift >= 16 {
+                                        if val < 0 { i16::MIN } else if val > 0 { i16::MAX } else { 0 }
+                                    } else if shift >= 0 {
+                                        let shifted = (val as i32) << shift;
+                                        shifted.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+                                    } else {
+                                        val >> ((-shift).min(15))
+                                    };
+                                    r |= (res as u16 as u64) << (k * 16);
+                                }
+                                r
+                            }
+                            (NeonOp::Sqshl, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..8 {
+                                    let val = (a >> (k * 8)) as i8;
+                                    let shift = (b >> (k * 8)) as i8;
+                                    let res = if shift >= 8 {
+                                        if val < 0 { i8::MIN } else if val > 0 { i8::MAX } else { 0 }
+                                    } else if shift >= 0 {
+                                        let shifted = (val as i16) << shift;
+                                        shifted.clamp(i8::MIN as i16, i8::MAX as i16) as i8
+                                    } else {
+                                        val >> ((-shift).min(7))
+                                    };
+                                    r |= (res as u8 as u64) << (k * 8);
+                                }
+                                r
+                            }
+                            (NeonOp::Uqshl, NeonSize::I32) => {
+                                let mut r = 0u64;
+                                for k in 0..2 {
+                                    let val = (a >> (k * 32)) as u32;
+                                    let shift = (b >> (k * 32)) as i8;
+                                    let res = if shift >= 32 {
+                                        if val > 0 { u32::MAX } else { 0 }
+                                    } else if shift >= 0 {
+                                        let shifted = (val as u64) << shift;
+                                        shifted.min(u32::MAX as u64) as u32
+                                    } else {
+                                        val >> ((-shift).min(31))
+                                    };
+                                    r |= (res as u64) << (k * 32);
+                                }
+                                r
+                            }
+                            (NeonOp::Uqshl, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let val = (a >> (k * 16)) as u16;
+                                    let shift = (b >> (k * 16)) as i8;
+                                    let res = if shift >= 16 {
+                                        if val > 0 { u16::MAX } else { 0 }
+                                    } else if shift >= 0 {
+                                        let shifted = (val as u32) << shift;
+                                        shifted.min(u16::MAX as u32) as u16
+                                    } else {
+                                        val >> ((-shift).min(15))
+                                    };
+                                    r |= (res as u64) << (k * 16);
+                                }
+                                r
+                            }
+                            (NeonOp::Uqshl, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..8 {
+                                    let val = (a >> (k * 8)) as u8;
+                                    let shift = (b >> (k * 8)) as i8;
+                                    let res = if shift >= 8 {
+                                        if val > 0 { u8::MAX } else { 0 }
+                                    } else if shift >= 0 {
+                                        let shifted = (val as u16) << shift;
+                                        shifted.min(u8::MAX as u16) as u8
+                                    } else {
+                                        val >> ((-shift).min(7))
+                                    };
+                                    r |= (res as u64) << (k * 8);
+                                }
+                                r
+                            }
                             _ => a,
                         };
                         cpu.vfp[d_idx] = res;
@@ -947,6 +1149,391 @@ impl Interpreter {
                         }
                     }
                 }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonPermute {
+                op,
+                size,
+                is_quad,
+                vd,
+                vm,
+            } => {
+                let count = if is_quad { 2 } else { 1 };
+                let elem_bytes = match size {
+                    NeonSize::I8 => 1,
+                    NeonSize::I16 => 2,
+                    _ => 4,
+                };
+                let total_bytes = count * 8;
+                let num_elems = total_bytes / elem_bytes;
+                let half = num_elems / 2;
+
+                // Read input vectors a and b
+                let mut bytes_a = [0u8; 16];
+                let mut bytes_b = [0u8; 16];
+                for i in 0..count {
+                    let d_idx = (vd as usize) + i;
+                    let m_idx = (vm as usize) + i;
+                    if d_idx < 32 {
+                        bytes_a[i * 8..(i + 1) * 8].copy_from_slice(&cpu.vfp[d_idx].to_le_bytes());
+                    }
+                    if m_idx < 32 {
+                        bytes_b[i * 8..(i + 1) * 8].copy_from_slice(&cpu.vfp[m_idx].to_le_bytes());
+                    }
+                }
+
+                let get_elem = |buf: &[u8; 16], idx: usize| -> u32 {
+                    match elem_bytes {
+                        1 => buf[idx] as u32,
+                        2 => u16::from_le_bytes([buf[idx * 2], buf[idx * 2 + 1]]) as u32,
+                        _ => u32::from_le_bytes([
+                            buf[idx * 4],
+                            buf[idx * 4 + 1],
+                            buf[idx * 4 + 2],
+                            buf[idx * 4 + 3],
+                        ]),
+                    }
+                };
+
+                let mut out_a = [0u8; 16];
+                let mut out_b = [0u8; 16];
+
+                let set_elem = |buf: &mut [u8; 16], idx: usize, val: u32| {
+                    match elem_bytes {
+                        1 => buf[idx] = val as u8,
+                        2 => {
+                            let le = (val as u16).to_le_bytes();
+                            buf[idx * 2..idx * 2 + 2].copy_from_slice(&le);
+                        }
+                        _ => {
+                            let le = val.to_le_bytes();
+                            buf[idx * 4..idx * 4 + 4].copy_from_slice(&le);
+                        }
+                    }
+                };
+
+                match op {
+                    NeonPermuteOp::Trn => {
+                        for i in 0..half {
+                            set_elem(&mut out_a, 2 * i, get_elem(&bytes_a, 2 * i));
+                            set_elem(&mut out_a, 2 * i + 1, get_elem(&bytes_b, 2 * i));
+                            set_elem(&mut out_b, 2 * i, get_elem(&bytes_a, 2 * i + 1));
+                            set_elem(&mut out_b, 2 * i + 1, get_elem(&bytes_b, 2 * i + 1));
+                        }
+                    }
+                    NeonPermuteOp::Zip => {
+                        for i in 0..half {
+                            set_elem(&mut out_a, 2 * i, get_elem(&bytes_a, i));
+                            set_elem(&mut out_a, 2 * i + 1, get_elem(&bytes_b, i));
+                            set_elem(&mut out_b, 2 * i, get_elem(&bytes_a, half + i));
+                            set_elem(&mut out_b, 2 * i + 1, get_elem(&bytes_b, half + i));
+                        }
+                    }
+                    NeonPermuteOp::Uzp => {
+                        for i in 0..half {
+                            set_elem(&mut out_a, i, get_elem(&bytes_a, 2 * i));
+                            set_elem(&mut out_a, half + i, get_elem(&bytes_b, 2 * i));
+                            set_elem(&mut out_b, i, get_elem(&bytes_a, 2 * i + 1));
+                            set_elem(&mut out_b, half + i, get_elem(&bytes_b, 2 * i + 1));
+                        }
+                    }
+                }
+
+                // Write results back
+                for i in 0..count {
+                    let d_idx = (vd as usize) + i;
+                    let m_idx = (vm as usize) + i;
+                    let val_a = u64::from_le_bytes(out_a[i * 8..(i + 1) * 8].try_into().unwrap());
+                    let val_b = u64::from_le_bytes(out_b[i * 8..(i + 1) * 8].try_into().unwrap());
+                    if d_idx < 32 {
+                        cpu.vfp[d_idx] = val_a;
+                    }
+                    if m_idx < 32 {
+                        cpu.vfp[m_idx] = val_b;
+                    }
+                }
+
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonTbl {
+                is_tbx,
+                vd,
+                vn,
+                len,
+                vm,
+            } => {
+                let mut table = [0u8; 32];
+                let num_regs = (len as usize).min(4);
+                for k in 0..num_regs {
+                    let reg_idx = ((vn as usize) + k) % 32;
+                    let bytes = cpu.vfp[reg_idx].to_le_bytes();
+                    table[k * 8..(k + 1) * 8].copy_from_slice(&bytes);
+                }
+
+                let idx_reg = (vm as usize) % 32;
+                let idx_bytes = cpu.vfp[idx_reg].to_le_bytes();
+                let dst_reg = (vd as usize) % 32;
+                let mut dst_bytes = cpu.vfp[dst_reg].to_le_bytes();
+
+                for i in 0..8 {
+                    let index = idx_bytes[i] as usize;
+                    if index < num_regs * 8 {
+                        dst_bytes[i] = table[index];
+                    } else if !is_tbx {
+                        dst_bytes[i] = 0;
+                    }
+                }
+
+                cpu.vfp[dst_reg] = u64::from_le_bytes(dst_bytes);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonShiftImm {
+                signed,
+                saturate,
+                size,
+                is_quad,
+                shift,
+                vd,
+                vm,
+            } => {
+                let count = if is_quad { 2 } else { 1 };
+                for i in 0..count {
+                    let d_idx = (vd as usize) + i;
+                    let m_idx = (vm as usize) + i;
+                    if d_idx < 32 && m_idx < 32 {
+                        let a = cpu.vfp[m_idx];
+                        let res = match (signed, size) {
+                            (true, NeonSize::I32) => {
+                                let mut r = 0u64;
+                                for k in 0..2 {
+                                    let val = (a >> (k * 32)) as i32;
+                                    let shifted = if saturate {
+                                        let s = (val as i64) << shift;
+                                        s.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+                                    } else {
+                                        val << shift
+                                    };
+                                    r |= (shifted as u32 as u64) << (k * 32);
+                                }
+                                r
+                            }
+                            (true, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let val = (a >> (k * 16)) as i16;
+                                    let shifted = if saturate {
+                                        let s = (val as i32) << shift;
+                                        s.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+                                    } else {
+                                        val << shift
+                                    };
+                                    r |= (shifted as u16 as u64) << (k * 16);
+                                }
+                                r
+                            }
+                            (true, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..8 {
+                                    let val = (a >> (k * 8)) as i8;
+                                    let shifted = if saturate {
+                                        let s = (val as i16) << shift;
+                                        s.clamp(i8::MIN as i16, i8::MAX as i16) as i8
+                                    } else {
+                                        val << shift
+                                    };
+                                    r |= (shifted as u8 as u64) << (k * 8);
+                                }
+                                r
+                            }
+                            (false, NeonSize::I32) => {
+                                let mut r = 0u64;
+                                for k in 0..2 {
+                                    let val = (a >> (k * 32)) as u32;
+                                    let shifted = if saturate {
+                                        let s = (val as u64) << shift;
+                                        s.min(u32::MAX as u64) as u32
+                                    } else {
+                                        val << shift
+                                    };
+                                    r |= (shifted as u64) << (k * 32);
+                                }
+                                r
+                            }
+                            (false, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let val = (a >> (k * 16)) as u16;
+                                    let shifted = if saturate {
+                                        let s = (val as u32) << shift;
+                                        s.min(u16::MAX as u32) as u16
+                                    } else {
+                                        val << shift
+                                    };
+                                    r |= (shifted as u64) << (k * 16);
+                                }
+                                r
+                            }
+                            (false, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..8 {
+                                    let val = (a >> (k * 8)) as u8;
+                                    let shifted = if saturate {
+                                        let s = (val as u16) << shift;
+                                        s.min(u8::MAX as u16) as u8
+                                    } else {
+                                        val << shift
+                                    };
+                                    r |= (shifted as u64) << (k * 8);
+                                }
+                                r
+                            }
+                            _ => a,
+                        };
+                        cpu.vfp[d_idx] = res;
+                    }
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonShiftNarrow {
+                signed,
+                dest_unsigned,
+                saturate,
+                src_size,
+                shift,
+                vd,
+                vm,
+            } => {
+                let m0 = (vm as usize) % 32;
+                let m1 = (vm as usize + 1) % 32;
+                let d_idx = (vd as usize) % 32;
+
+                let val0 = cpu.vfp[m0];
+                let val1 = cpu.vfp[m1];
+
+                let mut out = 0u64;
+                match src_size {
+                    NeonSize::I16 => {
+                        // 16-bit to 8-bit (8 elements from Q to D)
+                        for k in 0..8 {
+                            let src_u64 = if k < 4 { val0 } else { val1 };
+                            let sub_idx = k % 4;
+                            let elem = (src_u64 >> (sub_idx * 16)) as u16;
+                            let res_byte = if signed {
+                                let val = (elem as i16) >> shift;
+                                if saturate {
+                                    if dest_unsigned {
+                                        val.clamp(0, 255) as u8
+                                    } else {
+                                        val.clamp(-128, 127) as i8 as u8
+                                    }
+                                } else {
+                                    val as u8
+                                }
+                            } else {
+                                let val = elem >> shift;
+                                if saturate {
+                                    val.min(255) as u8
+                                } else {
+                                    val as u8
+                                }
+                            };
+                            out |= (res_byte as u64) << (k * 8);
+                        }
+                    }
+                    NeonSize::I32 => {
+                        // 32-bit to 16-bit (4 elements from Q to D)
+                        for k in 0..4 {
+                            let src_u64 = if k < 2 { val0 } else { val1 };
+                            let sub_idx = k % 2;
+                            let elem = (src_u64 >> (sub_idx * 32)) as u32;
+                            let res_h = if signed {
+                                let val = (elem as i32) >> shift;
+                                if saturate {
+                                    if dest_unsigned {
+                                        val.clamp(0, 65535) as u16
+                                    } else {
+                                        val.clamp(-32768, 32767) as i16 as u16
+                                    }
+                                } else {
+                                    val as u16
+                                }
+                            } else {
+                                let val = elem >> shift;
+                                if saturate {
+                                    val.min(65535) as u16
+                                } else {
+                                    val as u16
+                                }
+                            };
+                            out |= (res_h as u64) << (k * 16);
+                        }
+                    }
+                    _ => {
+                        // 64-bit to 32-bit (2 elements from Q to D)
+                        for k in 0..2 {
+                            let src_u64 = if k == 0 { val0 } else { val1 };
+                            let res_w = if signed {
+                                let val = (src_u64 as i64) >> shift;
+                                if saturate {
+                                    if dest_unsigned {
+                                        val.clamp(0, u32::MAX as i64) as u32
+                                    } else {
+                                        val.clamp(i32::MIN as i64, i32::MAX as i64) as i32 as u32
+                                    }
+                                } else {
+                                    val as u32
+                                }
+                            } else {
+                                let val = src_u64 >> shift;
+                                if saturate {
+                                    val.min(u32::MAX as u64) as u32
+                                } else {
+                                    val as u32
+                                }
+                            };
+                            out |= (res_w as u64) << (k * 32);
+                        }
+                    }
+                }
+
+                cpu.vfp[d_idx] = out;
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonPolyMul { vd, vn, vm } => {
+                let n_idx = (vn as usize) % 32;
+                let m_idx = (vm as usize) % 32;
+                let d0_idx = (vd as usize) % 32;
+                let d1_idx = (vd as usize + 1) % 32;
+
+                let bytes_n = cpu.vfp[n_idx].to_le_bytes();
+                let bytes_m = cpu.vfp[m_idx].to_le_bytes();
+
+                let mut out_lo = 0u64;
+                let mut out_hi = 0u64;
+
+                for i in 0..8 {
+                    let a = bytes_n[i] as u16;
+                    let b = bytes_m[i] as u16;
+                    let mut poly_res = 0u16;
+                    for bit in 0..8 {
+                        if (b & (1 << bit)) != 0 {
+                            poly_res ^= a << bit;
+                        }
+                    }
+                    if i < 4 {
+                        out_lo |= (poly_res as u64) << (i * 16);
+                    } else {
+                        out_hi |= (poly_res as u64) << ((i - 4) * 16);
+                    }
+                }
+
+                cpu.vfp[d0_idx] = out_lo;
+                cpu.vfp[d1_idx] = out_hi;
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }

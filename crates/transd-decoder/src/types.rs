@@ -156,6 +156,20 @@ pub enum NeonOp {
     Neg,
     Min,
     Max,
+    // Saturating arithmetic (Stage 43)
+    Sqadd,
+    Uqadd,
+    Sqsub,
+    Uqsub,
+    Sqshl,
+    Uqshl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeonPermuteOp {
+    Trn,
+    Zip,
+    Uzp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,6 +323,43 @@ pub enum Op {
         is_quad: bool,
         reg: u8,
         rn: Reg,
+    },
+    NeonPermute {
+        op: NeonPermuteOp,
+        size: NeonSize,
+        is_quad: bool,
+        vd: u8,
+        vm: u8,
+    },
+    NeonTbl {
+        is_tbx: bool,
+        vd: u8,
+        vn: u8,
+        len: u8, // 1..=4
+        vm: u8,
+    },
+    NeonShiftImm {
+        signed: bool,
+        saturate: bool,
+        size: NeonSize,
+        is_quad: bool,
+        shift: u8,
+        vd: u8,
+        vm: u8,
+    },
+    NeonShiftNarrow {
+        signed: bool,
+        dest_unsigned: bool,
+        saturate: bool,
+        src_size: NeonSize,
+        shift: u8,
+        vd: u8,
+        vm: u8,
+    },
+    NeonPolyMul {
+        vd: u8, // Q register base
+        vn: u8, // D register
+        vm: u8, // D register
     },
     Nop,
     Unknown(u32),

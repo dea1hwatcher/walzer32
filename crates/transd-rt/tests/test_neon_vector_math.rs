@@ -140,3 +140,205 @@ fn test_neon_thumb2_vector_math() {
     assert_eq!(engine.cpu.q_reg_f32x4(2), [12.0, 23.0, 34.0, 45.0]);
     assert_eq!(engine.cpu.q_reg_f32x4(3), [8.0, 17.0, 26.0, 35.0]);
 }
+
+#[test]
+fn test_neon_vtrn_vzip_vuzp_matrix_transpose() {
+    let mut arena = ArenaMemory::new().expect("Failed to reserve 4GB virtual arena");
+    let code_base = GuestAddr::new(0x6000);
+    arena.commit_range(code_base, 0x10000).unwrap();
+
+    let mut engine = DbtEngine::new(arena);
+
+    // Q0 = [1, 2, 3, 4], Q1 = [10, 20, 30, 40]
+    engine.cpu.set_q_reg_u32x4(0, [1, 2, 3, 4]);
+    engine.cpu.set_q_reg_u32x4(1, [10, 20, 30, 40]);
+
+    // Q2 = [1, 2, 3, 4], Q3 = [10, 20, 30, 40]
+    engine.cpu.set_q_reg_u32x4(2, [1, 2, 3, 4]);
+    engine.cpu.set_q_reg_u32x4(3, [10, 20, 30, 40]);
+
+    // Q4 = [1, 2, 3, 4], Q5 = [10, 20, 30, 40]
+    engine.cpu.set_q_reg_u32x4(4, [1, 2, 3, 4]);
+    engine.cpu.set_q_reg_u32x4(5, [10, 20, 30, 40]);
+
+    // Program at 0x6000:
+    // 0x6000: VTRN.32 q0, q1 -> 0xF3BA00C2
+    // 0x6004: VZIP.32 q2, q3 -> 0xF3BA41C6
+    // 0x6008: VUZP.32 q4, q5 -> 0xF3BA814A
+    // 0x600C: MOV r7, #1     -> 0xE3A07001
+    // 0x6010: MOV r0, #0     -> 0xE3A00000
+    // 0x6014: SVC 0          -> 0xEF000000
+    engine.mem.write_u32(code_base, 0xF3BA_00C2).unwrap();
+    engine.mem.write_u32(code_base.add(4), 0xF3BA_41C6).unwrap();
+    engine.mem.write_u32(code_base.add(8), 0xF3BA_814A).unwrap();
+    engine.mem.write_u32(code_base.add(12), 0xE3A0_7001).unwrap();
+    engine.mem.write_u32(code_base.add(16), 0xE3A0_0000).unwrap();
+    engine.mem.write_u32(code_base.add(20), 0xEF00_0000).unwrap();
+
+    engine.cpu.set_pc(code_base);
+    let exit_code = engine.run(20).unwrap();
+    assert_eq!(exit_code, 0);
+
+    // VTRN.32: Transpose 2x2 blocks
+    assert_eq!(engine.cpu.q_reg_u32x4(0), [1, 10, 3, 30]);
+    assert_eq!(engine.cpu.q_reg_u32x4(1), [2, 20, 4, 40]);
+
+    // VZIP.32: Interleave lower and upper halves
+    assert_eq!(engine.cpu.q_reg_u32x4(2), [1, 10, 2, 20]);
+    assert_eq!(engine.cpu.q_reg_u32x4(3), [3, 30, 4, 40]);
+
+    // VUZP.32: De-interleave even and odd elements
+    assert_eq!(engine.cpu.q_reg_u32x4(4), [1, 3, 10, 30]);
+    assert_eq!(engine.cpu.q_reg_u32x4(5), [2, 4, 20, 40]);
+}
+
+#[test]
+fn test_neon_vtbl_and_vtbx_table_lookup() {
+    let mut arena = ArenaMemory::new().expect("Failed to reserve 4GB virtual arena");
+    let code_base = GuestAddr::new(0x7000);
+    arena.commit_range(code_base, 0x10000).unwrap();
+
+    let mut engine = DbtEngine::new(arena);
+
+    // Setup table in D2 and D3:
+    // D2 = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22]
+    // D3 = [0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00]
+    let d2_bytes: [u8; 8] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22];
+    let d3_bytes: [u8; 8] = [0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00];
+    engine.cpu.vfp[2] = u64::from_le_bytes(d2_bytes);
+    engine.cpu.vfp[3] = u64::from_le_bytes(d3_bytes);
+
+    // Index vector in D1: [1, 0, 7, 15, 8, 20, 2, 255]
+    let d1_bytes: [u8; 8] = [1, 0, 7, 15, 8, 20, 2, 255];
+    engine.cpu.vfp[1] = u64::from_le_bytes(d1_bytes);
+
+    // Second index vector in D4 for VTBX: [0, 20, 20, 20, 20, 20, 20, 3]
+    let d4_bytes: [u8; 8] = [0, 20, 20, 20, 20, 20, 20, 3];
+    engine.cpu.vfp[4] = u64::from_le_bytes(d4_bytes);
+
+    // Program at 0x7000:
+    // 0x7000: VTBL.8 d0, {d2, d3}, d1 -> 0xF3B20901
+    // 0x7004: VTBX.8 d0, {d2, d3}, d4 -> 0xF3B20944
+    // 0x7008: MOV r7, #1             -> 0xE3A07001
+    // 0x700C: MOV r0, #0             -> 0xE3A00000
+    // 0x7010: SVC 0                  -> 0xEF000000
+    engine.mem.write_u32(code_base, 0xF3B2_0901).unwrap();
+    engine.mem.write_u32(code_base.add(4), 0xF3B2_0944).unwrap();
+    engine.mem.write_u32(code_base.add(8), 0xE3A0_7001).unwrap();
+    engine.mem.write_u32(code_base.add(12), 0xE3A0_0000).unwrap();
+    engine.mem.write_u32(code_base.add(16), 0xEF00_0000).unwrap();
+
+    engine.cpu.set_pc(code_base);
+    let exit_code = engine.run(20).unwrap();
+    assert_eq!(exit_code, 0);
+
+    // After VTBL:
+    // [0xBB, 0xAA, 0x22, 0x00, 0x33, 0x00, 0xCC, 0x00]
+    // After VTBX with [0, 20, 20, 20, 20, 20, 20, 3]:
+    // slot 0 gets table[0] = 0xAA
+    // slots 1..6 had index 20 (OOB) so they retain VTBL output: [0xAA, 0x22, 0x00, 0x33, 0x00, 0xCC]
+    // slot 7 gets table[3] = 0xDD
+    let expected_d0: [u8; 8] = [0xAA, 0xAA, 0x22, 0x00, 0x33, 0x00, 0xCC, 0xDD];
+    assert_eq!(engine.cpu.vfp[0].to_le_bytes(), expected_d0);
+}
+
+#[test]
+fn test_neon_saturating_math_and_shifts() {
+    let mut arena = ArenaMemory::new().expect("Failed to reserve 4GB virtual arena");
+    let code_base = GuestAddr::new(0x8000);
+    arena.commit_range(code_base, 0x10000).unwrap();
+
+    let mut engine = DbtEngine::new(arena);
+
+    // Q0 = [i32::MAX - 5, -100, 50, 0]
+    // Q1 = [10, -50, -200, i32::MIN]
+    let q0_u32: [u32; 4] = [
+        (i32::MAX - 5) as u32,
+        (-100i32) as u32,
+        50u32,
+        0u32,
+    ];
+    let q1_u32: [u32; 4] = [
+        10u32,
+        (-50i32) as u32,
+        (-200i32) as u32,
+        i32::MIN as u32,
+    ];
+    engine.cpu.set_q_reg_u32x4(0, q0_u32);
+    engine.cpu.set_q_reg_u32x4(1, q1_u32);
+
+    // Program at 0x8000:
+    // 0x8000: VQADD.S32 q2, q0, q1   -> 0xF2204052
+    // 0x8004: VQSUB.U32 q3, q0, q1   -> 0xF3206252
+    // 0x8008: VQSHL.S32 q4, q0, #2   -> 0xF2A28750
+    // 0x800C: VQSHRN.S32 d10, q0, #8 -> 0xF298A910
+    // 0x8010: MOV r7, #1             -> 0xE3A07001
+    // 0x8014: MOV r0, #0             -> 0xE3A00000
+    // 0x8018: SVC 0                  -> 0xEF000000
+    engine.mem.write_u32(code_base, 0xF220_4052).unwrap();
+    engine.mem.write_u32(code_base.add(4), 0xF320_6252).unwrap();
+    engine.mem.write_u32(code_base.add(8), 0xF2A2_8750).unwrap();
+    engine.mem.write_u32(code_base.add(12), 0xF298_A910).unwrap();
+    engine.mem.write_u32(code_base.add(16), 0xE3A0_7001).unwrap();
+    engine.mem.write_u32(code_base.add(20), 0xE3A0_0000).unwrap();
+    engine.mem.write_u32(code_base.add(24), 0xEF00_0000).unwrap();
+
+    engine.cpu.set_pc(code_base);
+    let exit_code = engine.run(20).unwrap();
+    assert_eq!(exit_code, 0);
+
+    // Verify VQADD.S32:
+    assert_eq!(
+        engine.cpu.q_reg_u32x4(2),
+        [i32::MAX as u32, (-150i32) as u32, (-150i32) as u32, i32::MIN as u32]
+    );
+
+    // Verify VQSUB.U32:
+    assert_eq!(
+        engine.cpu.q_reg_u32x4(3),
+        [0x7FFF_FFF0, 0, 0, 0]
+    );
+
+    // Verify VQSHL.S32 #2:
+    assert_eq!(
+        engine.cpu.q_reg_u32x4(4),
+        [i32::MAX as u32, (-400i32) as u32, 200, 0]
+    );
+
+    // Verify VQSHRN.S32 #8 into D10:
+    assert_eq!(engine.cpu.vfp[10], 0xFFFF_7FFF);
+}
+
+#[test]
+fn test_neon_polynomial_multiply_pmull() {
+    let mut arena = ArenaMemory::new().expect("Failed to reserve 4GB virtual arena");
+    let code_base = GuestAddr::new(0x9000);
+    arena.commit_range(code_base, 0x10000).unwrap();
+
+    let mut engine = DbtEngine::new(arena);
+
+    // Setup input vectors D0 and D1:
+    let d0_bytes: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let d1_bytes: [u8; 8] = [2, 3, 4, 5, 6, 7, 8, 9];
+    engine.cpu.vfp[0] = u64::from_le_bytes(d0_bytes);
+    engine.cpu.vfp[1] = u64::from_le_bytes(d1_bytes);
+
+    // Program at 0x9000:
+    // 0x9000: VMULL.P8 q5, d0, d1 -> 0xF280AE01
+    // 0x9004: MOV r7, #1          -> 0xE3A07001
+    // 0x9008: MOV r0, #0          -> 0xE3A00000
+    // 0x900C: SVC 0               -> 0xEF000000
+    engine.mem.write_u32(code_base, 0xF280_AE01).unwrap();
+    engine.mem.write_u32(code_base.add(4), 0xE3A0_7001).unwrap();
+    engine.mem.write_u32(code_base.add(8), 0xE3A0_0000).unwrap();
+    engine.mem.write_u32(code_base.add(12), 0xEF00_0000).unwrap();
+
+    engine.cpu.set_pc(code_base);
+    let exit_code = engine.run(20).unwrap();
+    assert_eq!(exit_code, 0);
+
+    // Q5 consists of D10 and D11:
+    // Expected: [0x14000c00060002, 0x4800380012001e]
+    assert_eq!(engine.cpu.vfp[10], 0x0014_000C_0006_0002);
+    assert_eq!(engine.cpu.vfp[11], 0x0048_0038_0012_001E);
+}

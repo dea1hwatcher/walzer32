@@ -91,6 +91,157 @@ impl ArmDecoder {
             ));
         }
 
+        // NEON Permute (VTRN, VUZP, VZIP: 2-register misc with opc2 == 0b10)
+        if (raw & 0xFFB3_0810) == 0xF3B2_0000 {
+            let op_code = (raw >> 7) & 0xF;
+            let op = match op_code {
+                0b0001 => Some(NeonPermuteOp::Trn),
+                0b0010 => Some(NeonPermuteOp::Uzp),
+                0b0011 => Some(NeonPermuteOp::Zip),
+                _ => None,
+            };
+            if let Some(op) = op {
+                let size_bits = (raw >> 18) & 0x3;
+                let size = match size_bits {
+                    0 => NeonSize::I8,
+                    1 => NeonSize::I16,
+                    _ => NeonSize::I32,
+                };
+                let d_bit = (raw >> 22) & 1;
+                let m_bit = (raw >> 5) & 1;
+                let q_bit = (raw >> 6) & 1;
+                let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+                let vm = (raw & 0xF) | (m_bit << 4);
+                let is_quad = q_bit != 0;
+                return Some(ArmInst::new(
+                    Cond::AL,
+                    Op::NeonPermute {
+                        op,
+                        size,
+                        is_quad,
+                        vd: vd as u8,
+                        vm: vm as u8,
+                    },
+                    raw,
+                ));
+            }
+        }
+
+        // NEON Table Lookup (VTBL, VTBX: 1111 0011 1 D 11 Vn Vd 10 len N op M 0 Vm)
+        if (raw & 0xFFB0_0C10) == 0xF3B0_0800 {
+            let d_bit = (raw >> 22) & 1;
+            let n_bit = (raw >> 7) & 1;
+            let m_bit = (raw >> 5) & 1;
+            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let vn = ((raw >> 16) & 0xF) | (n_bit << 4);
+            let vm = (raw & 0xF) | (m_bit << 4);
+            let len = (((raw >> 8) & 0x3) + 1) as u8;
+            let is_tbx = ((raw >> 6) & 1) != 0;
+            return Some(ArmInst::new(
+                Cond::AL,
+                Op::NeonTbl {
+                    is_tbx,
+                    vd: vd as u8,
+                    vn: vn as u8,
+                    len,
+                    vm: vm as u8,
+                },
+                raw,
+            ));
+        }
+
+        // NEON Polynomial Multiply (VMULL.P8: 1111 0010 1 D 00 Vn Vd 1110 N 0 M 0 Vm)
+        if (raw & 0xFF80_0F00) == 0xF280_0E00 {
+            let d_bit = (raw >> 22) & 1;
+            let n_bit = (raw >> 7) & 1;
+            let m_bit = (raw >> 5) & 1;
+            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let vn = ((raw >> 16) & 0xF) | (n_bit << 4);
+            let vm = (raw & 0xF) | (m_bit << 4);
+            return Some(ArmInst::new(
+                Cond::AL,
+                Op::NeonPolyMul {
+                    vd: vd as u8,
+                    vn: vn as u8,
+                    vm: vm as u8,
+                },
+                raw,
+            ));
+        }
+
+        // NEON Shift Left Saturating by immediate (VQSHL: 1111 001x 1 D 11 imm6 Vd 0111 L Q M 1 Vm)
+        if (raw & 0xFE80_0F90) == 0xF280_0710 {
+            let u = (raw >> 24) & 1;
+            let d_bit = (raw >> 22) & 1;
+            let imm6 = (raw >> 16) & 0x3F;
+            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let q_bit = (raw >> 6) & 1;
+            let m_bit = (raw >> 5) & 1;
+            let vm = (raw & 0xF) | (m_bit << 4);
+            let (size, shift) = if (imm6 & 0b100000) != 0 {
+                (NeonSize::I32, (imm6 - 32) as u8)
+            } else if (imm6 & 0b010000) != 0 {
+                (NeonSize::I16, (imm6 - 16) as u8)
+            } else if (imm6 & 0b001000) != 0 {
+                (NeonSize::I8, (imm6 - 8) as u8)
+            } else {
+                (NeonSize::I8, 0)
+            };
+            return Some(ArmInst::new(
+                Cond::AL,
+                Op::NeonShiftImm {
+                    signed: u == 0,
+                    saturate: true,
+                    size,
+                    is_quad: q_bit != 0,
+                    shift,
+                    vd: vd as u8,
+                    vm: vm as u8,
+                },
+                raw,
+            ));
+        }
+
+        // NEON Shift Right Narrow Saturating by immediate (VQSHRN / VQSHRUN)
+        if (raw & 0xFE80_0F90) == 0xF280_0910 || (raw & 0xFF80_0F90) == 0xF380_0810 {
+            let is_vqshrun = (raw & 0xFF80_0F90) == 0xF380_0810;
+            let u = (raw >> 24) & 1;
+            let d_bit = (raw >> 22) & 1;
+            let imm6 = (raw >> 16) & 0x3F;
+            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let m_bit = (raw >> 5) & 1;
+            let vm = (raw & 0xF) | (m_bit << 4);
+            let (src_size, shift) = if (imm6 & 0b100000) != 0 {
+                (NeonSize::F32, (64 - imm6) as u8)
+            } else if (imm6 & 0b010000) != 0 {
+                (NeonSize::I32, (32 - imm6) as u8)
+            } else if (imm6 & 0b001000) != 0 {
+                (NeonSize::I16, (16 - imm6) as u8)
+            } else {
+                (NeonSize::I16, 0)
+            };
+            let (signed, dest_unsigned) = if is_vqshrun {
+                (true, true)
+            } else if u != 0 {
+                (false, true)
+            } else {
+                (true, false)
+            };
+            return Some(ArmInst::new(
+                Cond::AL,
+                Op::NeonShiftNarrow {
+                    signed,
+                    dest_unsigned,
+                    saturate: true,
+                    src_size,
+                    shift,
+                    vd: vd as u8,
+                    vm: vm as u8,
+                },
+                raw,
+            ));
+        }
+
         // NEON Data Processing (3-register same: 1111 001x ...)
         if (raw & 0xFE00_0000) == 0xF200_0000 {
             let d_bit = (raw >> 22) & 1;
@@ -216,6 +367,57 @@ impl ArmDecoder {
                     (1, _) => NeonOp::Eor,
                     _ => NeonOp::Orr,
                 };
+                return Some(ArmInst::new(
+                    Cond::AL,
+                    Op::NeonAlu {
+                        op,
+                        size,
+                        is_quad,
+                        dst: vd as u8,
+                        src1: vn as u8,
+                        src2: vm as u8,
+                    },
+                    raw,
+                ));
+            }
+
+            // Saturating VQADD: op_code == 0b0000, bit4 == 1
+            if op_code == 0b0000 && bit4 == 1 {
+                let op = if bit24 != 0 { NeonOp::Uqadd } else { NeonOp::Sqadd };
+                return Some(ArmInst::new(
+                    Cond::AL,
+                    Op::NeonAlu {
+                        op,
+                        size,
+                        is_quad,
+                        dst: vd as u8,
+                        src1: vn as u8,
+                        src2: vm as u8,
+                    },
+                    raw,
+                ));
+            }
+
+            // Saturating VQSUB: op_code == 0b0010, bit4 == 1
+            if op_code == 0b0010 && bit4 == 1 {
+                let op = if bit24 != 0 { NeonOp::Uqsub } else { NeonOp::Sqsub };
+                return Some(ArmInst::new(
+                    Cond::AL,
+                    Op::NeonAlu {
+                        op,
+                        size,
+                        is_quad,
+                        dst: vd as u8,
+                        src1: vn as u8,
+                        src2: vm as u8,
+                    },
+                    raw,
+                ));
+            }
+
+            // Saturating VQSHL (register): op_code == 0b0100, bit4 == 1
+            if op_code == 0b0100 && bit4 == 1 {
+                let op = if bit24 != 0 { NeonOp::Uqshl } else { NeonOp::Sqshl };
                 return Some(ArmInst::new(
                     Cond::AL,
                     Op::NeonAlu {
@@ -1194,6 +1396,70 @@ mod tests {
                 is_quad: true,
                 reg: 0,
                 rn: Reg::R0,
+            }
+        );
+
+        // VTRN.32 d0, d1
+        let inst = ArmDecoder::decode(0xF3BA_0081);
+        assert_eq!(
+            inst.op,
+            Op::NeonPermute {
+                op: NeonPermuteOp::Trn,
+                size: NeonSize::I32,
+                is_quad: false,
+                vd: 0,
+                vm: 1,
+            }
+        );
+
+        // VZIP.16 q0, q1 (vd=0, vm=2, is_quad=true)
+        let inst = ArmDecoder::decode(0xF3B6_01C2);
+        assert_eq!(
+            inst.op,
+            Op::NeonPermute {
+                op: NeonPermuteOp::Zip,
+                size: NeonSize::I16,
+                is_quad: true,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // VTBL.8 d5, {d8, d9}, d3
+        let inst = ArmDecoder::decode(0xF3B8_5903);
+        assert_eq!(
+            inst.op,
+            Op::NeonTbl {
+                is_tbx: false,
+                vd: 5,
+                vn: 8,
+                len: 2,
+                vm: 3,
+            }
+        );
+
+        // VQADD.S32 q0, q1, q2
+        let inst = ArmDecoder::decode(0xF222_0054);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Sqadd,
+                size: NeonSize::I32,
+                is_quad: true,
+                dst: 0,
+                src1: 2,
+                src2: 4,
+            }
+        );
+
+        // VMULL.P8 q0, d0, d1
+        let inst = ArmDecoder::decode(0xF280_0E01);
+        assert_eq!(
+            inst.op,
+            Op::NeonPolyMul {
+                vd: 0,
+                vn: 0,
+                vm: 1,
             }
         );
     }

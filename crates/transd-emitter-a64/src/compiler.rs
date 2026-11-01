@@ -3,8 +3,8 @@ use transd_core::{
     OFFSET_VFP,
 };
 use transd_decoder::{
-    AddrMode, AddrOffset, AluOp, ArmInst, BlockAddrMode, MemSize, MulOp, NeonOp, NeonSize, Op,
-    Operand2, ShiftAmount, ShiftType, VfpOp, VfpReg, VfpSize,
+    AddrMode, AddrOffset, AluOp, ArmInst, BlockAddrMode, MemSize, MulOp, NeonOp, NeonPermuteOp,
+    NeonSize, Op, Operand2, ShiftAmount, ShiftType, VfpOp, VfpReg, VfpSize,
 };
 use transd_ir::{BlockExit, IrBlock, Superblock};
 use crate::assembler::A64Assembler;
@@ -910,6 +910,56 @@ impl A64Compiler {
                     (NeonOp::Sub, _) => asm.neon_sub_int(2, 0, 1, *is_quad),
                     (NeonOp::Mul, _) => asm.neon_mul_int(2, 0, 1, *is_quad),
 
+                    // Saturating operations
+                    (NeonOp::Sqadd, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_sqadd(2, 0, 1, sz, *is_quad);
+                    }
+                    (NeonOp::Uqadd, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_uqadd(2, 0, 1, sz, *is_quad);
+                    }
+                    (NeonOp::Sqsub, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_sqsub(2, 0, 1, sz, *is_quad);
+                    }
+                    (NeonOp::Uqsub, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_uqsub(2, 0, 1, sz, *is_quad);
+                    }
+                    (NeonOp::Sqshl, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_sqshl(2, 0, 1, sz, *is_quad);
+                    }
+                    (NeonOp::Uqshl, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_uqshl(2, 0, 1, sz, *is_quad);
+                    }
+
                     // Fallback
                     _ => asm.neon_and(2, 0, 1, *is_quad),
                 }
@@ -951,6 +1001,69 @@ impl A64Compiler {
                         asm.str_d_imm(0, A64Reg::X10, 0);
                     }
                 }
+            }
+            Op::NeonPermute {
+                op,
+                size,
+                is_quad,
+                vd,
+                vm,
+            } => {
+                let vd_off = (OFFSET_VFP + (*vd as usize) * 8) as u32;
+                let vm_off = (OFFSET_VFP + (*vm as usize) * 8) as u32;
+
+                if *is_quad {
+                    asm.add_x_imm(A64Reg::X9, A64Reg::X0, vd_off as u16);
+                    asm.ldr_q_imm(0, A64Reg::X9, 0);
+                    asm.add_x_imm(A64Reg::X10, A64Reg::X0, vm_off as u16);
+                    asm.ldr_q_imm(1, A64Reg::X10, 0);
+                } else {
+                    asm.ldr_d_imm(0, A64Reg::X0, vd_off);
+                    asm.ldr_d_imm(1, A64Reg::X0, vm_off);
+                }
+
+                let sz = match size {
+                    NeonSize::I8 => 0,
+                    NeonSize::I16 => 1,
+                    _ => 2,
+                };
+
+                match op {
+                    NeonPermuteOp::Trn => {
+                        asm.neon_trn1(2, 0, 1, sz, *is_quad);
+                        asm.neon_trn2(3, 0, 1, sz, *is_quad);
+                    }
+                    NeonPermuteOp::Zip => {
+                        asm.neon_zip1(2, 0, 1, sz, *is_quad);
+                        asm.neon_zip2(3, 0, 1, sz, *is_quad);
+                    }
+                    NeonPermuteOp::Uzp => {
+                        asm.neon_uzp1(2, 0, 1, sz, *is_quad);
+                        asm.neon_uzp2(3, 0, 1, sz, *is_quad);
+                    }
+                }
+
+                if *is_quad {
+                    asm.add_x_imm(A64Reg::X9, A64Reg::X0, vd_off as u16);
+                    asm.str_q_imm(2, A64Reg::X9, 0);
+                    asm.add_x_imm(A64Reg::X10, A64Reg::X0, vm_off as u16);
+                    asm.str_q_imm(3, A64Reg::X10, 0);
+                } else {
+                    asm.str_d_imm(2, A64Reg::X0, vd_off);
+                    asm.str_d_imm(3, A64Reg::X0, vm_off);
+                }
+            }
+            Op::NeonPolyMul { vd, vn, vm } => {
+                let vd_off = (OFFSET_VFP + (*vd as usize) * 8) as u32;
+                let vn_off = (OFFSET_VFP + (*vn as usize) * 8) as u32;
+                let vm_off = (OFFSET_VFP + (*vm as usize) * 8) as u32;
+
+                asm.ldr_d_imm(0, A64Reg::X0, vn_off);
+                asm.ldr_d_imm(1, A64Reg::X0, vm_off);
+                asm.neon_pmull(2, 0, 1);
+
+                asm.add_x_imm(A64Reg::X9, A64Reg::X0, vd_off as u16);
+                asm.str_q_imm(2, A64Reg::X9, 0);
             }
             _ => {
                 // Branches and exchanges are fully handled in compile_exit; avoid spurious NOPs

@@ -987,6 +987,109 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// SQADD Vd, Vn, Vm (Signed saturating add)
+    pub fn neon_sqadd(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_0C00 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// UQADD Vd, Vn, Vm (Unsigned saturating add)
+    pub fn neon_uqadd(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2E20_0C00 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SQSUB Vd, Vn, Vm (Signed saturating sub)
+    pub fn neon_sqsub(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_2C00 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// UQSUB Vd, Vn, Vm (Unsigned saturating sub)
+    pub fn neon_uqsub(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2E20_2C00 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SQSHL Vd, Vn, Vm (Signed saturating shift left by vector register)
+    pub fn neon_sqshl(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_4C00 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// UQSHL Vd, Vn, Vm (Unsigned saturating shift left by vector register)
+    pub fn neon_uqshl(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2E20_4C00 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// TRN1 Vd, Vn, Vm (Transpose primary)
+    pub fn neon_trn1(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E00_2800 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// TRN2 Vd, Vn, Vm (Transpose secondary)
+    pub fn neon_trn2(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E00_6800 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// ZIP1 Vd, Vn, Vm (Zip primary)
+    pub fn neon_zip1(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E00_3800 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// ZIP2 Vd, Vn, Vm (Zip secondary)
+    pub fn neon_zip2(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E00_7800 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// UZP1 Vd, Vn, Vm (Unzip primary)
+    pub fn neon_uzp1(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E00_1800 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// UZP2 Vd, Vn, Vm (Unzip secondary)
+    pub fn neon_uzp2(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E00_5800 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// PMULL Vd.8H, Vn.8B, Vm.8B (Polynomial Multiply Long: GF(2) carry-less multiply)
+    pub fn neon_pmull(&mut self, rd: u8, rn: u8, rm: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let inst = 0x0E20_E000 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
     /// LDXR Wt, [Xn] (Load exclusive 32-bit register)
     pub fn ldxr_w(&mut self, rt: A64Reg, rn: A64Reg) {
         let inst = 0x885F_7C00 | (rn.index() << 5) | rt.index();

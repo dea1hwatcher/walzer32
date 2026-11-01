@@ -917,5 +917,31 @@ mod tests {
         let (inst_vmsr, size) = ThumbDecoder::decode(0xEEE1, Some(0x3A10));
         assert_eq!(size, 4);
         assert_eq!(inst_vmsr.op, Op::VfpMsrFpscr { rt: Reg::R3 });
+
+        // Thumb-2 VTRN.32 d0, d1 -> hi=0xFFBA, lo=0x0081
+        let (inst_vtrn, size) = ThumbDecoder::decode(0xFFBA, Some(0x0081));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vtrn.op,
+            Op::NeonPermute {
+                op: NeonPermuteOp::Trn,
+                size: NeonSize::I32,
+                is_quad: false,
+                vd: 0,
+                vm: 1,
+            }
+        );
+
+        // Thumb-2 VMULL.P8 q0, d0, d1 -> hi=0xEF80, lo=0x0E01
+        let (inst_vmull, size) = ThumbDecoder::decode(0xEF80, Some(0x0E01));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vmull.op,
+            Op::NeonPolyMul {
+                vd: 0,
+                vn: 0,
+                vm: 1,
+            }
+        );
     }
 }
