@@ -108,6 +108,25 @@ impl Lifter {
                     block.exit = BlockExit::Bkpt { imm, next_pc };
                     break;
                 }
+                Op::CompareBranch { is_nonzero, rn, offset } => {
+                    let target_addr = cur_pc.add(4).offset(offset as i32);
+                    block.exit = BlockExit::CompareBranch {
+                        is_nonzero,
+                        rn,
+                        target: target_addr,
+                        fallthrough: next_pc,
+                    };
+                    break;
+                }
+                Op::TableBranch { is_halfword, rn, rm } => {
+                    block.exit = BlockExit::TableBranch {
+                        is_halfword,
+                        rn,
+                        rm,
+                        inst_pc: cur_pc,
+                    };
+                    break;
+                }
                 Op::Unknown(_) => {
                     block.exit = BlockExit::Invalid(cur_pc);
                     break;

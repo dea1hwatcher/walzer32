@@ -503,6 +503,16 @@ impl ThumbDecoder {
     }
 
     fn decode_t16_misc(hw: u16, raw: u32) -> ArmInst {
+        // CBZ / CBNZ: 1011 00i1 1 imm5 Rn / 1011 10i1 1 imm5 Rn
+        if (hw & 0xF500) == 0xB100 {
+            let is_nonzero = (hw & 0x0800) != 0;
+            let rn = Reg::from_u8((hw & 0x7) as u8).unwrap_or(Reg::R0);
+            let imm5 = ((hw >> 3) & 0x1F) as u32;
+            let i = ((hw >> 9) & 1) as u32;
+            let offset = (i << 6) | (imm5 << 1);
+            return ArmInst::new(Cond::AL, Op::CompareBranch { is_nonzero, rn, offset }, raw);
+        }
+
         let sub = (hw >> 8) & 0xF;
 
         match sub {
@@ -708,6 +718,51 @@ impl ThumbDecoder {
         // NOP.W hint (0xF3AF 8000)
         if hw1 == 0xF3AF && (hw2 & 0xFF00) == 0x8000 {
             return ArmInst::new(Cond::AL, Op::Nop, raw);
+        }
+
+        // Thumb-32 MOVW: 1111 0 i 10 0 1 0 0 imm4 | 0 imm3 Rd imm8
+        // Thumb-32 MOVT: 1111 0 i 10 1 1 0 0 imm4 | 0 imm3 Rd imm8
+        if ((hw1 & 0xFBF0) == 0xF240 || (hw1 & 0xFBF0) == 0xF2C0) && (hw2 & 0x8000) == 0 {
+            let is_top = (hw1 & 0x0080) != 0;
+            let i = ((hw1 >> 10) & 1) as u16;
+            let imm4 = (hw1 & 0xF) as u16;
+            let imm3 = ((hw2 >> 12) & 7) as u16;
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let imm8 = (hw2 & 0xFF) as u16;
+            let imm16 = (imm4 << 12) | (i << 11) | (imm3 << 8) | imm8;
+            if is_top {
+                return ArmInst::new(Cond::AL, Op::Movt { rd, imm: imm16 }, raw);
+            } else {
+                return ArmInst::new(Cond::AL, Op::Movw { rd, imm: imm16 }, raw);
+            }
+        }
+
+        // Thumb-32 CLREX (0xF3BF 8F2F)
+        if hw1 == 0xF3BF && (hw2 & 0xFFF0) == 0x8F20 {
+            return ArmInst::new(Cond::AL, Op::Clrex, raw);
+        }
+
+        // Thumb-32 TBB / TBH: 1110 1000 1101 Rn | 1111 0000 000H Rm
+        if (hw1 & 0xFFF0) == 0xE8D0 && (hw2 & 0xFFE0) == 0xF000 {
+            let is_halfword = ((hw2 >> 4) & 1) != 0;
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+            return ArmInst::new(Cond::AL, Op::TableBranch { is_halfword, rn, rm }, raw);
+        }
+
+        // Thumb-32 LDREX: 1110 1000 0101 Rn | 1111 Rt 0000 0000
+        if (hw1 & 0xFFF0) == 0xE850 && (hw2 & 0xF0FF) == 0xF000 {
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            return ArmInst::new(Cond::AL, Op::AtomicLoadEx { rd, rn }, raw);
+        }
+
+        // Thumb-32 STREX: 1110 1000 0100 Rn | Rd Rt 0000 0000
+        if (hw1 & 0xFFF0) == 0xE840 && (hw2 & 0x00FF) == 0x0000 {
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            return ArmInst::new(Cond::AL, Op::AtomicStoreEx { rd, rm, rn }, raw);
         }
 
         // Thumb-2 LDRD / STRD (immediate): 1110 100P U1W0 Rn ...
@@ -1785,5 +1840,53 @@ mod tests {
             rm: Reg::R3,
             ra: Some(Reg::R4),
         });
+    }
+
+    #[test]
+    fn test_thumb_movw_movt_cbz_and_table_branch() {
+        // CBZ r0, #4 -> 0xB110
+        let (inst, size) = ThumbDecoder::decode(0xB110, None);
+        assert_eq!(size, 2);
+        assert_eq!(inst.op, Op::CompareBranch { is_nonzero: false, rn: Reg::R0, offset: 4 });
+
+        // CBNZ r3, #12 -> 0xB933
+        let (inst, size) = ThumbDecoder::decode(0xB933, None);
+        assert_eq!(size, 2);
+        assert_eq!(inst.op, Op::CompareBranch { is_nonzero: true, rn: Reg::R3, offset: 12 });
+
+        // MOVW r1, #0x1234 -> hw1=0xF241, hw2=0x2134
+        let (inst, size) = ThumbDecoder::decode(0xF241, Some(0x2134));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::Movw { rd: Reg::R1, imm: 0x1234 });
+
+        // MOVT r1, #0x5678 -> hw1=0xF2C5, hw2=0x6178
+        let (inst, size) = ThumbDecoder::decode(0xF2C5, Some(0x6178));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::Movt { rd: Reg::R1, imm: 0x5678 });
+
+        // TBB [pc, r0] -> hw1=0xE8DF, hw2=0xF000
+        let (inst, size) = ThumbDecoder::decode(0xE8DF, Some(0xF000));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::TableBranch { is_halfword: false, rn: Reg::PC, rm: Reg::R0 });
+
+        // TBH [r1, r2, lsl #1] -> hw1=0xE8D1, hw2=0xF012
+        let (inst, size) = ThumbDecoder::decode(0xE8D1, Some(0xF012));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::TableBranch { is_halfword: true, rn: Reg::R1, rm: Reg::R2 });
+
+        // LDREX r2, [r1] -> hw1=0xE851, hw2=0xF200
+        let (inst, size) = ThumbDecoder::decode(0xE851, Some(0xF200));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::AtomicLoadEx { rd: Reg::R2, rn: Reg::R1 });
+
+        // STREX r0, r2, [r1] -> hw1=0xE841, hw2=0x0200
+        let (inst, size) = ThumbDecoder::decode(0xE841, Some(0x0200));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::AtomicStoreEx { rd: Reg::R0, rm: Reg::R2, rn: Reg::R1 });
+
+        // CLREX -> hw1=0xF3BF, hw2=0x8F2F
+        let (inst, size) = ThumbDecoder::decode(0xF3BF, Some(0x8F2F));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::Clrex);
     }
 }

@@ -1228,6 +1228,50 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
+            Op::Movw { rd, imm } => {
+                cpu.set_reg(rd, imm as u32);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::Movt { rd, imm } => {
+                let cur = cpu.reg(rd);
+                let new_val = (cur & 0x0000_FFFF) | ((imm as u32) << 16);
+                cpu.set_reg(rd, new_val);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::CompareBranch { is_nonzero, rn, offset } => {
+                let val = cpu.reg(rn);
+                let take = if is_nonzero { val != 0 } else { val == 0 };
+                if take {
+                    let target_addr = pc.add(4).offset(offset as i32);
+                    cpu.set_pc(target_addr);
+                } else {
+                    cpu.set_pc(next_pc);
+                }
+                Ok(StepResult::Continue)
+            }
+            Op::TableBranch { is_halfword, rn, rm } => {
+                let base = if rn == Reg::PC {
+                    let pc_val = pc.add(4).as_u32();
+                    GuestAddr::new(pc_val & !3)
+                } else {
+                    GuestAddr::new(cpu.reg(rn))
+                };
+                let idx = cpu.reg(rm);
+                let table_offset = if is_halfword {
+                    let addr = base.add(idx * 2);
+                    let h = mem.read_u16(addr)?;
+                    (h as u32) * 2
+                } else {
+                    let addr = base.add(idx);
+                    let b = mem.read_u8(addr)?;
+                    (b as u32) * 2
+                };
+                let target = pc.add(4).add(table_offset);
+                cpu.set_pc(target);
+                Ok(StepResult::Continue)
+            }
             Op::VfpAlu {
                 op,
                 size,

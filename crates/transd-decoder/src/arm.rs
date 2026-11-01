@@ -983,6 +983,21 @@ impl ArmDecoder {
             }
         }
 
+        if bit25 != 0 {
+            // ARMv7 MOVW / MOVT (16-bit immediate load)
+            // cond 0011 0x00 imm4 Rd imm12
+            if (raw & 0x0FB0_0000) == 0x0300_0000 {
+                let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+                let imm16 = ((((raw >> 16) & 0xF) << 12) | (raw & 0xFFF)) as u16;
+                let is_top = (raw & 0x0040_0000) != 0;
+                if is_top {
+                    return Op::Movt { rd, imm: imm16 };
+                } else {
+                    return Op::Movw { rd, imm: imm16 };
+                }
+            }
+        }
+
         // Standard Data Processing (ALU)
         Self::decode_alu(raw)
     }
@@ -2944,5 +2959,16 @@ mod tests {
             rm: Reg::R3,
             ra: Some(Reg::R4),
         });
+    }
+
+    #[test]
+    fn test_decode_arm_movw_and_movt() {
+        // MOVW r2, #0x1345 -> 0xE301_2345
+        let inst = ArmDecoder::decode(0xE301_2345);
+        assert_eq!(inst.op, Op::Movw { rd: Reg::R2, imm: 0x1345 });
+
+        // MOVT r2, #0xABC0 -> 0xE34A_2BC0
+        let inst = ArmDecoder::decode(0xE34A_2BC0);
+        assert_eq!(inst.op, Op::Movt { rd: Reg::R2, imm: 0xABC0 });
     }
 }

@@ -310,6 +310,20 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// CBZ Wt, #offset_words
+    pub fn cbz_w(&mut self, rt: A64Reg, offset_words: i32) {
+        let imm19 = (offset_words as u32) & 0x7FFFF;
+        let inst = 0x3400_0000 | (imm19 << 5) | rt.index();
+        self.emit(inst);
+    }
+
+    /// CBNZ Wt, #offset_words
+    pub fn cbnz_w(&mut self, rt: A64Reg, offset_words: i32) {
+        let imm19 = (offset_words as u32) & 0x7FFFF;
+        let inst = 0x3500_0000 | (imm19 << 5) | rt.index();
+        self.emit(inst);
+    }
+
     /// BR Xn (branch to register)
     pub fn br(&mut self, rn: A64Reg) {
         let inst = 0xD61F_0000 | (rn.index() << 5);
@@ -2118,5 +2132,14 @@ mod tests {
         assert_eq!(asm.code[7], 0x9350_FC20);
         assert_eq!(asm.code[8], 0x9E66_0020);
         assert_eq!(asm.code[9], 0x9E67_0020);
+    }
+
+    #[test]
+    fn test_asm_cbz_cbnz() {
+        let mut asm = A64Assembler::new();
+        asm.cbz_w(A64Reg::X0, 8);
+        asm.cbnz_w(A64Reg::X1, -4);
+        assert_eq!(asm.code[0], 0x3400_0100);
+        assert_eq!(asm.code[1], 0x35FF_FF81);
     }
 }

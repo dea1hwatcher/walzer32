@@ -17,6 +17,20 @@ pub enum BlockExit {
     Svc { imm: u32, next_pc: GuestAddr },
     /// Breakpoint instruction
     Bkpt { imm: u16, next_pc: GuestAddr },
+    /// Compare and branch (CBZ / CBNZ)
+    CompareBranch {
+        is_nonzero: bool,
+        rn: Reg,
+        target: GuestAddr,
+        fallthrough: GuestAddr,
+    },
+    /// Table branch (TBB / TBH)
+    TableBranch {
+        is_halfword: bool,
+        rn: Reg,
+        rm: Reg,
+        inst_pc: GuestAddr,
+    },
     /// Unknown instruction encountered
     Invalid(GuestAddr),
 }

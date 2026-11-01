@@ -513,6 +513,24 @@ pub enum Op {
         rm: Reg,
         ra: Option<Reg>,
     },
+    Movw {
+        rd: Reg,
+        imm: u16,
+    },
+    Movt {
+        rd: Reg,
+        imm: u16,
+    },
+    CompareBranch {
+        is_nonzero: bool,
+        rn: Reg,
+        offset: u32,
+    },
+    TableBranch {
+        is_halfword: bool,
+        rn: Reg,
+        rm: Reg,
+    },
     VfpMrsFpscr {
         rt: Option<Reg>, // None = APSR_nzcv (CPSR), Some(r) = general purpose register
     },

@@ -1340,6 +1340,23 @@ impl A64Compiler {
                     asm.str_w_imm(src, A64Reg::X0, OFFSET_TLS as u32);
                 }
             }
+            Op::Movw { rd, imm } => {
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+                asm.movz_w(dst_reg, *imm, 0);
+                if pinned_reg(*rd).is_none() {
+                    asm.str_w_imm(dst_reg, A64Reg::X0, (rd.index() * 4) as u32);
+                }
+            }
+            Op::Movt { rd, imm } => {
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+                if pinned_reg(*rd).is_none() {
+                    asm.ldr_w_imm(dst_reg, A64Reg::X0, (rd.index() * 4) as u32);
+                }
+                asm.movk_w(dst_reg, *imm, 16);
+                if pinned_reg(*rd).is_none() {
+                    asm.str_w_imm(dst_reg, A64Reg::X0, (rd.index() * 4) as u32);
+                }
+            }
             Op::NeonAlu {
                 op,
                 size,
@@ -2037,6 +2054,80 @@ impl A64Compiler {
             }
             BlockExit::Invalid(addr) => {
                 asm.mov_imm64(A64Reg::X9, (EXIT_REASON_INVALID << 32) | (addr.as_u32() as u64));
+                Self::emit_epilogue(asm);
+                asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
+                asm.ret(None);
+            }
+            BlockExit::CompareBranch {
+                is_nonzero,
+                rn,
+                target,
+                fallthrough,
+            } => {
+                let rn_reg = load_guest_reg(asm, A64Reg::X11, *rn);
+                let cb_idx = asm.cursor();
+                if *is_nonzero {
+                    asm.cbnz_w(rn_reg, 0);
+                } else {
+                    asm.cbz_w(rn_reg, 0);
+                }
+
+                // Fallthrough path
+                let ft_site_offset = asm.cursor() * 4;
+                patch_sites.push(PatchSite {
+                    byte_offset: ft_site_offset,
+                    target: PatchTarget::BranchFallthrough(*fallthrough),
+                });
+                asm.mov_imm32(A64Reg::X9, fallthrough.as_u32());
+                Self::emit_epilogue(asm);
+                asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
+                asm.ret(None);
+
+                // Taken path
+                let taken_target_idx = asm.cursor();
+                let offset_words = (taken_target_idx as i32) - (cb_idx as i32);
+                let imm19 = (offset_words as u32) & 0x7FFFF;
+                let op_code = if *is_nonzero { 0x3500_0000 } else { 0x3400_0000 };
+                asm.patch(cb_idx, op_code | (imm19 << 5) | rn_reg.index());
+
+                let taken_site_offset = asm.cursor() * 4;
+                patch_sites.push(PatchSite {
+                    byte_offset: taken_site_offset,
+                    target: PatchTarget::Direct(*target),
+                });
+                asm.mov_imm32(A64Reg::X9, target.as_u32());
+                Self::emit_epilogue(asm);
+                asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
+                asm.ret(None);
+            }
+            BlockExit::TableBranch {
+                is_halfword,
+                rn,
+                rm,
+                inst_pc,
+            } => {
+                if *rn == Reg::PC {
+                    let pc_val = (inst_pc.as_u32() + 4) & !3;
+                    asm.mov_imm32(A64Reg::X12, pc_val);
+                } else {
+                    let rn_reg = load_guest_reg(asm, A64Reg::X12, *rn);
+                    if rn_reg != A64Reg::X12 {
+                        asm.mov_w_reg(A64Reg::X12, rn_reg);
+                    }
+                }
+                let rm_reg = load_guest_reg(asm, A64Reg::X10, *rm);
+                if *is_halfword {
+                    asm.lsl_w_imm(A64Reg::X10, rm_reg, 1);
+                    asm.add_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X10);
+                    asm.ldrh_w_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
+                } else {
+                    asm.add_w_reg(A64Reg::X12, A64Reg::X12, rm_reg);
+                    asm.ldrb_w_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
+                }
+                asm.lsl_w_imm(A64Reg::X10, A64Reg::X10, 1);
+                asm.mov_imm32(A64Reg::X9, inst_pc.as_u32() + 4);
+                asm.add_w_reg(A64Reg::X9, A64Reg::X9, A64Reg::X10);
+                asm.movk_x(A64Reg::X9, EXIT_REASON_INDIRECT as u16, 32);
                 Self::emit_epilogue(asm);
                 asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
                 asm.ret(None);

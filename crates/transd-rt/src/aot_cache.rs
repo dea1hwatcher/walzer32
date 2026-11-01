@@ -320,6 +320,20 @@ impl AotDiskCache {
                     record_data.push(5);
                     record_data.extend_from_slice(&addr.as_u32().to_le_bytes());
                 }
+                BlockExit::CompareBranch { is_nonzero, rn, target, fallthrough } => {
+                    record_data.push(6);
+                    record_data.push(if *is_nonzero { 1 } else { 0 });
+                    record_data.push(*rn as u8);
+                    record_data.extend_from_slice(&target.as_u32().to_le_bytes());
+                    record_data.extend_from_slice(&fallthrough.as_u32().to_le_bytes());
+                }
+                BlockExit::TableBranch { is_halfword, rn, rm, inst_pc } => {
+                    record_data.push(7);
+                    record_data.push(if *is_halfword { 1 } else { 0 });
+                    record_data.push(*rn as u8);
+                    record_data.push(*rm as u8);
+                    record_data.extend_from_slice(&inst_pc.as_u32().to_le_bytes());
+                }
             }
 
             // Patch sites
@@ -507,6 +521,33 @@ impl AotDiskCache {
                     r_off += 4;
                     BlockExit::Bkpt { imm, next_pc }
                 }
+                5 => {
+                    let addr = GuestAddr::new(LittleEndian::read_u32(&record_slice[r_off..r_off + 4]));
+                    r_off += 4;
+                    BlockExit::Invalid(addr)
+                }
+                6 => {
+                    let is_nonzero = record_slice[r_off] != 0;
+                    r_off += 1;
+                    let rn = Reg::from_u8(record_slice[r_off]).unwrap_or(Reg::R0);
+                    r_off += 1;
+                    let target = GuestAddr::new(LittleEndian::read_u32(&record_slice[r_off..r_off + 4]));
+                    r_off += 4;
+                    let fallthrough = GuestAddr::new(LittleEndian::read_u32(&record_slice[r_off..r_off + 4]));
+                    r_off += 4;
+                    BlockExit::CompareBranch { is_nonzero, rn, target, fallthrough }
+                }
+                7 => {
+                    let is_halfword = record_slice[r_off] != 0;
+                    r_off += 1;
+                    let rn = Reg::from_u8(record_slice[r_off]).unwrap_or(Reg::R0);
+                    r_off += 1;
+                    let rm = Reg::from_u8(record_slice[r_off]).unwrap_or(Reg::R0);
+                    r_off += 1;
+                    let inst_pc = GuestAddr::new(LittleEndian::read_u32(&record_slice[r_off..r_off + 4]));
+                    r_off += 4;
+                    BlockExit::TableBranch { is_halfword, rn, rm, inst_pc }
+                }
                 _ => {
                     let addr = GuestAddr::new(LittleEndian::read_u32(&record_slice[r_off..r_off + 4]));
                     r_off += 4;
@@ -684,6 +725,10 @@ impl AotScanner {
                     }
                     BlockExit::Svc { next_pc, .. } | BlockExit::Bkpt { next_pc, .. } => {
                         worklist.push_back(next_pc);
+                    }
+                    BlockExit::CompareBranch { target, fallthrough, .. } => {
+                        worklist.push_back(target);
+                        worklist.push_back(fallthrough);
                     }
                     _ => {}
                 }
