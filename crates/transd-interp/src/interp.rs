@@ -401,6 +401,27 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
+            Op::Div {
+                signed,
+                rd,
+                rn,
+                rm,
+            } => {
+                let n = cpu.reg(rn);
+                let d = cpu.reg(rm);
+                let res = if d == 0 {
+                    0
+                } else if signed {
+                    let sn = n as i32;
+                    let sd = d as i32;
+                    sn.wrapping_div(sd) as u32
+                } else {
+                    n / d
+                };
+                cpu.set_reg(rd, res);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
             Op::VfpAlu {
                 op,
                 size,

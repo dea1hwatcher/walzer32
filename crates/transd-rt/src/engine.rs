@@ -2,7 +2,7 @@ use thiserror::Error;
 use transd_core::{CpuState, GuestAddr, Memory, MemoryError, Reg};
 use transd_emitter_a64::{A64Compiler, PatchTarget};
 use transd_interp::{InterpError, Interpreter, StepResult};
-use transd_ir::Lifter;
+use transd_ir::{Lifter, SuperblockOptimizer, TraceBuilder};
 use crate::cache::JitCache;
 use crate::futex::{FutexError, FutexManager};
 use crate::jit_pool::JitPool;
@@ -430,6 +430,19 @@ impl<M: Memory> DbtEngine<M> {
             }
         } else {
             self.telemetry.record_cache_hit();
+            // 1b. Tier-2 JIT Superblock Promotion for hot loops and traces
+            if self.cache.record_exec(pc) && !self.cache.has_superblock(pc) {
+                if let Ok(mut sb) = TraceBuilder::build_trace(&self.mem, pc, is_thumb) {
+                    if sb.block_count > 1 || sb.is_loop {
+                        SuperblockOptimizer::optimize(&mut sb);
+                        let compiled = A64Compiler::compile_superblock(&sb);
+                        self.telemetry.record_tier2_compilation();
+                        if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
+                            self.cache.insert_superblock(pc, compiled, committed.code_ptr);
+                        }
+                    }
+                }
+            }
         }
 
         // 2. Direct AArch64 execution dispatch if running on ARM64 silicon

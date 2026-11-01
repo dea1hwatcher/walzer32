@@ -5,7 +5,7 @@ use transd_decoder::{
     AddrMode, AddrOffset, AluOp, ArmInst, BlockAddrMode, MemSize, MulOp, NeonOp, NeonSize, Op,
     Operand2, ShiftAmount, ShiftType, VfpOp, VfpReg, VfpSize,
 };
-use transd_ir::{BlockExit, IrBlock};
+use transd_ir::{BlockExit, IrBlock, Superblock};
 use crate::assembler::A64Assembler;
 use crate::reg::A64Reg;
 
@@ -131,6 +131,115 @@ impl A64Compiler {
             guest_byte_size: block.byte_size,
             patch_sites,
             exit: block.exit.clone(),
+        }
+    }
+
+    /// Compiles a Superblock (trace across multiple basic blocks) into high-performance Tier-2 native code
+    pub fn compile_superblock(sb: &Superblock) -> CompiledBlock {
+        let mut asm = A64Assembler::new();
+        let mut patch_sites = Vec::new();
+
+        // 1. Emit entry prologue
+        Self::emit_prologue(&mut asm);
+
+        // 2. Loop header label
+        let loop_start_cursor = asm.cursor();
+
+        // 3. Compile instructions with side exit guards
+        let mut side_exit_stubs = Vec::new();
+        let mut se_idx = 0;
+
+        for (idx, inst) in sb.insts.iter().enumerate() {
+            while se_idx < sb.side_exits.len() && sb.side_exits[se_idx].inst_index == idx {
+                let se = &sb.side_exits[se_idx];
+                se_idx += 1;
+
+                let b_cond_idx = asm.cursor();
+                patch_sites.push(PatchSite {
+                    byte_offset: b_cond_idx * 4,
+                    target: PatchTarget::BranchTaken {
+                        cond: se.cond,
+                        target: se.target,
+                    },
+                });
+                asm.b_cond(se.cond, 0); // Placeholder
+                side_exit_stubs.push((b_cond_idx, se.cond, se.target));
+            }
+
+            Self::compile_inst(&mut asm, inst, idx, true, None);
+        }
+
+        while se_idx < sb.side_exits.len() {
+            let se = &sb.side_exits[se_idx];
+            se_idx += 1;
+            let b_cond_idx = asm.cursor();
+            patch_sites.push(PatchSite {
+                byte_offset: b_cond_idx * 4,
+                target: PatchTarget::BranchTaken {
+                    cond: se.cond,
+                    target: se.target,
+                },
+            });
+            asm.b_cond(se.cond, 0);
+            side_exit_stubs.push((b_cond_idx, se.cond, se.target));
+        }
+
+        // 4. Handle final exit or loop backedge
+        if sb.is_loop {
+            match &sb.exit {
+                BlockExit::BranchCond { cond, target, fallthrough } if *target == sb.entry => {
+                    // Conditional loop backedge: B.<cond> back to loop_start_cursor
+                    let cur_idx = asm.cursor();
+                    let offset_words = (loop_start_cursor as i32) - (cur_idx as i32);
+                    asm.b_cond(*cond, offset_words);
+
+                    // Fallthrough path (loop exit)
+                    let ft_site_offset = asm.cursor() * 4;
+                    patch_sites.push(PatchSite {
+                        byte_offset: ft_site_offset,
+                        target: PatchTarget::BranchFallthrough(*fallthrough),
+                    });
+                    asm.mov_imm32(A64Reg::X9, fallthrough.as_u32());
+                    Self::emit_epilogue(&mut asm);
+                    asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
+                    asm.ret(None);
+                }
+                BlockExit::Direct(target) if *target == sb.entry => {
+                    // Unconditional loop backedge: B back to loop_start_cursor
+                    let cur_idx = asm.cursor();
+                    let offset_words = (loop_start_cursor as i32) - (cur_idx as i32);
+                    asm.b(offset_words);
+                }
+                _ => {
+                    Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites);
+                }
+            }
+        } else {
+            Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites);
+        }
+
+        // 5. Emit side exit bailout stubs
+        for (b_cond_idx, cond, target) in side_exit_stubs {
+            let stub_idx = asm.cursor();
+            let offset_words = (stub_idx as i32) - (b_cond_idx as i32);
+            let imm19 = (offset_words as u32) & 0x7FFFF;
+            let cond_field = (cond as u32) & 0xF;
+            asm.patch(b_cond_idx, 0x5400_0000 | (imm19 << 5) | cond_field);
+
+            asm.mov_imm32(A64Reg::X9, target.as_u32());
+            Self::emit_epilogue(&mut asm);
+            asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
+            asm.ret(None);
+        }
+
+        CompiledBlock {
+            guest_entry: sb.entry,
+            is_thumb: sb.is_thumb,
+            code_bytes: asm.to_bytes(),
+            inst_count: sb.insts.len(),
+            guest_byte_size: sb.byte_size,
+            patch_sites,
+            exit: sb.exit.clone(),
         }
     }
 
@@ -1128,5 +1237,39 @@ mod tests {
         assert_eq!(compiled.inst_count, 4);
         assert!(!compiled.code_bytes.is_empty());
         assert_eq!(compiled.patch_sites.len(), 1);
+    }
+
+    #[test]
+    fn test_compile_superblock_with_side_exit_and_loop() {
+        use transd_ir::SideExit;
+
+        let mut sb = Superblock::new(GuestAddr::new(0x2000), false);
+        // SUBS r0, r0, #1
+        sb.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::Alu {
+                op: AluOp::Sub,
+                set_flags: true,
+                rd: Reg::R0,
+                rn: Reg::R0,
+                op2: Operand2::Imm(1),
+            },
+            0,
+        ));
+        // Side exit guard at inst 0: if EQ bail to 0x2010
+        sb.side_exits.push(SideExit {
+            inst_index: 0,
+            cond: Cond::EQ,
+            target: GuestAddr::new(0x2010),
+        });
+        // Loop backedge to 0x2000
+        sb.is_loop = true;
+        sb.exit = BlockExit::Direct(GuestAddr::new(0x2000));
+        sb.byte_size = 8;
+
+        let compiled = A64Compiler::compile_superblock(&sb);
+        assert_eq!(compiled.guest_entry, GuestAddr::new(0x2000));
+        assert!(!compiled.code_bytes.is_empty());
+        assert!(!compiled.patch_sites.is_empty());
     }
 }

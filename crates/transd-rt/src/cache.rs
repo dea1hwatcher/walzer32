@@ -24,11 +24,44 @@ pub struct JitCache {
     pub chained_jumps: u64,
     pub unchained_jumps: u64,
     pub smc_invalidations: u64,
+    /// Execution profile hit counters per guest block address
+    pub exec_counts: HashMap<GuestAddr, u32>,
+    /// Tier-2 compiled Superblocks (multi-block optimized traces)
+    pub superblocks: HashMap<GuestAddr, CompiledBlock>,
+    /// Tier-2 statistics
+    pub tier2_dispatches: u64,
+    pub tier2_compilations: u64,
 }
 
 impl JitCache {
+    pub const HOT_THRESHOLD: u32 = 20;
+
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Records block execution and returns true if it reaches the hotness threshold
+    #[inline]
+    pub fn record_exec(&mut self, addr: GuestAddr) -> bool {
+        let count = self.exec_counts.entry(addr).or_insert(0);
+        *count = count.saturating_add(1);
+        *count == Self::HOT_THRESHOLD
+    }
+
+    /// Checks if a guest address has already been compiled into a Tier-2 Superblock
+    #[inline]
+    pub fn has_superblock(&self, addr: GuestAddr) -> bool {
+        self.superblocks.contains_key(&addr)
+    }
+
+    /// Inserts a compiled Tier-2 Superblock, seamlessly replacing the Tier-1 block
+    pub fn insert_superblock(&mut self, addr: GuestAddr, block: CompiledBlock, ptr: HostCodePtr) {
+        self.tier2_compilations += 1;
+        self.code_ptrs.insert(addr, ptr);
+        self.register_pages_for(addr, block.guest_byte_size);
+        self.superblocks.insert(addr, block.clone());
+        self.blocks.insert(addr, block);
+        self.resolve_chaining_for(addr);
     }
 
     #[inline(always)]
@@ -171,6 +204,9 @@ impl JitCache {
             }
         }
 
+        self.superblocks.remove(&addr);
+        self.exec_counts.remove(&addr);
+
         if let Some(block) = self.blocks.remove(&addr) {
             self.unregister_pages_for(addr, block.guest_byte_size);
             self.code_ptrs.remove(&addr);
@@ -241,6 +277,8 @@ impl JitCache {
             self.unchain_incoming(addr);
         }
         self.blocks.clear();
+        self.superblocks.clear();
+        self.exec_counts.clear();
         self.code_ptrs.clear();
         self.outgoing_edges.clear();
         self.incoming_edges.clear();

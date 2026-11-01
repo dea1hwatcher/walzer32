@@ -723,6 +723,15 @@ impl ThumbDecoder {
             }
         }
 
+        // Thumb-2 SDIV / UDIV: 0xFB9n_Fdm / 0xFBBn_Fdm
+        if ((hw1 & 0xFFD0) == 0xFB90) && ((hw2 & 0xF0F0) == 0xF0F0) {
+            let signed = (hw1 & 0x0020) == 0;
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+            return ArmInst::new(Cond::AL, Op::Div { signed, rd, rn, rm }, raw);
+        }
+
         ArmInst::new(Cond::AL, Op::Unknown(raw), raw)
     }
 }

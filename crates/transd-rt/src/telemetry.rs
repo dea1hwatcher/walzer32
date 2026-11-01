@@ -10,6 +10,7 @@ pub struct TelemetryManager {
     pub jit_cache_hits: u64,
     pub jit_cache_misses: u64,
     pub jit_chained_jumps: u64,
+    pub tier2_superblocks_compiled: u64,
     pub total_compilation_time_us: u64,
     pub total_frames_rendered: u64,
     pub arena_allocated_bytes: usize,
@@ -35,6 +36,7 @@ impl TelemetryManager {
             jit_cache_hits: 0,
             jit_cache_misses: 0,
             jit_chained_jumps: 0,
+            tier2_superblocks_compiled: 0,
             total_compilation_time_us: 0,
             total_frames_rendered: 0,
             arena_allocated_bytes: 0,
@@ -69,6 +71,11 @@ impl TelemetryManager {
     /// Records direct block-to-block chained dispatch
     pub fn record_chained_jump(&mut self) {
         self.jit_chained_jumps += 1;
+    }
+
+    /// Records compilation of a Tier-2 Superblock trace
+    pub fn record_tier2_compilation(&mut self) {
+        self.tier2_superblocks_compiled += 1;
     }
 
     /// Records a rendered frame with delta time in milliseconds
@@ -166,6 +173,7 @@ impl TelemetryManager {
              \"jit_cache_hits\": {},\n\
              \"jit_cache_misses\": {},\n\
              \"jit_chained_jumps\": {},\n\
+             \"tier2_superblocks_compiled\": {},\n\
              \"avg_compile_time_us\": {:.2},\n\
              \"arena_allocated_bytes\": {},\n\
              \"jit_pool_allocated_bytes\": {}\n\
@@ -179,6 +187,7 @@ impl TelemetryManager {
             self.jit_cache_hits,
             self.jit_cache_misses,
             self.jit_chained_jumps,
+            self.tier2_superblocks_compiled,
             self.avg_compilation_latency_us(),
             self.arena_allocated_bytes,
             self.jit_pool_allocated_bytes

@@ -254,6 +254,16 @@ impl ArmDecoder {
     }
 
     fn decode_conditional(raw: u32) -> Op {
+        // SDIV / UDIV (ARMv7-A virtualization extension / ARMv7-R):
+        // cond 0111 00x1 Rd 1111 Rm 0001 Rn
+        if (raw & 0x0FD0_F0F0) == 0x0710_F010 {
+            let signed = (raw & 0x0020_0000) == 0;
+            let rd = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8(((raw >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rn = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            return Op::Div { signed, rd, rn, rm };
+        }
+
         let cat = (raw >> 26) & 0x3;
 
         match cat {
