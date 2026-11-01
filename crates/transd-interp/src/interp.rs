@@ -447,6 +447,65 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
+            Op::BitField {
+                op,
+                rd,
+                rn,
+                lsb,
+                width,
+            } => {
+                let mask = if width >= 32 {
+                    0xFFFF_FFFFu32
+                } else {
+                    ((1u64 << width) - 1) as u32
+                };
+                let res = match op {
+                    BitFieldOp::Ubfx => {
+                        let n = cpu.reg(rn);
+                        (n.wrapping_shr(lsb as u32)) & mask
+                    }
+                    BitFieldOp::Sbfx => {
+                        let n = cpu.reg(rn);
+                        let extracted = (n.wrapping_shr(lsb as u32)) & mask;
+                        let sign_bit = 1u32.wrapping_shl((width - 1) as u32);
+                        if (extracted & sign_bit) != 0 {
+                            extracted | !mask
+                        } else {
+                            extracted
+                        }
+                    }
+                    BitFieldOp::Bfi => {
+                        let d = cpu.reg(rd);
+                        let n = cpu.reg(rn);
+                        let insert_val = (n & mask).wrapping_shl(lsb as u32);
+                        let clear_mask = !(mask.wrapping_shl(lsb as u32));
+                        (d & clear_mask) | insert_val
+                    }
+                    BitFieldOp::Bfc => {
+                        let d = cpu.reg(rd);
+                        let clear_mask = !(mask.wrapping_shl(lsb as u32));
+                        d & clear_mask
+                    }
+                };
+                cpu.set_reg(rd, res);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::ByteRev { op, rd, rm } => {
+                let m = cpu.reg(rm);
+                let res = match op {
+                    ByteRevOp::Rev => m.swap_bytes(),
+                    ByteRevOp::Rev16 => ((m & 0x00FF_00FF) << 8) | ((m & 0xFF00_FF00) >> 8),
+                    ByteRevOp::Revsh => {
+                        let lo = (m & 0xFFFF) as u16;
+                        (lo.swap_bytes() as i16) as i32 as u32
+                    }
+                    ByteRevOp::Rbit => m.reverse_bits(),
+                };
+                cpu.set_reg(rd, res);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
             Op::VfpAlu {
                 op,
                 size,

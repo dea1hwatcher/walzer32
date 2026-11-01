@@ -542,6 +542,19 @@ impl ThumbDecoder {
                     raw,
                 )
             }
+            // REV, REV16, REVSH: 0b1010
+            0b1010 => {
+                let op_bits = (hw >> 6) & 0x3;
+                let rm = Reg::from_u8(((hw >> 3) & 0x7) as u8).unwrap_or(Reg::R0);
+                let rd = Reg::from_u8((hw & 0x7) as u8).unwrap_or(Reg::R0);
+                let op = match op_bits {
+                    0b00 => ByteRevOp::Rev,
+                    0b01 => ByteRevOp::Rev16,
+                    0b11 => ByteRevOp::Revsh,
+                    _ => return ArmInst::new(Cond::AL, Op::Unknown(raw), raw),
+                };
+                ArmInst::new(Cond::AL, Op::ByteRev { op, rd, rm }, raw)
+            }
             // POP {regs, PC}
             0b1100 | 0b1101 => {
                 let r_bit = ((hw >> 8) & 1) != 0;
@@ -638,11 +651,11 @@ impl ThumbDecoder {
 
     /// Decodes 32-bit Thumb-2 instructions
     fn decode_thumb32(hw1: u16, hw2: u16, raw: u32) -> ArmInst {
-        let op1 = (hw1 >> 11) & 0x3;
+        let _op1 = (hw1 >> 11) & 0x3;
         let _op2 = (hw1 >> 4) & 0x7F;
 
-        // Branch and Link (BL / BLX immediate)
-        if op1 == 0b11 && ((hw2 >> 14) & 0x3) == 0b11 {
+        // Branch and Link (BL / BLX immediate): hw1 prefix is 1111 0... (0xF000..0xF7FF)
+        if (hw1 & 0xF800) == 0xF000 && ((hw2 >> 14) & 0x3) == 0b11 {
             let s = ((hw1 >> 10) & 1) as u32;
             let j1 = ((hw2 >> 13) & 1) as u32;
             let j2 = ((hw2 >> 11) & 1) as u32;
@@ -730,6 +743,53 @@ impl ThumbDecoder {
             let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
             let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
             return ArmInst::new(Cond::AL, Op::Div { signed, rd, rn, rm }, raw);
+        }
+
+        // Thumb-32 UBFX: 1111 0011 1100 Rn
+        if (hw1 & 0xFFF0) == 0xF3C0 {
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let lsb = ((((hw2 >> 12) & 0x7) << 2) | ((hw2 >> 6) & 0x3)) as u8;
+            let width = ((hw2 & 0x1F) as u8) + 1;
+            return ArmInst::new(Cond::AL, Op::BitField { op: BitFieldOp::Ubfx, rd, rn, lsb, width }, raw);
+        }
+
+        // Thumb-32 SBFX: 1111 0011 0100 Rn
+        if (hw1 & 0xFFF0) == 0xF340 {
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let lsb = ((((hw2 >> 12) & 0x7) << 2) | ((hw2 >> 6) & 0x3)) as u8;
+            let width = ((hw2 & 0x1F) as u8) + 1;
+            return ArmInst::new(Cond::AL, Op::BitField { op: BitFieldOp::Sbfx, rd, rn, lsb, width }, raw);
+        }
+
+        // Thumb-32 BFI / BFC: 1111 0011 0110 Rn
+        if (hw1 & 0xFFF0) == 0xF360 {
+            let rn_raw = (hw1 & 0xF) as u8;
+            let rn = Reg::from_u8(rn_raw).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let lsb = ((((hw2 >> 12) & 0x7) << 2) | ((hw2 >> 6) & 0x3)) as u8;
+            let msb = (hw2 & 0x1F) as u8;
+            let width = if msb >= lsb { msb - lsb + 1 } else { 0 };
+            let op = if rn_raw == 15 { BitFieldOp::Bfc } else { BitFieldOp::Bfi };
+            return ArmInst::new(Cond::AL, Op::BitField { op, rd, rn, lsb, width }, raw);
+        }
+
+        // Thumb-32 RBIT, REV.W, REV16.W, REVSH.W: 0xFA9n_F0xm
+        if (hw1 & 0xFFF0) == 0xFA90 {
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let op_nibble = (hw2 >> 4) & 0xF;
+            let op = match op_nibble {
+                0x8 => Some(ByteRevOp::Rev),
+                0x9 => Some(ByteRevOp::Rev16),
+                0xA => Some(ByteRevOp::Rbit),
+                0xB => Some(ByteRevOp::Revsh),
+                _ => None,
+            };
+            if let Some(op) = op {
+                return ArmInst::new(Cond::AL, Op::ByteRev { op, rd, rm }, raw);
+            }
         }
 
         // Thumb-2 VMRS <Rt>, FPSCR (0xEEF1, 0x<Rt>A10)
@@ -1148,6 +1208,85 @@ mod tests {
                 op: VfpCvtOp::F64FromF32,
                 dst: VfpReg::D(0),
                 src: VfpReg::S(0),
+            }
+        );
+    }
+
+    #[test]
+    fn test_thumb_bitfield_and_byte_rev() {
+        // Thumb-16 REV r0, r1 -> 0xBA08
+        let (inst_rev, size) = ThumbDecoder::decode(0xBA08, None);
+        assert_eq!(size, 2);
+        assert_eq!(inst_rev.op, Op::ByteRev { op: ByteRevOp::Rev, rd: Reg::R0, rm: Reg::R1 });
+
+        // Thumb-16 REV16 r0, r1 -> 0xBA48
+        let (inst_rev16, size) = ThumbDecoder::decode(0xBA48, None);
+        assert_eq!(size, 2);
+        assert_eq!(inst_rev16.op, Op::ByteRev { op: ByteRevOp::Rev16, rd: Reg::R0, rm: Reg::R1 });
+
+        // Thumb-16 REVSH r0, r1 -> 0xBAC8
+        let (inst_revsh, size) = ThumbDecoder::decode(0xBAC8, None);
+        assert_eq!(size, 2);
+        assert_eq!(inst_revsh.op, Op::ByteRev { op: ByteRevOp::Revsh, rd: Reg::R0, rm: Reg::R1 });
+
+        // Thumb-32 RBIT r0, r1 -> hi=0xFA91, lo=0xF0A1
+        let (inst_rbit, size) = ThumbDecoder::decode(0xFA91, Some(0xF0A1));
+        assert_eq!(size, 4);
+        assert_eq!(inst_rbit.op, Op::ByteRev { op: ByteRevOp::Rbit, rd: Reg::R0, rm: Reg::R1 });
+
+        // Thumb-32 UBFX r0, r1, #1, #8 -> hi=0xF3C1, lo=0x0047
+        let (inst_ubfx, size) = ThumbDecoder::decode(0xF3C1, Some(0x0047));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_ubfx.op,
+            Op::BitField {
+                op: BitFieldOp::Ubfx,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                lsb: 1,
+                width: 8,
+            }
+        );
+
+        // Thumb-32 SBFX r0, r1, #1, #8 -> hi=0xF341, lo=0x0047
+        let (inst_sbfx, size) = ThumbDecoder::decode(0xF341, Some(0x0047));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_sbfx.op,
+            Op::BitField {
+                op: BitFieldOp::Sbfx,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                lsb: 1,
+                width: 8,
+            }
+        );
+
+        // Thumb-32 BFI r0, r1, #1, #11 -> hi=0xF361, lo=0x004B
+        let (inst_bfi, size) = ThumbDecoder::decode(0xF361, Some(0x004B));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_bfi.op,
+            Op::BitField {
+                op: BitFieldOp::Bfi,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                lsb: 1,
+                width: 11,
+            }
+        );
+
+        // Thumb-32 BFC r0, #1, #11 -> hi=0xF36F, lo=0x004B
+        let (inst_bfc, size) = ThumbDecoder::decode(0xF36F, Some(0x004B));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_bfc.op,
+            Op::BitField {
+                op: BitFieldOp::Bfc,
+                rd: Reg::R0,
+                rn: Reg::from_u8(15).unwrap(),
+                lsb: 1,
+                width: 11,
             }
         );
     }

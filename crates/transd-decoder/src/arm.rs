@@ -1131,8 +1131,56 @@ impl ArmDecoder {
         }
     }
 
-    /// Category 1: Single Data Transfer (LDR, STR, LDRB, STRB)
+    /// Category 1: Single Data Transfer (LDR, STR, LDRB, STRB) and Media Bitfield/ByteRev
     fn decode_cat1(raw: u32) -> Op {
+        // Bitfield Instructions (UBFX, SBFX, BFI, BFC)
+        if (raw & 0x0FE0_0070) == 0x07E0_0050 {
+            let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rn = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            let lsb = ((raw >> 7) & 0x1F) as u8;
+            let width = (((raw >> 16) & 0x1F) as u8) + 1;
+            return Op::BitField { op: BitFieldOp::Ubfx, rd, rn, lsb, width };
+        }
+        if (raw & 0x0FE0_0070) == 0x07A0_0050 {
+            let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rn = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            let lsb = ((raw >> 7) & 0x1F) as u8;
+            let width = (((raw >> 16) & 0x1F) as u8) + 1;
+            return Op::BitField { op: BitFieldOp::Sbfx, rd, rn, lsb, width };
+        }
+        if (raw & 0x0FE0_0070) == 0x07C0_0010 {
+            let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rn_raw = (raw & 0xF) as u8;
+            let rn = Reg::from_u8(rn_raw).unwrap_or(Reg::R0);
+            let lsb = ((raw >> 7) & 0x1F) as u8;
+            let msb = ((raw >> 16) & 0x1F) as u8;
+            let width = if msb >= lsb { msb - lsb + 1 } else { 0 };
+            let op = if rn_raw == 15 { BitFieldOp::Bfc } else { BitFieldOp::Bfi };
+            return Op::BitField { op, rd, rn, lsb, width };
+        }
+
+        // Byte Reversal Instructions (REV, REV16, REVSH, RBIT)
+        if (raw & 0x0FFF_0FF0) == 0x06BF_0F30 {
+            let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            return Op::ByteRev { op: ByteRevOp::Rev, rd, rm };
+        }
+        if (raw & 0x0FFF_0FF0) == 0x06BF_0FB0 {
+            let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            return Op::ByteRev { op: ByteRevOp::Rev16, rd, rm };
+        }
+        if (raw & 0x0FFF_0FF0) == 0x06FF_0F30 {
+            let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            return Op::ByteRev { op: ByteRevOp::Rbit, rd, rm };
+        }
+        if (raw & 0x0FFF_0FF0) == 0x06FF_0FB0 {
+            let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            return Op::ByteRev { op: ByteRevOp::Revsh, rd, rm };
+        }
+
         let is_reg_offset = ((raw >> 25) & 1) != 0;
         let p = ((raw >> 24) & 1) != 0;
         let u = ((raw >> 23) & 1) != 0;
@@ -2364,5 +2412,76 @@ mod tests {
                 src: VfpReg::S(0),
             }
         );
+    }
+
+    #[test]
+    fn test_decode_bitfield_and_byte_rev() {
+        // UBFX r0, r1, #4, #8
+        let inst = ArmDecoder::decode(0xE7E7_0251);
+        assert_eq!(
+            inst.op,
+            Op::BitField {
+                op: BitFieldOp::Ubfx,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                lsb: 4,
+                width: 8,
+            }
+        );
+
+        // SBFX r0, r1, #4, #8
+        let inst = ArmDecoder::decode(0xE7A7_0251);
+        assert_eq!(
+            inst.op,
+            Op::BitField {
+                op: BitFieldOp::Sbfx,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                lsb: 4,
+                width: 8,
+            }
+        );
+
+        // BFI r0, r1, #4, #8 (msb = 11 -> 0xB)
+        let inst = ArmDecoder::decode(0xE7CB_0211);
+        assert_eq!(
+            inst.op,
+            Op::BitField {
+                op: BitFieldOp::Bfi,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                lsb: 4,
+                width: 8,
+            }
+        );
+
+        // BFC r0, #4, #8 (Rn = 15)
+        let inst = ArmDecoder::decode(0xE7CB_021F);
+        assert_eq!(
+            inst.op,
+            Op::BitField {
+                op: BitFieldOp::Bfc,
+                rd: Reg::R0,
+                rn: Reg::from_u8(15).unwrap(),
+                lsb: 4,
+                width: 8,
+            }
+        );
+
+        // REV r0, r1
+        let inst = ArmDecoder::decode(0xE6BF_0F31);
+        assert_eq!(inst.op, Op::ByteRev { op: ByteRevOp::Rev, rd: Reg::R0, rm: Reg::R1 });
+
+        // REV16 r0, r1
+        let inst = ArmDecoder::decode(0xE6BF_0FB1);
+        assert_eq!(inst.op, Op::ByteRev { op: ByteRevOp::Rev16, rd: Reg::R0, rm: Reg::R1 });
+
+        // RBIT r0, r1
+        let inst = ArmDecoder::decode(0xE6FF_0F31);
+        assert_eq!(inst.op, Op::ByteRev { op: ByteRevOp::Rbit, rd: Reg::R0, rm: Reg::R1 });
+
+        // REVSH r0, r1
+        let inst = ArmDecoder::decode(0xE6FF_0FB1);
+        assert_eq!(inst.op, Op::ByteRev { op: ByteRevOp::Revsh, rd: Reg::R0, rm: Reg::R1 });
     }
 }

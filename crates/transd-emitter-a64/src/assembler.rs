@@ -585,6 +585,57 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// UBFX Wd, Wn, #lsb, #width (Unsigned bitfield extract: UBFM Wd, Wn, #lsb, #(lsb+width-1))
+    pub fn ubfx_w(&mut self, rd: A64Reg, rn: A64Reg, lsb: u8, width: u8) {
+        assert!(width >= 1 && width <= 32);
+        let lsb = (lsb & 31) as u32;
+        let imms = ((lsb + (width as u32) - 1) & 31) as u32;
+        let inst = 0x5300_0000 | (lsb << 16) | (imms << 10) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// SBFX Wd, Wn, #lsb, #width (Signed bitfield extract: SBFM Wd, Wn, #lsb, #(lsb+width-1))
+    pub fn sbfx_w(&mut self, rd: A64Reg, rn: A64Reg, lsb: u8, width: u8) {
+        assert!(width >= 1 && width <= 32);
+        let lsb = (lsb & 31) as u32;
+        let imms = ((lsb + (width as u32) - 1) & 31) as u32;
+        let inst = 0x1300_0000 | (lsb << 16) | (imms << 10) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// BFI Wd, Wn, #lsb, #width (Bitfield insert: BFM Wd, Wn, #((-lsb) & 31), #(width-1))
+    pub fn bfi_w(&mut self, rd: A64Reg, rn: A64Reg, lsb: u8, width: u8) {
+        assert!(width >= 1 && width <= 32);
+        let immr = ((-(lsb as i32)) & 31) as u32;
+        let imms = ((width as u32) - 1) & 31;
+        let inst = 0x3300_0000 | (immr << 16) | (imms << 10) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// RBIT Wd, Wn (Reverse bits in 32-bit register)
+    pub fn rbit_w(&mut self, rd: A64Reg, rn: A64Reg) {
+        let inst = 0x5AC0_0000 | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// REV Wd, Wn (Reverse bytes in 32-bit register)
+    pub fn rev_w(&mut self, rd: A64Reg, rn: A64Reg) {
+        let inst = 0x5AC0_0800 | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// REV16 Wd, Wn (Reverse bytes in each 16-bit halfword)
+    pub fn rev16_w(&mut self, rd: A64Reg, rn: A64Reg) {
+        let inst = 0x5AC0_0400 | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// SXTH Wd, Wn (Signed extend halfword: SBFM Wd, Wn, #0, #15)
+    pub fn sxth_w(&mut self, rd: A64Reg, rn: A64Reg) {
+        let inst = 0x1300_3C00 | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
     // --- VFPv3 Floating Point Operations ---
 
     /// FADD Sd, Sn, Sm (Single-precision FP addition)
@@ -1728,6 +1779,34 @@ mod tests {
         asm.tst_w_reg(A64Reg::X0, A64Reg::X1);
 
         assert_eq!(asm.code.len(), 11);
+    }
+
+    #[test]
+    fn test_asm_bitfield_and_byte_rev() {
+        let mut asm = A64Assembler::new();
+        // UBFX W0, W1, #4, #8 -> 0x5304_2C20
+        asm.ubfx_w(A64Reg::X0, A64Reg::X1, 4, 8);
+        // SBFX W0, W1, #4, #8 -> 0x1304_2C20
+        asm.sbfx_w(A64Reg::X0, A64Reg::X1, 4, 8);
+        // BFI W0, W1, #4, #8 -> 0x331C_1C20
+        asm.bfi_w(A64Reg::X0, A64Reg::X1, 4, 8);
+        // RBIT W0, W1 -> 0x5AC0_0020
+        asm.rbit_w(A64Reg::X0, A64Reg::X1);
+        // REV W0, W1 -> 0x5AC0_0820
+        asm.rev_w(A64Reg::X0, A64Reg::X1);
+        // REV16 W0, W1 -> 0x5AC0_0420
+        asm.rev16_w(A64Reg::X0, A64Reg::X1);
+        // SXTH W0, W1 -> 0x1300_3C20
+        asm.sxth_w(A64Reg::X0, A64Reg::X1);
+
+        assert_eq!(asm.code.len(), 7);
+        assert_eq!(asm.code[0], 0x5304_2C20);
+        assert_eq!(asm.code[1], 0x1304_2C20);
+        assert_eq!(asm.code[2], 0x331C_1C20);
+        assert_eq!(asm.code[3], 0x5AC0_0020);
+        assert_eq!(asm.code[4], 0x5AC0_0820);
+        assert_eq!(asm.code[5], 0x5AC0_0420);
+        assert_eq!(asm.code[6], 0x1300_3C20);
     }
 
     #[test]

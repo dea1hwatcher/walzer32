@@ -109,6 +109,22 @@ pub enum MulOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitFieldOp {
+    Ubfx, // Unsigned bit field extract
+    Sbfx, // Signed bit field extract
+    Bfi,  // Bit field insert
+    Bfc,  // Bit field clear
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteRevOp {
+    Rev,   // Byte-Reverse Word
+    Rev16, // Byte-Reverse Packed Halfwords
+    Revsh, // Byte-Reverse Signed Halfword
+    Rbit,  // Reverse Bits
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsrValue {
     Reg(Reg),
     Imm(u32),
@@ -253,6 +269,18 @@ pub enum Op {
         signed: bool,
         rd: Reg,
         rn: Reg,
+        rm: Reg,
+    },
+    BitField {
+        op: BitFieldOp,
+        rd: Reg,
+        rn: Reg,
+        lsb: u8,
+        width: u8,
+    },
+    ByteRev {
+        op: ByteRevOp,
+        rd: Reg,
         rm: Reg,
     },
     Branch {

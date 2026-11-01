@@ -3,8 +3,9 @@ use transd_core::{
     OFFSET_VFP,
 };
 use transd_decoder::{
-    AddrMode, AddrOffset, AluOp, ArmInst, BlockAddrMode, MemSize, MulOp, NeonCvtOp, NeonOp, NeonPermuteOp,
-    NeonRevOp, NeonSize, NeonWriteback, Op, Operand2, ShiftAmount, ShiftType, VfpCvtOp, VfpOp, VfpReg, VfpSize,
+    AddrMode, AddrOffset, AluOp, ArmInst, BitFieldOp, BlockAddrMode, ByteRevOp, MemSize, MulOp, NeonCvtOp,
+    NeonOp, NeonPermuteOp, NeonRevOp, NeonSize, NeonWriteback, Op, Operand2, ShiftAmount, ShiftType,
+    VfpCvtOp, VfpOp, VfpReg, VfpSize,
 };
 use transd_ir::{BlockExit, IrBlock, Superblock};
 use crate::assembler::A64Assembler;
@@ -517,6 +518,59 @@ impl A64Compiler {
                     let rd_offset = (rd.index() * 4) as u32;
                     asm.str_w_imm(dst_reg, A64Reg::X0, rd_offset);
                 }
+            }
+            Op::BitField {
+                op,
+                rd,
+                rn,
+                lsb,
+                width,
+            } => {
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+                match op {
+                    BitFieldOp::Ubfx => {
+                        let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                        asm.ubfx_w(dst_reg, rn_reg, *lsb, *width);
+                    }
+                    BitFieldOp::Sbfx => {
+                        let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                        asm.sbfx_w(dst_reg, rn_reg, *lsb, *width);
+                    }
+                    BitFieldOp::Bfi => {
+                        let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                        let rd_orig = load_guest_reg(asm, A64Reg::X10, *rd);
+                        if dst_reg != rd_orig {
+                            asm.mov_w_reg(dst_reg, rd_orig);
+                        }
+                        asm.bfi_w(dst_reg, rn_reg, *lsb, *width);
+                    }
+                    BitFieldOp::Bfc => {
+                        let rd_orig = load_guest_reg(asm, A64Reg::X10, *rd);
+                        let mask = if *width >= 32 {
+                            0xFFFF_FFFFu32
+                        } else {
+                            ((1u64 << *width) - 1) as u32
+                        };
+                        let clear_mask = !(mask.wrapping_shl(*lsb as u32));
+                        asm.mov_imm32(A64Reg::X9, clear_mask);
+                        asm.and_w_reg(dst_reg, rd_orig, A64Reg::X9);
+                    }
+                }
+                store_guest_reg(asm, dst_reg, *rd);
+            }
+            Op::ByteRev { op, rd, rm } => {
+                let rm_reg = load_guest_reg(asm, A64Reg::X9, *rm);
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+                match op {
+                    ByteRevOp::Rev => asm.rev_w(dst_reg, rm_reg),
+                    ByteRevOp::Rev16 => asm.rev16_w(dst_reg, rm_reg),
+                    ByteRevOp::Rbit => asm.rbit_w(dst_reg, rm_reg),
+                    ByteRevOp::Revsh => {
+                        asm.rev16_w(dst_reg, rm_reg);
+                        asm.sxth_w(dst_reg, dst_reg);
+                    }
+                }
+                store_guest_reg(asm, dst_reg, *rd);
             }
             Op::LoadStore {
                 is_load,
