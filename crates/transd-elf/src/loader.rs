@@ -55,6 +55,12 @@ impl<'a> CompositeResolver<'a> {
     }
 }
 
+impl<'a> Default for CompositeResolver<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> SymbolResolver for CompositeResolver<'a> {
     fn resolve(&self, name: &str) -> Option<GuestAddr> {
         for r in &self.resolvers {
@@ -209,62 +215,62 @@ impl ElfLoader {
             }
         };
 
-        let soname = soname_offset.and_then(|off| get_string(off));
+        let soname = soname_offset.and_then(get_string);
         let needed: Vec<String> = needed_offsets
             .into_iter()
-            .filter_map(|off| get_string(off))
+            .filter_map(get_string)
             .collect();
 
         // 4. Parse Symbols and build exported symbol map
         let mut symbols = HashMap::new();
-        if let Some(sym_va) = symtab_vaddr {
-            if let Some(sym_file_off) = parser.vaddr_to_offset(sym_va) {
-                // If STRSZ is known, the symbol table typically ends where STRTAB begins or has reasonable count
-                let max_symbols = if strtab_offset > sym_file_off {
-                    (strtab_offset - sym_file_off) / syment
-                } else {
-                    1024 // Fallback reasonable upper bound
-                };
+        if let Some(sym_va) = symtab_vaddr
+            && let Some(sym_file_off) = parser.vaddr_to_offset(sym_va)
+        {
+            // If STRSZ is known, the symbol table typically ends where STRTAB begins or has reasonable count
+            let max_symbols = if strtab_offset > sym_file_off {
+                (strtab_offset - sym_file_off) / syment
+            } else {
+                1024 // Fallback reasonable upper bound
+            };
 
-                for i in 0..max_symbols {
-                    let off = sym_file_off + i * syment;
-                    if off + syment > data.len() {
-                        break;
-                    }
+            for i in 0..max_symbols {
+                let off = sym_file_off + i * syment;
+                if off + syment > data.len() {
+                    break;
+                }
 
-                    let st_name = LittleEndian::read_u32(&data[off..off + 4]);
-                    let st_value = LittleEndian::read_u32(&data[off + 4..off + 8]);
-                    let _st_size = LittleEndian::read_u32(&data[off + 8..off + 12]);
-                    let _st_info = data[off + 12];
-                    let _st_other = data[off + 13];
-                    let st_shndx = LittleEndian::read_u16(&data[off + 14..off + 16]);
+                let st_name = LittleEndian::read_u32(&data[off..off + 4]);
+                let st_value = LittleEndian::read_u32(&data[off + 4..off + 8]);
+                let _st_size = LittleEndian::read_u32(&data[off + 8..off + 12]);
+                let _st_info = data[off + 12];
+                let _st_other = data[off + 13];
+                let st_shndx = LittleEndian::read_u16(&data[off + 14..off + 16]);
 
-                    if st_name == 0 && st_value == 0 && i > 0 {
-                        // End of symbol table reached
-                        break;
-                    }
+                if st_name == 0 && st_value == 0 && i > 0 {
+                    // End of symbol table reached
+                    break;
+                }
 
-                    if st_shndx != SHN_UNDEF && st_value != 0 {
-                        if let Some(name) = get_string(st_name as usize) {
-                            if !name.is_empty() {
-                                let sym_addr = load_base.add(st_value);
-                                symbols.insert(name, sym_addr);
-                            }
-                        }
-                    }
+                if st_shndx != SHN_UNDEF
+                    && st_value != 0
+                    && let Some(name) = get_string(st_name as usize)
+                    && !name.is_empty()
+                {
+                    let sym_addr = load_base.add(st_value);
+                    symbols.insert(name, sym_addr);
                 }
             }
         }
 
         // Helper to read symbol name by index
         let get_symbol_name_by_idx = |idx: u32| -> Option<String> {
-            if let Some(sym_va) = symtab_vaddr {
-                if let Some(sym_file_off) = parser.vaddr_to_offset(sym_va) {
-                    let off = sym_file_off + (idx as usize) * syment;
-                    if off + syment <= data.len() {
-                        let st_name = LittleEndian::read_u32(&data[off..off + 4]) as usize;
-                        return get_string(st_name);
-                    }
+            if let Some(sym_va) = symtab_vaddr
+                && let Some(sym_file_off) = parser.vaddr_to_offset(sym_va)
+            {
+                let off = sym_file_off + (idx as usize) * syment;
+                if off + syment <= data.len() {
+                    let st_name = LittleEndian::read_u32(&data[off..off + 4]) as usize;
+                    return get_string(st_name);
                 }
             }
             None
@@ -494,7 +500,7 @@ mod tests {
 
         // Rel 0: r_offset = 0x100, r_info = (0 << 8) | R_ARM_RELATIVE (23)
         LittleEndian::write_u32(&mut elf_bytes[400..404], 0x100);
-        LittleEndian::write_u32(&mut elf_bytes[404..408], (0 << 8) | (R_ARM_RELATIVE as u32));
+        LittleEndian::write_u32(&mut elf_bytes[404..408], R_ARM_RELATIVE as u32);
 
         // Relocation 1: R_ARM_GLOB_DAT at offset 0x104 for symbol __android_log_print
         // We add symbol 2: __android_log_print in strtab and symtab

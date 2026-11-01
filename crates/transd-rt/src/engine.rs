@@ -4,8 +4,9 @@ use transd_emitter_a64::{A64Compiler, PatchTarget};
 use transd_interp::{InterpError, Interpreter, StepResult};
 use transd_ir::Lifter;
 use crate::cache::JitCache;
+use crate::futex::{FutexError, FutexManager};
 use crate::jit_pool::JitPool;
-use crate::syscall::{nr, SyscallArgs};
+use crate::syscall::{futex_op, nr, SyscallArgs};
 
 #[derive(Error, Debug)]
 pub enum EngineError {
@@ -36,12 +37,26 @@ pub trait SyscallHandler: Send {
 
 pub struct DefaultSyscallHandler {
     pub stdout_capture: Vec<u8>,
+    pub futex: FutexManager,
+    pub tid: u32,
 }
 
 impl Default for DefaultSyscallHandler {
     fn default() -> Self {
         Self {
             stdout_capture: Vec::new(),
+            futex: FutexManager::new(),
+            tid: 1000,
+        }
+    }
+}
+
+impl DefaultSyscallHandler {
+    pub fn with_futex(futex: FutexManager, tid: u32) -> Self {
+        Self {
+            stdout_capture: Vec::new(),
+            futex,
+            tid,
         }
     }
 }
@@ -74,8 +89,46 @@ impl SyscallHandler for DefaultSyscallHandler {
                 cpu.set_reg(Reg::R0, count as u32);
                 Ok(None)
             }
-            nr::GETPID | nr::GETTID => {
+            nr::GETPID => {
                 cpu.set_reg(Reg::R0, 1000);
+                Ok(None)
+            }
+            nr::GETTID => {
+                cpu.set_reg(Reg::R0, self.tid);
+                Ok(None)
+            }
+            nr::ARM_SET_TLS => {
+                cpu.tls_ptr = args.arg0;
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
+            nr::FUTEX => {
+                let uaddr = GuestAddr::new(args.arg0);
+                let op = args.arg1 & !futex_op::PRIVATE_FLAG;
+                let val = args.arg2;
+                match op {
+                    futex_op::WAIT => {
+                        match self.futex.wait(mem, uaddr, val, None) {
+                            Ok(()) => cpu.set_reg(Reg::R0, 0),
+                            Err(FutexError::WouldBlock) => cpu.set_reg(Reg::R0, (-11i32) as u32),
+                            Err(FutexError::TimedOut) => cpu.set_reg(Reg::R0, (-110i32) as u32),
+                            Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32),
+                        }
+                    }
+                    futex_op::WAKE => {
+                        let woken = self.futex.wake(uaddr, val);
+                        cpu.set_reg(Reg::R0, woken);
+                    }
+                    futex_op::REQUEUE => {
+                        let uaddr2 = GuestAddr::new(args.arg4);
+                        let requeue_count = args.arg3;
+                        let woken = self.futex.requeue(uaddr, val, requeue_count, uaddr2);
+                        cpu.set_reg(Reg::R0, woken);
+                    }
+                    _ => {
+                        cpu.set_reg(Reg::R0, (-38i32) as u32);
+                    }
+                }
                 Ok(None)
             }
             _ => {

@@ -173,51 +173,54 @@ impl ArmDecoder {
 
     /// Category 0: ALU, Multiply, Halfword Transfers, Branch Exchange, Misc
     fn decode_cat0(raw: u32) -> Op {
-        let bit4 = (raw >> 4) & 1;
-        let bit7 = (raw >> 7) & 1;
-
-        // Multiply or Halfword Transfer or Synchronization Primitives
-        if bit4 == 1 && bit7 == 1 {
-            let bits_7_4 = (raw >> 4) & 0xF;
-            if bits_7_4 == 0b1001 {
-                // Check for synchronization primitives (LDREX / STREX)
-                if (raw & 0x0FF0_0FFF) == 0x0190_0F9F {
-                    let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
-                    let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
-                    return Op::AtomicLoadEx { rd, rn };
-                }
-                if (raw & 0x0FF0_0FF0) == 0x0180_0F90 {
-                    let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
-                    let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
-                    let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
-                    return Op::AtomicStoreEx { rd, rm, rn };
-                }
-                // Multiply / Multiply Long
-                return Self::decode_multiply(raw);
-            } else {
-                // Halfword / Signed Data Transfer (LDRH, STRH, LDRSB, LDRSH)
-                return Self::decode_halfword_transfer(raw);
-            }
-        }
-
-        // Miscellaneous: Branch Exchange (BX, BLX), CLZ, BKPT, MRS, MSR
         let bit25 = (raw >> 25) & 1;
+
         if bit25 == 0 {
+            let bit4 = (raw >> 4) & 1;
+            let bit7 = (raw >> 7) & 1;
+
+            // Multiply or Halfword Transfer or Synchronization Primitives
+            if bit4 == 1 && bit7 == 1 {
+                let bits_7_4 = (raw >> 4) & 0xF;
+                if bits_7_4 == 0b1001 {
+                    // Check for synchronization primitives (LDREX / STREX)
+                    if (raw & 0x0FF0_0FFF) == 0x0190_0F9F {
+                        let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+                        let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+                        return Op::AtomicLoadEx { rd, rn };
+                    }
+                    if (raw & 0x0FF0_0FF0) == 0x0180_0F90 {
+                        let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+                        let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+                        let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+                        return Op::AtomicStoreEx { rd, rm, rn };
+                    }
+                    // Multiply / Multiply Long
+                    return Self::decode_multiply(raw);
+                } else {
+                    // Halfword / Signed Data Transfer (LDRH, STRH, LDRSB, LDRSH)
+                    return Self::decode_halfword_transfer(raw);
+                }
+            }
+
+            // Miscellaneous: Branch Exchange (BX, BLX), CLZ, BKPT, MRS, MSR
             let bits_24_20 = (raw >> 20) & 0x1F;
             let bits_7_4 = (raw >> 4) & 0xF;
 
             // BX: 0001 0010 ... 0001
-            if bits_24_20 == 0b10010 && bits_7_4 == 0b0001 {
-                if let Some(rm) = Reg::from_u8((raw & 0xF) as u8) {
-                    return Op::BranchExchange { link: false, rm };
-                }
+            if bits_24_20 == 0b10010
+                && bits_7_4 == 0b0001
+                && let Some(rm) = Reg::from_u8((raw & 0xF) as u8)
+            {
+                return Op::BranchExchange { link: false, rm };
             }
 
             // BLX register: 0001 0010 ... 0011
-            if bits_24_20 == 0b10010 && bits_7_4 == 0b0011 {
-                if let Some(rm) = Reg::from_u8((raw & 0xF) as u8) {
-                    return Op::BranchExchange { link: true, rm };
-                }
+            if bits_24_20 == 0b10010
+                && bits_7_4 == 0b0011
+                && let Some(rm) = Reg::from_u8((raw & 0xF) as u8)
+            {
+                return Op::BranchExchange { link: true, rm };
             }
 
             // CLZ: 0001 0110 ... 0001
@@ -844,6 +847,22 @@ mod tests {
                 mode: BlockAddrMode::Ia,
                 writeback: true,
                 reg_list: 0x8010
+            }
+        );
+    }
+
+    #[test]
+    fn test_decode_mov_imm_with_high_bits() {
+        // MOV r7, #240 -> 0xE3A070F0 (has bits 4 and 7 set in immediate)
+        let inst = ArmDecoder::decode(0xE3A0_70F0);
+        assert_eq!(
+            inst.op,
+            Op::Alu {
+                op: AluOp::Mov,
+                rd: Reg::R7,
+                rn: Reg::R0,
+                op2: Operand2::Imm(240),
+                set_flags: false
             }
         );
     }

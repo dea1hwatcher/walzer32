@@ -25,6 +25,19 @@ pub mod nr {
     pub const TGKILL: u32 = 268;
     pub const OPENAT: u32 = 322;
     pub const CLOCK_GETTIME: u32 = 263;
+    pub const CLONE: u32 = 120;
+    pub const ARM_SET_TLS: u32 = 0xF0005;
+}
+
+/// Linux Futex operation constants
+pub mod futex_op {
+    pub const WAIT: u32 = 0;
+    pub const WAKE: u32 = 1;
+    pub const FD: u32 = 2;
+    pub const REQUEUE: u32 = 3;
+    pub const CMP_REQUEUE: u32 = 4;
+    pub const WAKE_OP: u32 = 5;
+    pub const PRIVATE_FLAG: u32 = 128;
 }
 
 /// Syscall invocation arguments in ARM32 ABI

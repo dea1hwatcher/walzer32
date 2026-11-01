@@ -212,26 +212,25 @@ impl<'a> ElfParser<'a> {
             }
         }
 
-        if let (Some(sym_va), Some(str_va)) = (symtab_vaddr, strtab_vaddr) {
-            if let (Some(sym_off), Some(str_off)) = (self.vaddr_to_offset(sym_va), self.vaddr_to_offset(str_va)) {
-                for i in 1..4096 {
-                    let off = sym_off + i * syment;
-                    if off + syment > self.data.len() {
-                        break;
-                    }
-                    let st_name = LittleEndian::read_u32(&self.data[off..off + 4]) as usize;
-                    let st_value = LittleEndian::read_u32(&self.data[off + 4..off + 8]);
-                    let st_shndx = LittleEndian::read_u16(&self.data[off + 14..off + 16]);
-                    if st_name == 0 && st_value == 0 {
-                        break;
-                    }
-                    if st_shndx != SHN_UNDEF {
-                        if let Ok(name) = self.read_string_at(str_off + st_name) {
-                            if !name.is_empty() {
-                                names.push(name.to_string());
-                            }
-                        }
-                    }
+        if let (Some(sym_va), Some(str_va)) = (symtab_vaddr, strtab_vaddr)
+            && let (Some(sym_off), Some(str_off)) = (self.vaddr_to_offset(sym_va), self.vaddr_to_offset(str_va))
+        {
+            for i in 1..4096 {
+                let off = sym_off + i * syment;
+                if off + syment > self.data.len() {
+                    break;
+                }
+                let st_name = LittleEndian::read_u32(&self.data[off..off + 4]) as usize;
+                let st_value = LittleEndian::read_u32(&self.data[off + 4..off + 8]);
+                let st_shndx = LittleEndian::read_u16(&self.data[off + 14..off + 16]);
+                if st_name == 0 && st_value == 0 {
+                    break;
+                }
+                if st_shndx != SHN_UNDEF
+                    && let Ok(name) = self.read_string_at(str_off + st_name)
+                    && !name.is_empty()
+                {
+                    names.push(name.to_string());
                 }
             }
         }

@@ -525,7 +525,7 @@ impl ThumbDecoder {
             // PUSH {regs, LR}
             0b0100 | 0b0101 => {
                 let r_bit = ((hw >> 8) & 1) != 0;
-                let mut reg_list = (hw & 0xFF) as u16;
+                let mut reg_list = hw & 0xFF;
                 if r_bit {
                     reg_list |= 1 << Reg::LR.index();
                 }
@@ -544,7 +544,7 @@ impl ThumbDecoder {
             // POP {regs, PC}
             0b1100 | 0b1101 => {
                 let r_bit = ((hw >> 8) & 1) != 0;
-                let mut reg_list = (hw & 0xFF) as u16;
+                let mut reg_list = hw & 0xFF;
                 if r_bit {
                     reg_list |= 1 << Reg::PC.index();
                 }
@@ -562,7 +562,7 @@ impl ThumbDecoder {
             }
             // BKPT
             0b1110 => {
-                let imm8 = (hw & 0xFF) as u16;
+                let imm8 = hw & 0xFF;
                 ArmInst::new(Cond::AL, Op::Bkpt { imm: imm8 }, raw)
             }
             // If-Then (IT) and hints (NOP, YIELD, etc.)
@@ -582,7 +582,7 @@ impl ThumbDecoder {
     fn decode_t16_ldm_stm(hw: u16, raw: u32) -> ArmInst {
         let is_load = ((hw >> 11) & 1) != 0;
         let rn = Reg::from_u8(((hw >> 8) & 0x7) as u8).unwrap_or(Reg::R0);
-        let reg_list = (hw & 0xFF) as u16;
+        let reg_list = hw & 0xFF;
 
         ArmInst::new(
             Cond::AL,
@@ -624,7 +624,7 @@ impl ThumbDecoder {
     fn decode_t16_uncond_branch(hw: u16, raw: u32) -> ArmInst {
         let imm11 = (hw & 0x7FF) as i16;
         // Sign extend 11-bit offset and multiply by 2
-        let offset = ((imm11 << 5) >> 5 as i32) * 2;
+        let offset = ((imm11 << 5) >> 5) * 2;
         ArmInst::new(
             Cond::AL,
             Op::Branch {

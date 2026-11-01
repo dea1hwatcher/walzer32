@@ -109,6 +109,48 @@ impl JitCache {
     }
 }
 
+/// Thread-safe concurrent wrapper around JitCache for multi-threaded DBT execution
+#[derive(Clone, Default)]
+pub struct ConcurrentJitCache {
+    inner: std::sync::Arc<std::sync::RwLock<JitCache>>,
+}
+
+impl ConcurrentJitCache {
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::RwLock::new(JitCache::new())),
+        }
+    }
+
+    pub fn lookup(&self, addr: GuestAddr) -> Option<CompiledBlock> {
+        let mut cache = self.inner.write().unwrap();
+        cache.lookup(addr).cloned()
+    }
+
+    pub fn lookup_ptr(&self, addr: GuestAddr) -> Option<HostCodePtr> {
+        let mut cache = self.inner.write().unwrap();
+        cache.lookup_ptr(addr)
+    }
+
+    pub fn insert(&self, addr: GuestAddr, block: CompiledBlock) {
+        let mut cache = self.inner.write().unwrap();
+        cache.insert(addr, block);
+    }
+
+    pub fn insert_committed(&self, addr: GuestAddr, block: CompiledBlock, ptr: HostCodePtr) {
+        let mut cache = self.inner.write().unwrap();
+        cache.insert_committed(addr, block, ptr);
+    }
+
+    pub fn count(&self) -> usize {
+        self.inner.read().unwrap().count()
+    }
+
+    pub fn clear(&self) {
+        self.inner.write().unwrap().clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
