@@ -149,6 +149,12 @@ pub mod jni_idx {
     pub const MONITOR_ENTER: u32 = 217;
     pub const MONITOR_EXIT: u32 = 218;
     pub const GET_JAVA_VM: u32 = 219;
+    pub const GET_PRIMITIVE_ARRAY_CRITICAL: u32 = 222;
+    pub const RELEASE_PRIMITIVE_ARRAY_CRITICAL: u32 = 223;
+    pub const GET_STRING_CRITICAL: u32 = 224;
+    pub const RELEASE_STRING_CRITICAL: u32 = 225;
+    pub const NEW_WEAK_GLOBAL_REF: u32 = 226;
+    pub const DELETE_WEAK_GLOBAL_REF: u32 = 227;
     pub const EXCEPTION_CHECK: u32 = 228;
     pub const NEW_DIRECT_BYTE_BUFFER: u32 = 229;
     pub const GET_DIRECT_BUFFER_ADDRESS: u32 = 230;
@@ -161,6 +167,7 @@ pub mod vm_idx {
     pub const ATTACH_CURRENT_THREAD: u32 = 4;
     pub const DETACH_CURRENT_THREAD: u32 = 5;
     pub const GET_ENV: u32 = 6;
+    pub const ATTACH_CURRENT_THREAD_AS_DAEMON: u32 = 7;
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +237,8 @@ pub struct JniBridge {
     /// Byte/Primitive arrays: handle -> (GuestAddr, element_count, element_size)
     pub arrays: HashMap<u32, (GuestAddr, usize, usize)>,
     pub direct_buffers: HashMap<u32, DirectBufferInfo>,
+    pub local_frames: Vec<Vec<u32>>,
+    pub weak_global_refs: HashMap<u32, u32>,
     pub package_name: String,
     pub app_data_dir: String,
 }
@@ -261,6 +270,8 @@ impl JniBridge {
             field_descriptors: HashMap::new(),
             field_values: HashMap::new(),
             global_refs: HashMap::new(),
+            local_frames: vec![Vec::new()],
+            weak_global_refs: HashMap::new(),
             registered_natives: Vec::new(),
             string_heap_cur,
             pending_exception: 0,
@@ -364,10 +375,16 @@ impl JniBridge {
         match func_idx {
             vm_idx::GET_ENV => {
                 let env_out_ptr = GuestAddr::new(cpu.reg(Reg::R1));
-                mem.write_u32(env_out_ptr, self.env_ptr.as_u32())?;
+                if env_out_ptr.as_u32() != 0 {
+                    mem.write_u32(env_out_ptr, self.env_ptr.as_u32())?;
+                }
                 cpu.set_reg(Reg::R0, JNI_OK);
             }
-            vm_idx::ATTACH_CURRENT_THREAD => {
+            vm_idx::ATTACH_CURRENT_THREAD | vm_idx::ATTACH_CURRENT_THREAD_AS_DAEMON => {
+                let env_out_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if env_out_ptr.as_u32() != 0 {
+                    mem.write_u32(env_out_ptr, self.env_ptr.as_u32())?;
+                }
                 cpu.set_reg(Reg::R0, JNI_OK);
             }
             vm_idx::DETACH_CURRENT_THREAD => {
@@ -489,23 +506,141 @@ impl JniBridge {
                 cpu.set_reg(Reg::R0, 0);
             }
 
-            // ── Object lifecycle ──────────────────────────────────────────────
+            // ── Object lifecycle & Local Frames ──────────────────────────────
             jni_idx::NEW_OBJECT | jni_idx::NEW_OBJECT_A | jni_idx::ALLOC_OBJECT => {
                 let handle = self.next_handle;
                 self.next_handle += 1;
+                if let Some(frame) = self.local_frames.last_mut() {
+                    frame.push(handle);
+                }
                 cpu.set_reg(Reg::R0, handle);
+            }
+            jni_idx::PUSH_LOCAL_FRAME => {
+                let _capacity = cpu.reg(Reg::R1);
+                self.local_frames.push(Vec::new());
+                cpu.set_reg(Reg::R0, JNI_OK);
+            }
+            jni_idx::POP_LOCAL_FRAME => {
+                let result = cpu.reg(Reg::R1);
+                if self.local_frames.len() > 1 {
+                    self.local_frames.pop();
+                    if result != 0 {
+                        if let Some(frame) = self.local_frames.last_mut() {
+                            frame.push(result);
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, result);
+            }
+            jni_idx::ENSURE_LOCAL_CAPACITY => {
+                cpu.set_reg(Reg::R0, JNI_OK);
+            }
+            jni_idx::NEW_LOCAL_REF => {
+                let obj = cpu.reg(Reg::R1);
+                if obj == 0 {
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    let handle = self.next_handle;
+                    self.next_handle += 1;
+                    if let Some(frame) = self.local_frames.last_mut() {
+                        frame.push(handle);
+                    }
+                    self.global_refs.insert(handle, obj);
+                    cpu.set_reg(Reg::R0, handle);
+                }
+            }
+            jni_idx::DELETE_LOCAL_REF => {
+                let obj = cpu.reg(Reg::R1);
+                if let Some(frame) = self.local_frames.last_mut() {
+                    frame.retain(|&x| x != obj);
+                }
+                cpu.set_reg(Reg::R0, 0);
             }
             jni_idx::NEW_GLOBAL_REF => {
                 let obj = cpu.reg(Reg::R1);
-                self.global_refs.insert(obj, obj);
-                cpu.set_reg(Reg::R0, obj);
+                if obj == 0 {
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    self.global_refs.insert(obj, obj);
+                    cpu.set_reg(Reg::R0, obj);
+                }
             }
             jni_idx::DELETE_GLOBAL_REF => {
                 let obj = cpu.reg(Reg::R1);
                 self.global_refs.remove(&obj);
                 cpu.set_reg(Reg::R0, 0);
             }
-            jni_idx::DELETE_LOCAL_REF => {
+            jni_idx::NEW_WEAK_GLOBAL_REF => {
+                let obj = cpu.reg(Reg::R1);
+                if obj == 0 {
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    let weak_handle = self.next_handle;
+                    self.next_handle += 1;
+                    self.weak_global_refs.insert(weak_handle, obj);
+                    cpu.set_reg(Reg::R0, weak_handle);
+                }
+            }
+            jni_idx::DELETE_WEAK_GLOBAL_REF => {
+                let weak_handle = cpu.reg(Reg::R1);
+                self.weak_global_refs.insert(weak_handle, 0);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            jni_idx::IS_SAME_OBJECT => {
+                let ref1 = cpu.reg(Reg::R1);
+                let ref2 = cpu.reg(Reg::R2);
+
+                let obj1 = self.weak_global_refs.get(&ref1).copied()
+                    .or_else(|| self.global_refs.get(&ref1).copied())
+                    .unwrap_or(ref1);
+                let obj2 = self.weak_global_refs.get(&ref2).copied()
+                    .or_else(|| self.global_refs.get(&ref2).copied())
+                    .unwrap_or(ref2);
+
+                let same = (obj1 == obj2) || (ref1 == ref2);
+                cpu.set_reg(Reg::R0, if same { 1 } else { 0 });
+            }
+
+            // ── String & Array Critical (Zero-Copy Pinning) ───────────────────
+            jni_idx::GET_STRING_CRITICAL => {
+                let string_handle = cpu.reg(Reg::R1);
+                let is_copy_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                if is_copy_ptr.as_u32() != 0 {
+                    mem.write_u8(is_copy_ptr, JNI_FALSE)?;
+                }
+                if let Some(&addr) = self.string_addrs.get(&string_handle) {
+                    cpu.set_reg(Reg::R0, addr.as_u32());
+                } else if let Some(text) = self.strings.get(&string_handle).cloned() {
+                    let guest_str_addr = self.string_heap_cur;
+                    for (i, c) in text.encode_utf16().enumerate() {
+                        mem.write_u16(guest_str_addr.add((i * 2) as u32), c)?;
+                    }
+                    let utf16_len = text.encode_utf16().count();
+                    mem.write_u16(guest_str_addr.add((utf16_len * 2) as u32), 0)?;
+                    self.string_heap_cur = guest_str_addr.add(((utf16_len * 2 + 7) & !3) as u32);
+                    self.string_addrs.insert(string_handle, guest_str_addr);
+                    cpu.set_reg(Reg::R0, guest_str_addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            jni_idx::RELEASE_STRING_CRITICAL => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            jni_idx::GET_PRIMITIVE_ARRAY_CRITICAL => {
+                let arr_handle = cpu.reg(Reg::R1);
+                let is_copy_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                if is_copy_ptr.as_u32() != 0 {
+                    mem.write_u8(is_copy_ptr, JNI_FALSE)?;
+                }
+                let addr = if let Some(&(ptr, _, _)) = self.arrays.get(&arr_handle) {
+                    ptr.as_u32()
+                } else {
+                    0
+                };
+                cpu.set_reg(Reg::R0, addr);
+            }
+            jni_idx::RELEASE_PRIMITIVE_ARRAY_CRITICAL => {
                 cpu.set_reg(Reg::R0, 0);
             }
 
