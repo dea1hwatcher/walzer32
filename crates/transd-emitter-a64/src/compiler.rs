@@ -316,35 +316,33 @@ impl A64Compiler {
                     }
                 }
 
-                // 4. Compute host address X10 = X1 (mem_base) + W12 (guest_addr)
-                asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
-
-                // 5. Load or Store
+                // 4. Single-Instruction Zero-Overhead Memory Access (UXTW Register Offset)
                 let rd_offset = (rd.index() * 4) as u32;
                 if *is_load {
                     match size {
                         MemSize::Byte => {
                             if *signed {
-                                asm.ldrsb_w_imm(A64Reg::X11, A64Reg::X10, 0);
+                                asm.ldrsb_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
                             } else {
-                                asm.ldrb_w_imm(A64Reg::X11, A64Reg::X10, 0);
+                                asm.ldrb_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
                             }
                             asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
                         }
                         MemSize::Halfword => {
                             if *signed {
-                                asm.ldrsh_w_imm(A64Reg::X11, A64Reg::X10, 0);
+                                asm.ldrsh_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
                             } else {
-                                asm.ldrh_w_imm(A64Reg::X11, A64Reg::X10, 0);
+                                asm.ldrh_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
                             }
                             asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
                         }
                         MemSize::Word => {
-                            asm.ldr_w_imm(A64Reg::X11, A64Reg::X10, 0);
+                            asm.ldr_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
                             asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
                         }
                         MemSize::Doubleword => {
-                            // LDRD: load 64-bit into Rt and Rt+1
+                            // LDRD: compute base into X10 for 64-bit pair
+                            asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
                             asm.ldr_w_imm(A64Reg::X11, A64Reg::X10, 0);
                             asm.ldr_w_imm(A64Reg::X12, A64Reg::X10, 4);
                             asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
@@ -355,18 +353,19 @@ impl A64Compiler {
                     match size {
                         MemSize::Byte => {
                             asm.ldr_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
-                            asm.strb_w_imm(A64Reg::X11, A64Reg::X10, 0);
+                            asm.strb_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
                         }
                         MemSize::Halfword => {
                             asm.ldr_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
-                            asm.strh_w_imm(A64Reg::X11, A64Reg::X10, 0);
+                            asm.strh_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
                         }
                         MemSize::Word => {
                             asm.ldr_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
-                            asm.str_w_imm(A64Reg::X11, A64Reg::X10, 0);
+                            asm.str_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
                         }
                         MemSize::Doubleword => {
-                            // STRD: store 64-bit from Rt and Rt+1
+                            // STRD: compute base into X10 for 64-bit pair
+                            asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
                             asm.ldr_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
                             asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, rd_offset + 4);
                             asm.str_w_imm(A64Reg::X11, A64Reg::X10, 0);

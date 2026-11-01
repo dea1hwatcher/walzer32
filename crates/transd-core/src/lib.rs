@@ -1,10 +1,12 @@
 pub mod addr;
+pub mod arena;
 pub mod cpsr;
 pub mod cpu;
 pub mod memory;
 pub mod reg;
 
 pub use addr::GuestAddr;
+pub use arena::{ArenaMemory, SharedArenaMemory, ARENA_4GB_SIZE};
 pub use cpsr::{Cond, Cpsr};
 pub use cpu::{
     CpuState, OFFSET_CPSR, OFFSET_EXCLUSIVE, OFFSET_FPSCR, OFFSET_LR, OFFSET_PC, OFFSET_R0,

@@ -333,6 +333,56 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    // --- Register Offset Load / Store (Zero-Overhead 4GB Guest Arena Addressing) ---
+
+    /// LDR Wt, [Xn, Wm, UXTW] (32-bit load indexed by zero-extended 32-bit guest address)
+    pub fn ldr_w_uxtw(&mut self, rt: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0xB860_4800 | (rm.index() << 16) | (rn.index() << 5) | rt.index();
+        self.emit(inst);
+    }
+
+    /// STR Wt, [Xn, Wm, UXTW] (32-bit store indexed by zero-extended 32-bit guest address)
+    pub fn str_w_uxtw(&mut self, rt: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0xB820_4800 | (rm.index() << 16) | (rn.index() << 5) | rt.index();
+        self.emit(inst);
+    }
+
+    /// LDRB Wt, [Xn, Wm, UXTW] (Byte load indexed by zero-extended 32-bit guest address)
+    pub fn ldrb_w_uxtw(&mut self, rt: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0x3860_4800 | (rm.index() << 16) | (rn.index() << 5) | rt.index();
+        self.emit(inst);
+    }
+
+    /// STRB Wt, [Xn, Wm, UXTW] (Byte store indexed by zero-extended 32-bit guest address)
+    pub fn strb_w_uxtw(&mut self, rt: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0x3820_4800 | (rm.index() << 16) | (rn.index() << 5) | rt.index();
+        self.emit(inst);
+    }
+
+    /// LDRH Wt, [Xn, Wm, UXTW] (Halfword load indexed by zero-extended 32-bit guest address)
+    pub fn ldrh_w_uxtw(&mut self, rt: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0x7860_4800 | (rm.index() << 16) | (rn.index() << 5) | rt.index();
+        self.emit(inst);
+    }
+
+    /// STRH Wt, [Xn, Wm, UXTW] (Halfword store indexed by zero-extended 32-bit guest address)
+    pub fn strh_w_uxtw(&mut self, rt: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0x7820_4800 | (rm.index() << 16) | (rn.index() << 5) | rt.index();
+        self.emit(inst);
+    }
+
+    /// LDRSB Wt, [Xn, Wm, UXTW] (Signed byte load indexed by zero-extended 32-bit guest address)
+    pub fn ldrsb_w_uxtw(&mut self, rt: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0x38E0_4800 | (rm.index() << 16) | (rn.index() << 5) | rt.index();
+        self.emit(inst);
+    }
+
+    /// LDRSH Wt, [Xn, Wm, UXTW] (Signed halfword load indexed by zero-extended 32-bit guest address)
+    pub fn ldrsh_w_uxtw(&mut self, rt: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0x78E0_4800 | (rm.index() << 16) | (rn.index() << 5) | rt.index();
+        self.emit(inst);
+    }
+
     // --- Multiply, Divide & Bit Manipulation ---
 
     /// MUL Wd, Wn, Wm (Rd = Rn * Rm)
@@ -800,6 +850,37 @@ mod tests {
         assert_eq!(asm.code[2], 0x3900_114B); // STRB W11, [X10, #4]
         assert_eq!(asm.code[3], 0x7940_0D4C); // LDRH W12, [X10, #6]
         assert_eq!(asm.code[4], 0x7900_0D4C); // STRH W12, [X10, #6]
+    }
+
+    #[test]
+    fn test_asm_register_offset_uxtw() {
+        let mut asm = A64Assembler::new();
+        // LDR W11, [X1, W12, UXTW]
+        asm.ldr_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+        // STR W11, [X1, W12, UXTW]
+        asm.str_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+        // LDRB W11, [X1, W12, UXTW]
+        asm.ldrb_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+        // STRB W11, [X1, W12, UXTW]
+        asm.strb_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+        // LDRH W11, [X1, W12, UXTW]
+        asm.ldrh_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+        // STRH W11, [X1, W12, UXTW]
+        asm.strh_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+        // LDRSB W11, [X1, W12, UXTW]
+        asm.ldrsb_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+        // LDRSH W11, [X1, W12, UXTW]
+        asm.ldrsh_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+
+        assert_eq!(asm.code.len(), 8);
+        assert_eq!(asm.code[0], 0xB86C_482B); // LDR W11, [X1, W12, UXTW]
+        assert_eq!(asm.code[1], 0xB82C_482B); // STR W11, [X1, W12, UXTW]
+        assert_eq!(asm.code[2], 0x386C_482B); // LDRB W11, [X1, W12, UXTW]
+        assert_eq!(asm.code[3], 0x382C_482B); // STRB W11, [X1, W12, UXTW]
+        assert_eq!(asm.code[4], 0x786C_482B); // LDRH W11, [X1, W12, UXTW]
+        assert_eq!(asm.code[5], 0x782C_482B); // STRH W11, [X1, W12, UXTW]
+        assert_eq!(asm.code[6], 0x38EC_482B); // LDRSB W11, [X1, W12, UXTW]
+        assert_eq!(asm.code[7], 0x78EC_482B); // LDRSH W11, [X1, W12, UXTW]
     }
 
     #[test]
