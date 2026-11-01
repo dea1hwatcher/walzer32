@@ -113,7 +113,7 @@ impl CpuState {
         assert!(idx < 32);
         let d_idx = (idx / 2) as usize;
         let d_val = self.vfp[d_idx];
-        let bits = if idx % 2 == 0 {
+        let bits = if idx.is_multiple_of(2) {
             d_val as u32
         } else {
             (d_val >> 32) as u32
@@ -126,7 +126,7 @@ impl CpuState {
         assert!(idx < 32);
         let d_idx = (idx / 2) as usize;
         let bits = val.to_bits() as u64;
-        if idx % 2 == 0 {
+        if idx.is_multiple_of(2) {
             self.vfp[d_idx] = (self.vfp[d_idx] & 0xFFFF_FFFF_0000_0000) | bits;
         } else {
             self.vfp[d_idx] = (self.vfp[d_idx] & 0x0000_0000_FFFF_FFFF) | (bits << 32);

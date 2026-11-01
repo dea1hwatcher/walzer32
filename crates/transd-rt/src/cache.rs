@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use transd_core::GuestAddr;
 use transd_emitter_a64::{CompiledBlock, PatchTarget};
+use crate::jit_pool::HostCodePtr;
 
 /// Direct JIT Code Cache managing compiled blocks and inter-block jump chaining
 #[derive(Default)]
 pub struct JitCache {
     /// Mapping from Guest entry address to compiled block metadata
     pub blocks: HashMap<GuestAddr, CompiledBlock>,
+    /// Mapping from Guest entry address to executable code pointer in JIT pool
+    pub code_ptrs: HashMap<GuestAddr, HostCodePtr>,
     /// Control-flow graph edges (source guest address -> target guest addresses)
     pub outgoing_edges: HashMap<GuestAddr, Vec<GuestAddr>>,
     /// Hit, miss, and chaining statistics
@@ -31,7 +34,18 @@ impl JitCache {
         }
     }
 
+    #[inline(always)]
+    pub fn lookup_ptr(&mut self, addr: GuestAddr) -> Option<HostCodePtr> {
+        self.code_ptrs.get(&addr).copied()
+    }
+
     pub fn insert(&mut self, addr: GuestAddr, block: CompiledBlock) {
+        self.blocks.insert(addr, block);
+        self.resolve_chaining_for(addr);
+    }
+
+    pub fn insert_committed(&mut self, addr: GuestAddr, block: CompiledBlock, ptr: HostCodePtr) {
+        self.code_ptrs.insert(addr, ptr);
         self.blocks.insert(addr, block);
         self.resolve_chaining_for(addr);
     }
@@ -79,11 +93,13 @@ impl JitCache {
 
     pub fn invalidate(&mut self, addr: GuestAddr) {
         self.blocks.remove(&addr);
+        self.code_ptrs.remove(&addr);
         self.outgoing_edges.remove(&addr);
     }
 
     pub fn clear(&mut self) {
         self.blocks.clear();
+        self.code_ptrs.clear();
         self.outgoing_edges.clear();
         self.chained_jumps = 0;
     }

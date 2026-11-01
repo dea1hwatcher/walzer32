@@ -28,6 +28,11 @@ pub trait Memory {
     fn read_bytes(&self, addr: GuestAddr, buf: &mut [u8]) -> Result<(), MemoryError>;
     fn write_bytes(&mut self, addr: GuestAddr, buf: &[u8]) -> Result<(), MemoryError>;
 
+    /// Returns direct raw pointer to host memory buffer if available
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        std::ptr::null_mut()
+    }
+
     fn atomic_cmpxchg_u32(&mut self, addr: GuestAddr, expected: u32, new: u32) -> Result<u32, MemoryError> {
         let cur = self.read_u32(addr)?;
         if cur == expected {
@@ -150,6 +155,11 @@ impl Memory for FlatMemory {
         } else {
             Err(MemoryError::Unmapped(addr))
         }
+    }
+
+    #[inline(always)]
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.data.as_mut_ptr()
     }
 }
 

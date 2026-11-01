@@ -1,9 +1,10 @@
 use thiserror::Error;
 use transd_core::{CpuState, GuestAddr, Memory, MemoryError, Reg};
-use transd_emitter_a64::A64Compiler;
+use transd_emitter_a64::{A64Compiler, PatchTarget};
 use transd_interp::{InterpError, Interpreter, StepResult};
 use transd_ir::Lifter;
 use crate::cache::JitCache;
+use crate::jit_pool::JitPool;
 use crate::syscall::{nr, SyscallArgs};
 
 #[derive(Error, Debug)]
@@ -90,6 +91,7 @@ pub struct DbtEngine<M: Memory> {
     pub cpu: CpuState,
     pub mem: M,
     pub cache: JitCache,
+    pub pool: JitPool,
     pub syscall_handler: Box<dyn SyscallHandler>,
     pub total_insts_executed: u64,
 }
@@ -100,25 +102,75 @@ impl<M: Memory> DbtEngine<M> {
             cpu: CpuState::new(),
             mem,
             cache: JitCache::new(),
+            pool: JitPool::new(),
             syscall_handler: Box::new(DefaultSyscallHandler::default()),
             total_insts_executed: 0,
         }
     }
 
-    /// Single step execution through DBT pipeline
+    /// Single step execution through DBT pipeline.
+    /// On AArch64 devices, dispatches natively to compiled machine code.
+    /// On dev-host x86_64, uses the verified interpreter execution engine.
     pub fn step(&mut self) -> Result<EngineStepResult, EngineError> {
         let pc = self.cpu.pc();
         let is_thumb = self.cpu.is_thumb();
 
-        // 1. JIT Compilation Check (ensure basic block is compiled in cache)
+        // 1. JIT Compilation Check (lift, compile, and commit basic block)
         if self.cache.lookup(pc).is_none() {
             if let Ok(block) = Lifter::lift_block(&self.mem, pc, is_thumb) {
                 let compiled = A64Compiler::compile(&block);
-                self.cache.insert(pc, compiled);
+                if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
+                    self.cache.insert_committed(pc, compiled, committed.code_ptr);
+                } else {
+                    self.cache.insert(pc, compiled);
+                }
             }
         }
 
-        // 2. Step execution (using interpreter engine with JIT-backed verification)
+        // 2. Direct AArch64 execution dispatch if running on ARM64 silicon
+        #[cfg(target_arch = "aarch64")]
+        {
+            if let Some(host_ptr) = self.cache.lookup_ptr(pc) {
+                let _ = self.pool.flush_current();
+                type JitFn = unsafe extern "C" fn(cpu: *mut CpuState, mem_base: *mut u8) -> u64;
+                let jit_fn: JitFn = unsafe { std::mem::transmute(host_ptr.0) };
+                let mem_base = self.mem.as_mut_ptr();
+                let res = unsafe { jit_fn(&mut self.cpu as *mut _, mem_base) };
+
+                let exit_reason = (res >> 32) as u64;
+                let exit_payload = res as u32;
+
+                match exit_reason {
+                    transd_emitter_a64::EXIT_REASON_DIRECT | transd_emitter_a64::EXIT_REASON_INDIRECT => {
+                        self.cpu.set_pc(GuestAddr::new(exit_payload));
+                        let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
+                        self.total_insts_executed += inst_count;
+                        return Ok(EngineStepResult::Continue);
+                    }
+                    transd_emitter_a64::EXIT_REASON_SVC => {
+                        let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
+                        self.total_insts_executed += inst_count;
+                        let args = SyscallArgs::from_cpu(&self.cpu);
+                        if let Some(exit_code) = self
+                            .syscall_handler
+                            .handle_syscall(args, &mut self.cpu, &mut self.mem)?
+                        {
+                            return Ok(EngineStepResult::Halted { exit_code });
+                        } else {
+                            return Ok(EngineStepResult::Syscall(args));
+                        }
+                    }
+                    transd_emitter_a64::EXIT_REASON_BKPT => {
+                        let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
+                        self.total_insts_executed += inst_count;
+                        return Ok(EngineStepResult::Breakpoint { imm: exit_payload as u16 });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 3. Fallback: Step execution using the verified interpreter engine
         let step_res = Interpreter::step(&mut self.cpu, &mut self.mem)?;
         self.total_insts_executed += 1;
 
@@ -137,6 +189,46 @@ impl<M: Memory> DbtEngine<M> {
                 }
             }
         }
+    }
+
+    /// Links and chains direct branches between two compiled blocks in executable memory
+    pub fn chain_blocks(&mut self, src_addr: GuestAddr, dst_addr: GuestAddr) -> bool {
+        if let (Some(src_ptr), Some(dst_ptr)) = (self.cache.lookup_ptr(src_addr), self.cache.lookup_ptr(dst_addr)) {
+            if let Some(src_block) = self.cache.lookup(src_addr) {
+                for site in &src_block.patch_sites {
+                    let target = match site.target {
+                        PatchTarget::Direct(t) => t,
+                        PatchTarget::BranchTaken { target, .. } => target,
+                        PatchTarget::BranchFallthrough(t) => t,
+                    };
+                    if target == dst_addr {
+                        let src_code = src_ptr.0 as usize + site.byte_offset;
+                        let dst_code = dst_ptr.0 as usize;
+                        let offset_bytes = (dst_code as isize) - (src_code as isize);
+                        if offset_bytes % 4 == 0 {
+                            let offset_words = (offset_bytes / 4) as i32;
+                            if (-0x0200_0000..=0x01FF_FFFF).contains(&offset_words) {
+                                unsafe {
+                                    let slice = std::slice::from_raw_parts_mut(src_code as *mut u8, 4);
+                                    match site.target {
+                                        PatchTarget::Direct(_) => {
+                                            A64Compiler::patch_direct_branch(slice, 0, offset_words);
+                                        }
+                                        PatchTarget::BranchTaken { cond, .. } => {
+                                            A64Compiler::patch_cond_branch(slice, 0, cond, offset_words);
+                                        }
+                                        _ => {}
+                                    }
+                                    crate::jit_memory::flush_icache(slice.as_mut_ptr(), 4);
+                                }
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Runs until the guest application exits or max_steps is reached
@@ -216,5 +308,39 @@ mod tests {
 
         let exit_code = engine.run(100).unwrap();
         assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn test_dbt_engine_jit_pool_and_chaining() {
+        let mut mem = FlatMemory::new(GuestAddr::new(0x1000), 0x2000);
+
+        // Block 1 at 0x1000:
+        // 0x1000: MOV r0, #10     (0xE3A0000A)
+        // 0x1004: B +8 (to 0x1014) (0xEA000002) -> offset = +2 words (target 0x1004 + 8 + 8 = 0x1014)
+        mem.write_u32(GuestAddr::new(0x1000), 0xE3A0_000A).unwrap();
+        mem.write_u32(GuestAddr::new(0x1004), 0xEA00_0002).unwrap();
+
+        // Block 2 at 0x1014:
+        // 0x1014: MOV r0, #42     (0xE3A0002A)
+        // 0x1018: MOV r7, #1      (0xE3A07001) -> sys_exit
+        // 0x101C: SVC 0           (0xEF000000)
+        mem.write_u32(GuestAddr::new(0x1014), 0xE3A0_002A).unwrap();
+        mem.write_u32(GuestAddr::new(0x1018), 0xE3A0_7001).unwrap();
+        mem.write_u32(GuestAddr::new(0x101C), 0xEF00_0000).unwrap();
+
+        let mut engine = DbtEngine::new(mem);
+        engine.cpu.set_pc(GuestAddr::new(0x1000));
+
+        let exit_code = engine.run(100).unwrap();
+        assert_eq!(exit_code, 42);
+
+        // Verify that code was committed to JIT pool
+        assert!(engine.pool.total_bytes > 0);
+        assert!(engine.cache.lookup_ptr(GuestAddr::new(0x1000)).is_some());
+        assert!(engine.cache.lookup_ptr(GuestAddr::new(0x1014)).is_some());
+
+        // Test dynamic block chaining between committed blocks
+        let chained = engine.chain_blocks(GuestAddr::new(0x1000), GuestAddr::new(0x1014));
+        assert!(chained);
     }
 }
