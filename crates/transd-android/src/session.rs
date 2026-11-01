@@ -93,6 +93,20 @@ impl TransdSession {
         self.apk_bytes = Some(apk_bytes);
     }
 
+    /// Registers a custom in-memory file in the guest VFS
+    pub fn register_vfs_file(&mut self, path: &str, content: Vec<u8>) {
+        if let Some(vfs) = self.engine.vfs_mut() {
+            vfs.register_file(path, content);
+        }
+    }
+
+    /// Adds a path redirection rule in the guest VFS
+    pub fn add_vfs_redirect(&mut self, from: &str, to: &str) {
+        if let Some(vfs) = self.engine.vfs_mut() {
+            vfs.add_redirect(from, to);
+        }
+    }
+
     /// Parse the attached APK package (borrows internal bytes)
     pub fn open_apk(&self) -> Result<Option<ApkPackage<'_>>, ApkError> {
         match &self.apk_bytes {

@@ -6,6 +6,7 @@ pub mod jit_pool;
 pub mod signals;
 pub mod syscall;
 pub mod thread;
+pub mod vfs;
 
 pub use cache::{ConcurrentJitCache, JitCache};
 pub use engine::{DbtEngine, DefaultSyscallHandler, EngineError, EngineStepResult, SyscallHandler};
@@ -15,3 +16,4 @@ pub use jit_pool::{CommittedBlock, HostCodePtr, JitPool};
 pub use signals::{FaultOrigin, SignalManager};
 pub use syscall::{futex_op, nr, SyscallArgs};
 pub use thread::{DEFAULT_THREAD_STACK_SIZE, MAIN_THREAD_TID, ThreadDescriptor, ThreadManager};
+pub use vfs::{read_cstring_from_mem, OpenFile, Stat64, VirtualFileSystem};

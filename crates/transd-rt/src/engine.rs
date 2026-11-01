@@ -33,12 +33,18 @@ pub trait SyscallHandler: Send {
         cpu: &mut CpuState,
         mem: &mut dyn Memory,
     ) -> Result<Option<u32>, EngineError>;
+
+    fn vfs_mut(&mut self) -> Option<&mut crate::vfs::VirtualFileSystem> {
+        None
+    }
 }
 
 pub struct DefaultSyscallHandler {
     pub stdout_capture: Vec<u8>,
     pub futex: FutexManager,
     pub tid: u32,
+    pub vfs: crate::vfs::VirtualFileSystem,
+    pub brk: u32,
 }
 
 impl Default for DefaultSyscallHandler {
@@ -47,6 +53,8 @@ impl Default for DefaultSyscallHandler {
             stdout_capture: Vec::new(),
             futex: FutexManager::new(),
             tid: 1000,
+            vfs: crate::vfs::VirtualFileSystem::new(),
+            brk: 0x4000_0000,
         }
     }
 }
@@ -57,8 +65,37 @@ impl DefaultSyscallHandler {
             stdout_capture: Vec::new(),
             futex,
             tid,
+            vfs: crate::vfs::VirtualFileSystem::new(),
+            brk: 0x4000_0000,
         }
     }
+
+    pub fn with_vfs(vfs: crate::vfs::VirtualFileSystem) -> Self {
+        Self {
+            stdout_capture: Vec::new(),
+            futex: FutexManager::new(),
+            tid: 1000,
+            vfs,
+            brk: 0x4000_0000,
+        }
+    }
+}
+
+fn write_utsname(mem: &mut dyn Memory, addr: GuestAddr) -> Result<(), transd_core::MemoryError> {
+    let mut bytes = [0u8; 390];
+    let fill = |slice: &mut [u8], s: &str| {
+        let b = s.as_bytes();
+        let len = b.len().min(64);
+        slice[..len].copy_from_slice(&b[..len]);
+        slice[len] = 0;
+    };
+    fill(&mut bytes[0..65], "Linux");
+    fill(&mut bytes[65..130], "localhost");
+    fill(&mut bytes[130..195], "4.14.180-transd");
+    fill(&mut bytes[195..260], "#1 SMP PREEMPT 2026");
+    fill(&mut bytes[260..325], "armv7l");
+    fill(&mut bytes[325..390], "localdomain");
+    mem.write_bytes(addr, &bytes)
 }
 
 impl SyscallHandler for DefaultSyscallHandler {
@@ -108,6 +145,171 @@ impl SyscallHandler for DefaultSyscallHandler {
                 cpu.set_reg(Reg::R0, 0);
                 Ok(None)
             }
+            nr::OPEN => {
+                let path_addr = GuestAddr::new(args.arg0);
+                let flags = args.arg1;
+                match crate::vfs::read_cstring_from_mem(mem, path_addr, 4096) {
+                    Ok(path) => match self.vfs.open(&path, flags) {
+                        Ok(fd) => cpu.set_reg(Reg::R0, fd),
+                        Err(err) => cpu.set_reg(Reg::R0, err as u32),
+                    },
+                    Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32), // -EFAULT
+                }
+                Ok(None)
+            }
+            nr::OPENAT => {
+                let path_addr = GuestAddr::new(args.arg1);
+                let flags = args.arg2;
+                match crate::vfs::read_cstring_from_mem(mem, path_addr, 4096) {
+                    Ok(path) => match self.vfs.open(&path, flags) {
+                        Ok(fd) => cpu.set_reg(Reg::R0, fd),
+                        Err(err) => cpu.set_reg(Reg::R0, err as u32),
+                    },
+                    Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32), // -EFAULT
+                }
+                Ok(None)
+            }
+            nr::CLOSE => {
+                let fd = args.arg0;
+                match self.vfs.close(fd) {
+                    Ok(()) => cpu.set_reg(Reg::R0, 0),
+                    Err(err) => cpu.set_reg(Reg::R0, err as u32),
+                }
+                Ok(None)
+            }
+            nr::READ => {
+                let fd = args.arg0;
+                let buf_addr = GuestAddr::new(args.arg1);
+                let count = args.arg2 as usize;
+                if fd >= 3 {
+                    let mut temp = vec![0u8; count];
+                    match self.vfs.read(fd, &mut temp) {
+                        Ok(n) => {
+                            if mem.write_bytes(buf_addr, &temp[..n]).is_ok() {
+                                cpu.set_reg(Reg::R0, n as u32);
+                            } else {
+                                cpu.set_reg(Reg::R0, (-14i32) as u32); // -EFAULT
+                            }
+                        }
+                        Err(err) => cpu.set_reg(Reg::R0, err as u32),
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 0); // Stdin EOF
+                }
+                Ok(None)
+            }
+            nr::LSEEK => {
+                let fd = args.arg0;
+                let offset = (args.arg1 as i32) as i64;
+                let whence = args.arg2 as i32;
+                match self.vfs.seek(fd, offset, whence) {
+                    Ok(pos) => cpu.set_reg(Reg::R0, pos as u32),
+                    Err(err) => cpu.set_reg(Reg::R0, err as u32),
+                }
+                Ok(None)
+            }
+            nr::_LLSEEK => {
+                let fd = args.arg0;
+                let offset_high = args.arg1 as u64;
+                let offset_low = args.arg2 as u64;
+                let offset = ((offset_high << 32) | offset_low) as i64;
+                let result_ptr = GuestAddr::new(args.arg3);
+                let whence = args.arg4 as i32;
+                match self.vfs.seek(fd, offset, whence) {
+                    Ok(pos) => {
+                        let bytes = pos.to_le_bytes();
+                        if mem.write_bytes(result_ptr, &bytes).is_ok() {
+                            cpu.set_reg(Reg::R0, 0);
+                        } else {
+                            cpu.set_reg(Reg::R0, (-14i32) as u32); // -EFAULT
+                        }
+                    }
+                    Err(err) => cpu.set_reg(Reg::R0, err as u32),
+                }
+                Ok(None)
+            }
+            nr::FSTAT64 => {
+                let fd = args.arg0;
+                let statbuf_addr = GuestAddr::new(args.arg1);
+                match self.vfs.fstat64(fd) {
+                    Ok(st) => match st.write_to_memory(mem, statbuf_addr) {
+                        Ok(()) => cpu.set_reg(Reg::R0, 0),
+                        Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32), // -EFAULT
+                    },
+                    Err(err) => cpu.set_reg(Reg::R0, err as u32),
+                }
+                Ok(None)
+            }
+            nr::STAT64 | nr::LSTAT64 => {
+                let path_addr = GuestAddr::new(args.arg0);
+                let statbuf_addr = GuestAddr::new(args.arg1);
+                match crate::vfs::read_cstring_from_mem(mem, path_addr, 4096) {
+                    Ok(path) => match self.vfs.stat64(&path) {
+                        Ok(st) => match st.write_to_memory(mem, statbuf_addr) {
+                            Ok(()) => cpu.set_reg(Reg::R0, 0),
+                            Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32), // -EFAULT
+                        },
+                        Err(err) => cpu.set_reg(Reg::R0, err as u32),
+                    },
+                    Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32), // -EFAULT
+                }
+                Ok(None)
+            }
+            nr::FSTATAT64 => {
+                let path_addr = GuestAddr::new(args.arg1);
+                let statbuf_addr = GuestAddr::new(args.arg2);
+                match crate::vfs::read_cstring_from_mem(mem, path_addr, 4096) {
+                    Ok(path) => match self.vfs.stat64(&path) {
+                        Ok(st) => match st.write_to_memory(mem, statbuf_addr) {
+                            Ok(()) => cpu.set_reg(Reg::R0, 0),
+                            Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32), // -EFAULT
+                        },
+                        Err(err) => cpu.set_reg(Reg::R0, err as u32),
+                    },
+                    Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32), // -EFAULT
+                }
+                Ok(None)
+            }
+            nr::ACCESS => {
+                let path_addr = GuestAddr::new(args.arg0);
+                match crate::vfs::read_cstring_from_mem(mem, path_addr, 4096) {
+                    Ok(path) => match self.vfs.stat64(&path) {
+                        Ok(_) => cpu.set_reg(Reg::R0, 0),
+                        Err(err) => cpu.set_reg(Reg::R0, err as u32),
+                    },
+                    Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32),
+                }
+                Ok(None)
+            }
+            nr::FACCESSAT => {
+                let path_addr = GuestAddr::new(args.arg1);
+                match crate::vfs::read_cstring_from_mem(mem, path_addr, 4096) {
+                    Ok(path) => match self.vfs.stat64(&path) {
+                        Ok(_) => cpu.set_reg(Reg::R0, 0),
+                        Err(err) => cpu.set_reg(Reg::R0, err as u32),
+                    },
+                    Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32),
+                }
+                Ok(None)
+            }
+            nr::BRK => {
+                let req_brk = args.arg0;
+                if req_brk == 0 || req_brk < self.brk {
+                    cpu.set_reg(Reg::R0, self.brk);
+                } else {
+                    self.brk = req_brk;
+                    cpu.set_reg(Reg::R0, self.brk);
+                }
+                Ok(None)
+            }
+            nr::UNAME => {
+                let addr = GuestAddr::new(args.arg0);
+                match write_utsname(mem, addr) {
+                    Ok(()) => cpu.set_reg(Reg::R0, 0),
+                    Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32), // -EFAULT
+                }
+                Ok(None)
+            }
             nr::FUTEX => {
                 let uaddr = GuestAddr::new(args.arg0);
                 let op = args.arg1 & !futex_op::PRIVATE_FLAG;
@@ -144,6 +346,10 @@ impl SyscallHandler for DefaultSyscallHandler {
             }
         }
     }
+
+    fn vfs_mut(&mut self) -> Option<&mut crate::vfs::VirtualFileSystem> {
+        Some(&mut self.vfs)
+    }
 }
 
 pub struct DbtEngine<M: Memory> {
@@ -165,6 +371,11 @@ impl<M: Memory> DbtEngine<M> {
             syscall_handler: Box::new(DefaultSyscallHandler::default()),
             total_insts_executed: 0,
         }
+    }
+
+    /// Access the Virtual File System (VFS) of the engine
+    pub fn vfs_mut(&mut self) -> Option<&mut crate::vfs::VirtualFileSystem> {
+        self.syscall_handler.vfs_mut()
     }
 
     /// Single step execution through DBT pipeline.
