@@ -4,7 +4,7 @@ use transd_core::{
 };
 use transd_decoder::{
     AddrMode, AddrOffset, AluOp, ArmInst, BlockAddrMode, MemSize, MulOp, NeonOp, NeonPermuteOp,
-    NeonSize, Op, Operand2, ShiftAmount, ShiftType, VfpOp, VfpReg, VfpSize,
+    NeonRevOp, NeonSize, Op, Operand2, ShiftAmount, ShiftType, VfpOp, VfpReg, VfpSize,
 };
 use transd_ir::{BlockExit, IrBlock, Superblock};
 use crate::assembler::A64Assembler;
@@ -1133,6 +1133,94 @@ impl A64Compiler {
                     asm.ldr_d_imm(0, A64Reg::X0, vn_off);
                     asm.ldr_d_imm(1, A64Reg::X0, vm_off);
                     asm.neon_ext(2, 0, 1, *imm, false);
+                    asm.str_d_imm(2, A64Reg::X0, vd_off);
+                }
+            }
+            Op::NeonRev {
+                op,
+                size,
+                is_quad,
+                vd,
+                vm,
+            } => {
+                let vm_off = (OFFSET_VFP + (*vm as usize) * 8) as u32;
+                let vd_off = (OFFSET_VFP + (*vd as usize) * 8) as u32;
+
+                if *is_quad {
+                    asm.add_x_imm(A64Reg::X9, A64Reg::X0, vm_off as u16);
+                    asm.ldr_q_imm(0, A64Reg::X9, 0);
+                } else {
+                    asm.ldr_d_imm(0, A64Reg::X0, vm_off);
+                }
+
+                let sz = match size {
+                    NeonSize::I8 => 0,
+                    NeonSize::I16 => 1,
+                    _ => 2,
+                };
+
+                match op {
+                    NeonRevOp::Rev64 => asm.neon_rev64(2, 0, sz, *is_quad),
+                    NeonRevOp::Rev32 => asm.neon_rev32(2, 0, sz, *is_quad),
+                    NeonRevOp::Rev16 => asm.neon_rev16(2, 0, *is_quad),
+                }
+
+                if *is_quad {
+                    asm.add_x_imm(A64Reg::X9, A64Reg::X0, vd_off as u16);
+                    asm.str_q_imm(2, A64Reg::X9, 0);
+                } else {
+                    asm.str_d_imm(2, A64Reg::X0, vd_off);
+                }
+            }
+            Op::NeonDupScalar {
+                size,
+                index,
+                is_quad,
+                vd,
+                vm,
+            } => {
+                let vm_off = (OFFSET_VFP + (*vm as usize) * 8) as u32;
+                let vd_off = (OFFSET_VFP + (*vd as usize) * 8) as u32;
+
+                // Load source D register into V0
+                asm.ldr_d_imm(0, A64Reg::X0, vm_off);
+
+                let imm5 = match size {
+                    NeonSize::I8 => (index << 1) | 1,
+                    NeonSize::I16 => (index << 2) | 2,
+                    _ => (index << 3) | 4,
+                };
+
+                asm.neon_dup_element(2, 0, imm5, *is_quad);
+
+                if *is_quad {
+                    asm.add_x_imm(A64Reg::X9, A64Reg::X0, vd_off as u16);
+                    asm.str_q_imm(2, A64Reg::X9, 0);
+                } else {
+                    asm.str_d_imm(2, A64Reg::X0, vd_off);
+                }
+            }
+            Op::NeonDupCore {
+                size,
+                is_quad,
+                vd,
+                rt,
+            } => {
+                let vd_off = (OFFSET_VFP + (*vd as usize) * 8) as u32;
+                let src_reg = load_guest_reg(asm, A64Reg::X9, *rt);
+
+                let imm5 = match size {
+                    NeonSize::I8 => 1,
+                    NeonSize::I16 => 2,
+                    _ => 4,
+                };
+
+                asm.neon_dup_core(2, src_reg, imm5, *is_quad);
+
+                if *is_quad {
+                    asm.add_x_imm(A64Reg::X9, A64Reg::X0, vd_off as u16);
+                    asm.str_q_imm(2, A64Reg::X9, 0);
+                } else {
                     asm.str_d_imm(2, A64Reg::X0, vd_off);
                 }
             }

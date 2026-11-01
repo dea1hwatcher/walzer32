@@ -127,6 +127,79 @@ impl ArmDecoder {
             }
         }
 
+        // NEON Element Reverse (VREV64, VREV32, VREV16: 2-register misc with opc2 == 0b00)
+        // 1111 0011 1 D 11 size 00 Vd 0 op:2 00 Q M 0 Vm
+        if (raw & 0xFFB3_0990) == 0xF3B0_0000 {
+            let op_bits = (raw >> 9) & 0x3;
+            let op = match op_bits {
+                0b00 => Some(NeonRevOp::Rev64),
+                0b01 => Some(NeonRevOp::Rev32),
+                0b10 => Some(NeonRevOp::Rev16),
+                _ => None,
+            };
+            if let Some(op) = op {
+                let size_bits = (raw >> 18) & 0x3;
+                let size = match size_bits {
+                    0b00 => Some(NeonSize::I8),
+                    0b01 if op != NeonRevOp::Rev16 => Some(NeonSize::I16),
+                    0b10 if op == NeonRevOp::Rev64 => Some(NeonSize::I32),
+                    _ => None,
+                };
+                if let Some(size) = size {
+                    let d_bit = (raw >> 22) & 1;
+                    let m_bit = (raw >> 5) & 1;
+                    let q_bit = (raw >> 6) & 1;
+                    let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+                    let vm = (raw & 0xF) | (m_bit << 4);
+                    let is_quad = q_bit != 0;
+                    return Some(ArmInst::new(
+                        Cond::AL,
+                        Op::NeonRev {
+                            op,
+                            size,
+                            is_quad,
+                            vd: vd as u8,
+                            vm: vm as u8,
+                        },
+                        raw,
+                    ));
+                }
+            }
+        }
+
+        // NEON Duplicate scalar (VDUP: 1111 0011 1 D 11 imm4 Vd 1100 0 Q M 0 Vm)
+        if (raw & 0xFFB0_0F90) == 0xF3B0_0C00 {
+            let imm4 = (raw >> 16) & 0xF;
+            let size_idx = if (imm4 & 1) != 0 {
+                Some((NeonSize::I8, (imm4 >> 1) as u8))
+            } else if (imm4 & 2) != 0 {
+                Some((NeonSize::I16, (imm4 >> 2) as u8))
+            } else if (imm4 & 4) != 0 {
+                Some((NeonSize::I32, (imm4 >> 3) as u8))
+            } else {
+                None
+            };
+            if let Some((size, index)) = size_idx {
+                let d_bit = (raw >> 22) & 1;
+                let m_bit = (raw >> 5) & 1;
+                let q_bit = (raw >> 6) & 1;
+                let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+                let vm = (raw & 0xF) | (m_bit << 4);
+                let is_quad = q_bit != 0;
+                return Some(ArmInst::new(
+                    Cond::AL,
+                    Op::NeonDupScalar {
+                        size,
+                        index,
+                        is_quad,
+                        vd: vd as u8,
+                        vm: vm as u8,
+                    },
+                    raw,
+                ));
+            }
+        }
+
         // NEON Table Lookup (VTBL, VTBX: 1111 0011 1 D 11 Vn Vd 10 len N op M 0 Vm)
         if (raw & 0xFFB0_0C10) == 0xF3B0_0800 {
             let d_bit = (raw >> 22) & 1;
@@ -976,6 +1049,30 @@ impl ArmDecoder {
     fn decode_vfp(raw: u32, is_double: bool) -> Op {
         let size = if is_double { VfpSize::F64 } else { VfpSize::F32 };
 
+        // VDUP (ARM core register): 1110 1110 1 B Q 0 Vd:4 Rt:4 1011 D 0 E 1 0000
+        if (raw & 0x0F90_0F5F) == 0x0E80_0B10 {
+            let b = ((raw >> 22) & 1) != 0;
+            let q = ((raw >> 21) & 1) != 0;
+            let e = ((raw >> 5) & 1) != 0;
+            let d = (raw >> 7) & 1;
+            let vd = (((raw >> 16) & 0xF) | (d << 4)) as u8;
+            let rt = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let size = match (b, e) {
+                (false, false) => Some(NeonSize::I32),
+                (false, true) => Some(NeonSize::I16),
+                (true, false) => Some(NeonSize::I8),
+                _ => None,
+            };
+            if let Some(size) = size {
+                return Op::NeonDupCore {
+                    size,
+                    is_quad: q,
+                    vd,
+                    rt,
+                };
+            }
+        }
+
         // VMRS <Rt>, FPSCR: (0x_EF1_0A10)
         // If Rt == 15 (0xF), Rt is APSR_nzcv (CPSR flags); otherwise Rt is core register
         if (raw & 0x0FFF_0FFF) == 0x0EF1_0A10 {
@@ -1664,6 +1761,70 @@ mod tests {
                 vd: 0,
                 vn: 2,
                 vm: 4,
+            }
+        );
+
+        // VREV64.32 q0, q1
+        let inst = ArmDecoder::decode(0xF3B8_0042);
+        assert_eq!(
+            inst.op,
+            Op::NeonRev {
+                op: NeonRevOp::Rev64,
+                size: NeonSize::I32,
+                is_quad: true,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // VREV32.16 d0, d1
+        let inst = ArmDecoder::decode(0xF3B4_0201);
+        assert_eq!(
+            inst.op,
+            Op::NeonRev {
+                op: NeonRevOp::Rev32,
+                size: NeonSize::I16,
+                is_quad: false,
+                vd: 0,
+                vm: 1,
+            }
+        );
+
+        // VREV16.8 d0, d1
+        let inst = ArmDecoder::decode(0xF3B0_0401);
+        assert_eq!(
+            inst.op,
+            Op::NeonRev {
+                op: NeonRevOp::Rev16,
+                size: NeonSize::I8,
+                is_quad: false,
+                vd: 0,
+                vm: 1,
+            }
+        );
+
+        // VDUP.32 q0, d2[1]
+        let inst = ArmDecoder::decode(0xF3BC_0C42);
+        assert_eq!(
+            inst.op,
+            Op::NeonDupScalar {
+                size: NeonSize::I32,
+                index: 1,
+                is_quad: true,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // VDUP.32 q0, r3
+        let inst = ArmDecoder::decode(0xEEA0_3B10);
+        assert_eq!(
+            inst.op,
+            Op::NeonDupCore {
+                size: NeonSize::I32,
+                is_quad: true,
+                vd: 0,
+                rt: Reg::R3,
             }
         );
     }

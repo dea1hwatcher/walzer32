@@ -1163,6 +1163,82 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// REV64 Vd, Vn (Reverse elements within 64-bit words)
+    pub fn neon_rev64(&mut self, rd: u8, rn: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_0800 | q | ((size as u32) << 22) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// REV32 Vd, Vn (Reverse elements within 32-bit words)
+    pub fn neon_rev32(&mut self, rd: u8, rn: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && size < 2);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2E20_0800 | q | ((size as u32) << 22) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// REV16 Vd, Vn (Reverse elements within 16-bit words)
+    pub fn neon_rev16(&mut self, rd: u8, rn: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_1800 | q | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// DUP Vd, Vn[index] (Duplicate vector element to all lanes)
+    pub fn neon_dup_element(&mut self, rd: u8, rn: u8, imm5: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && imm5 < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E00_0400 | q | ((imm5 as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// DUP Vd, Rn (Duplicate general-purpose core register to all vector lanes)
+    pub fn neon_dup_core(&mut self, rd: u8, rn: A64Reg, imm5: u8, is_quad: bool) {
+        assert!(rd < 32 && imm5 < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E00_0C00 | q | ((imm5 as u32) << 16) | (rn.index() << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// LDP Dt1, Dt2, [Xn, #offset] (Load pair of 64-bit vector registers)
+    pub fn ldp_d_offset(&mut self, rt1: u8, rt2: u8, rn: A64Reg, offset_bytes: i32) {
+        assert!(rt1 < 32 && rt2 < 32);
+        assert_eq!(offset_bytes % 8, 0);
+        let imm7 = ((offset_bytes / 8) as u32) & 0x7F;
+        let inst = 0x6C40_0000 | (imm7 << 15) | ((rt2 as u32) << 10) | (rn.index() << 5) | (rt1 as u32);
+        self.emit(inst);
+    }
+
+    /// STP Dt1, Dt2, [Xn, #offset] (Store pair of 64-bit vector registers)
+    pub fn stp_d_offset(&mut self, rt1: u8, rt2: u8, rn: A64Reg, offset_bytes: i32) {
+        assert!(rt1 < 32 && rt2 < 32);
+        assert_eq!(offset_bytes % 8, 0);
+        let imm7 = ((offset_bytes / 8) as u32) & 0x7F;
+        let inst = 0x6C00_0000 | (imm7 << 15) | ((rt2 as u32) << 10) | (rn.index() << 5) | (rt1 as u32);
+        self.emit(inst);
+    }
+
+    /// LDP Qt1, Qt2, [Xn, #offset] (Load pair of 128-bit vector registers)
+    pub fn ldp_q_offset(&mut self, rt1: u8, rt2: u8, rn: A64Reg, offset_bytes: i32) {
+        assert!(rt1 < 32 && rt2 < 32);
+        assert_eq!(offset_bytes % 16, 0);
+        let imm7 = ((offset_bytes / 16) as u32) & 0x7F;
+        let inst = 0xAC40_0000 | (imm7 << 15) | ((rt2 as u32) << 10) | (rn.index() << 5) | (rt1 as u32);
+        self.emit(inst);
+    }
+
+    /// STP Qt1, Qt2, [Xn, #offset] (Store pair of 128-bit vector registers)
+    pub fn stp_q_offset(&mut self, rt1: u8, rt2: u8, rn: A64Reg, offset_bytes: i32) {
+        assert!(rt1 < 32 && rt2 < 32);
+        assert_eq!(offset_bytes % 16, 0);
+        let imm7 = ((offset_bytes / 16) as u32) & 0x7F;
+        let inst = 0xAC00_0000 | (imm7 << 15) | ((rt2 as u32) << 10) | (rn.index() << 5) | (rt1 as u32);
+        self.emit(inst);
+    }
+
     /// LDXR Wt, [Xn] (Load exclusive 32-bit register)
     pub fn ldxr_w(&mut self, rt: A64Reg, rn: A64Reg) {
         let inst = 0x885F_7C00 | (rn.index() << 5) | rt.index();

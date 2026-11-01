@@ -179,6 +179,13 @@ pub enum NeonPermuteOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeonRevOp {
+    Rev64,
+    Rev32,
+    Rev16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NeonSize {
     I8,
     I16,
@@ -373,6 +380,26 @@ pub enum Op {
         vd: u8,
         vn: u8,
         vm: u8,
+    },
+    NeonRev {
+        op: NeonRevOp,
+        size: NeonSize,
+        is_quad: bool,
+        vd: u8,
+        vm: u8,
+    },
+    NeonDupScalar {
+        size: NeonSize,
+        index: u8,
+        is_quad: bool,
+        vd: u8,
+        vm: u8,
+    },
+    NeonDupCore {
+        size: NeonSize,
+        is_quad: bool,
+        vd: u8,
+        rt: Reg,
     },
     Nop,
     Unknown(u32),

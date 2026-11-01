@@ -1768,6 +1768,116 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
+            Op::NeonRev {
+                op,
+                size,
+                is_quad,
+                vd,
+                vm,
+            } => {
+                let count = if is_quad { 2 } else { 1 };
+                let mut src = [0u8; 16];
+                for i in 0..count {
+                    let m = (vm as usize + i) % 32;
+                    src[i * 8..(i + 1) * 8].copy_from_slice(&cpu.vfp[m].to_le_bytes());
+                }
+
+                let block_bytes = match op {
+                    NeonRevOp::Rev64 => 8,
+                    NeonRevOp::Rev32 => 4,
+                    NeonRevOp::Rev16 => 2,
+                };
+                let elem_bytes = match size {
+                    NeonSize::I8 => 1,
+                    NeonSize::I16 => 2,
+                    _ => 4,
+                };
+                let total_bytes = count * 8;
+                let num_blocks = total_bytes / block_bytes;
+                let elems_per_block = block_bytes / elem_bytes;
+                let mut dst = [0u8; 16];
+
+                for b in 0..num_blocks {
+                    let block_start = b * block_bytes;
+                    for i in 0..elems_per_block {
+                        let src_off = block_start + i * elem_bytes;
+                        let dst_off = block_start + (elems_per_block - 1 - i) * elem_bytes;
+                        dst[dst_off..dst_off + elem_bytes].copy_from_slice(&src[src_off..src_off + elem_bytes]);
+                    }
+                }
+
+                for i in 0..count {
+                    let d = (vd as usize + i) % 32;
+                    cpu.vfp[d] = u64::from_le_bytes(dst[i * 8..(i + 1) * 8].try_into().unwrap());
+                }
+
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonDupScalar {
+                size,
+                index,
+                is_quad,
+                vd,
+                vm,
+            } => {
+                let src_bytes = cpu.vfp[(vm as usize) % 32].to_le_bytes();
+                let val64 = match size {
+                    NeonSize::I8 => {
+                        let b = src_bytes[(index as usize) % 8];
+                        u64::from_le_bytes([b; 8])
+                    }
+                    NeonSize::I16 => {
+                        let idx = ((index as usize) % 4) * 2;
+                        let b0 = src_bytes[idx];
+                        let b1 = src_bytes[idx + 1];
+                        u64::from_le_bytes([b0, b1, b0, b1, b0, b1, b0, b1])
+                    }
+                    _ => {
+                        let idx = ((index as usize) % 2) * 4;
+                        let w = u32::from_le_bytes(src_bytes[idx..idx + 4].try_into().unwrap());
+                        (w as u64) | ((w as u64) << 32)
+                    }
+                };
+
+                let count = if is_quad { 2 } else { 1 };
+                for i in 0..count {
+                    let d = (vd as usize + i) % 32;
+                    cpu.vfp[d] = val64;
+                }
+
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonDupCore {
+                size,
+                is_quad,
+                vd,
+                rt,
+            } => {
+                let val = cpu.reg(rt);
+                let val64 = match size {
+                    NeonSize::I8 => {
+                        let b = (val & 0xFF) as u8;
+                        u64::from_le_bytes([b; 8])
+                    }
+                    NeonSize::I16 => {
+                        let h = (val & 0xFFFF) as u16;
+                        let [b0, b1] = h.to_le_bytes();
+                        u64::from_le_bytes([b0, b1, b0, b1, b0, b1, b0, b1])
+                    }
+                    _ => (val as u64) | ((val as u64) << 32),
+                };
+
+                let count = if is_quad { 2 } else { 1 };
+                for i in 0..count {
+                    let d = (vd as usize + i) % 32;
+                    cpu.vfp[d] = val64;
+                }
+
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
             Op::Unknown(raw) => Err(InterpError::UnknownInstruction(raw)),
             _ => {
                 cpu.set_pc(next_pc);

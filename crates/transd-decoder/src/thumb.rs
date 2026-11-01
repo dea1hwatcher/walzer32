@@ -750,6 +750,13 @@ impl ThumbDecoder {
             return ArmInst::new(Cond::AL, Op::VfpMsrFpscr { rt }, raw);
         }
 
+        // Thumb-2 VDUP (ARM core register): 0xEE80..
+        if (hw1 & 0xFF90) == 0xEE80 && (hw2 & 0x0F5F) == 0x0B10 {
+            let arm_raw = ((hw1 as u32) << 16) | (hw2 as u32);
+            let inst = ArmDecoder::decode(arm_raw);
+            return ArmInst::new(Cond::AL, inst.op, raw);
+        }
+
         ArmInst::new(Cond::AL, Op::Unknown(raw), raw)
     }
 }
@@ -970,6 +977,47 @@ mod tests {
                 vd: 0,
                 vn: 1,
                 vm: 2,
+            }
+        );
+
+        // Thumb-2 VREV64.32 q0, q1 -> hi=0xFFB8, lo=0x0042
+        let (inst_vrev, size) = ThumbDecoder::decode(0xFFB8, Some(0x0042));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vrev.op,
+            Op::NeonRev {
+                op: NeonRevOp::Rev64,
+                size: NeonSize::I32,
+                is_quad: true,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // Thumb-2 VDUP.32 q0, d2[1] -> hi=0xFFBC, lo=0x0C42
+        let (inst_vdup_sc, size) = ThumbDecoder::decode(0xFFBC, Some(0x0C42));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vdup_sc.op,
+            Op::NeonDupScalar {
+                size: NeonSize::I32,
+                index: 1,
+                is_quad: true,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // Thumb-2 VDUP.32 q0, r3 -> hi=0xEEA0, lo=0x3B10
+        let (inst_vdup_core, size) = ThumbDecoder::decode(0xEEA0, Some(0x3B10));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vdup_core.op,
+            Op::NeonDupCore {
+                size: NeonSize::I32,
+                is_quad: true,
+                vd: 0,
+                rt: Reg::R3,
             }
         );
     }
