@@ -542,6 +542,30 @@ impl ThumbDecoder {
                     raw,
                 )
             }
+            // SXTH, SXTB, UXTH, UXTB: 0b0010
+            0b0010 => {
+                let op_bits = (hw >> 6) & 0x3;
+                let rm = Reg::from_u8(((hw >> 3) & 0x7) as u8).unwrap_or(Reg::R0);
+                let rd = Reg::from_u8((hw & 0x7) as u8).unwrap_or(Reg::R0);
+                let op = match op_bits {
+                    0b00 => ExtendOp::Sxth,
+                    0b01 => ExtendOp::Sxtb,
+                    0b10 => ExtendOp::Uxth,
+                    0b11 => ExtendOp::Uxtb,
+                    _ => unreachable!(),
+                };
+                ArmInst::new(
+                    Cond::AL,
+                    Op::SimdExtend {
+                        op,
+                        rd,
+                        rn: None,
+                        rm,
+                        rotation: 0,
+                    },
+                    raw,
+                )
+            }
             // REV, REV16, REVSH: 0b1010
             0b1010 => {
                 let op_bits = (hw >> 6) & 0x3;
@@ -789,6 +813,106 @@ impl ThumbDecoder {
             };
             if let Some(op) = op {
                 return ArmInst::new(Cond::AL, Op::ByteRev { op, rd, rm }, raw);
+            }
+        }
+
+        // Thumb-32 SEL: 0xFAA0_F080
+        if (hw1 & 0xFFF0) == 0xFAA0 && (hw2 & 0xF0F0) == 0xF080 {
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+            return ArmInst::new(Cond::AL, Op::SimdSel { rd, rn, rm }, raw);
+        }
+
+        // Thumb-32 Parallel Arithmetic (SADD8, SSUB8, SADD16, SSUB16, SASX, SSAX, U..., Q..., SH..., UH...)
+        if (hw1 & 0xFF00) == 0xFA00 && (hw1 & 0x0080) != 0 && (hw2 & 0xF080) == 0xF000 {
+            let op1 = ((hw1 >> 4) & 0xF) as u8;
+            let op2 = ((hw2 >> 4) & 0x7) as u8;
+            let op = match (op1, op2) {
+                // Add8 (0x8)
+                (0x8, 0) => Some(SimdParallelOp::Sadd8),
+                (0x8, 1) => Some(SimdParallelOp::Qadd8),
+                (0x8, 2) => Some(SimdParallelOp::Shadd8),
+                (0x8, 4) => Some(SimdParallelOp::Uadd8),
+                (0x8, 5) => Some(SimdParallelOp::Uqadd8),
+                (0x8, 6) => Some(SimdParallelOp::Uhadd8),
+                // Add16 (0x9)
+                (0x9, 0) => Some(SimdParallelOp::Sadd16),
+                (0x9, 1) => Some(SimdParallelOp::Qadd16),
+                (0x9, 2) => Some(SimdParallelOp::Shadd16),
+                (0x9, 4) => Some(SimdParallelOp::Uadd16),
+                (0x9, 5) => Some(SimdParallelOp::Uqadd16),
+                (0x9, 6) => Some(SimdParallelOp::Uhadd16),
+                // Asx (0xA)
+                (0xA, 0) => Some(SimdParallelOp::Sasx),
+                (0xA, 1) => Some(SimdParallelOp::Qasx),
+                (0xA, 2) => Some(SimdParallelOp::Shasx),
+                (0xA, 4) => Some(SimdParallelOp::Uasx),
+                (0xA, 5) => Some(SimdParallelOp::Uqasx),
+                (0xA, 6) => Some(SimdParallelOp::Uhasx),
+                // Sub8 (0xC)
+                (0xC, 0) => Some(SimdParallelOp::Ssub8),
+                (0xC, 1) => Some(SimdParallelOp::Qsub8),
+                (0xC, 2) => Some(SimdParallelOp::Shsub8),
+                (0xC, 4) => Some(SimdParallelOp::Usub8),
+                (0xC, 5) => Some(SimdParallelOp::Uqsub8),
+                (0xC, 6) => Some(SimdParallelOp::Uhsub8),
+                // Sub16 (0xD)
+                (0xD, 0) => Some(SimdParallelOp::Ssub16),
+                (0xD, 1) => Some(SimdParallelOp::Qsub16),
+                (0xD, 2) => Some(SimdParallelOp::Shsub16),
+                (0xD, 4) => Some(SimdParallelOp::Usub16),
+                (0xD, 5) => Some(SimdParallelOp::Uqsub16),
+                (0xD, 6) => Some(SimdParallelOp::Uhsub16),
+                // Sax (0xE)
+                (0xE, 0) => Some(SimdParallelOp::Ssax),
+                (0xE, 1) => Some(SimdParallelOp::Qsax),
+                (0xE, 2) => Some(SimdParallelOp::Shsax),
+                (0xE, 4) => Some(SimdParallelOp::Usax),
+                (0xE, 5) => Some(SimdParallelOp::Uqsax),
+                (0xE, 6) => Some(SimdParallelOp::Uhsax),
+                _ => None,
+            };
+            if let Some(op) = op {
+                let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+                let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+                let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+                return ArmInst::new(Cond::AL, Op::SimdParallel { op, rd, rn, rm }, raw);
+            }
+        }
+
+        // Thumb-32 PKHBT / PKHTB: 0xEAC0
+        if (hw1 & 0xFFF0) == 0xEAC0 && (hw2 & 0x8010) == 0 {
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+            let tb = ((hw2 >> 5) & 1) != 0;
+            let imm3 = ((hw2 >> 12) & 7) as u8;
+            let imm2 = ((hw2 >> 6) & 3) as u8;
+            let shift = (imm3 << 2) | imm2;
+            let op = if tb { PkhOp::Pkhtb } else { PkhOp::Pkhbt };
+            return ArmInst::new(Cond::AL, Op::SimdPkh { op, rd, rn, rm, shift }, raw);
+        }
+
+        // Thumb-32 Extend and Extend & Add (SXTAH, UXTAH, SXTAB16, UXTAB16, SXTAB, UXTAB, SXTH.W, UXTH.W, ...)
+        if (hw1 & 0xFF80) == 0xFA00 && (hw1 & 0x0080) == 0 && (hw2 & 0xF0C0) == 0xF080 {
+            let op_bits = (hw1 >> 4) & 7;
+            let op = match op_bits {
+                0 => Some(ExtendOp::Sxth),
+                1 => Some(ExtendOp::Uxth),
+                2 => Some(ExtendOp::Sxtb16),
+                3 => Some(ExtendOp::Uxtb16),
+                4 => Some(ExtendOp::Sxtb),
+                5 => Some(ExtendOp::Uxtb),
+                _ => None,
+            };
+            if let Some(op) = op {
+                let rn_raw = (hw1 & 0xF) as u8;
+                let rn = if rn_raw == 15 { None } else { Reg::from_u8(rn_raw) };
+                let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+                let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+                let rotation = (((hw2 >> 4) & 3) as u8) * 8;
+                return ArmInst::new(Cond::AL, Op::SimdExtend { op, rd, rn, rm, rotation }, raw);
             }
         }
 
@@ -1287,6 +1411,103 @@ mod tests {
                 rn: Reg::from_u8(15).unwrap(),
                 lsb: 1,
                 width: 11,
+            }
+        );
+    }
+
+    #[test]
+    fn test_thumb_simd_media_parallel() {
+        // Thumb-16 SXTH r0, r2 -> 0xB210
+        let (inst, sz) = ThumbDecoder::decode(0xB210, None);
+        assert_eq!(sz, 2);
+        assert_eq!(
+            inst.op,
+            Op::SimdExtend {
+                op: ExtendOp::Sxth,
+                rd: Reg::R0,
+                rn: None,
+                rm: Reg::R2,
+                rotation: 0,
+            }
+        );
+
+        // Thumb-16 UXTB r0, r2 -> 0xB2D0
+        let (inst, sz) = ThumbDecoder::decode(0xB2D0, None);
+        assert_eq!(sz, 2);
+        assert_eq!(
+            inst.op,
+            Op::SimdExtend {
+                op: ExtendOp::Uxtb,
+                rd: Reg::R0,
+                rn: None,
+                rm: Reg::R2,
+                rotation: 0,
+            }
+        );
+
+        // Thumb-32 SADD8 r0, r1, r2 -> hi=0xFA81, lo=0xF002
+        let (inst, sz) = ThumbDecoder::decode(0xFA81, Some(0xF002));
+        assert_eq!(sz, 4);
+        assert_eq!(
+            inst.op,
+            Op::SimdParallel {
+                op: SimdParallelOp::Sadd8,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                rm: Reg::R2,
+            }
+        );
+
+        // Thumb-32 UADD8 r0, r1, r2 -> hi=0xFA81, lo=0xF042
+        let (inst, sz) = ThumbDecoder::decode(0xFA81, Some(0xF042));
+        assert_eq!(sz, 4);
+        assert_eq!(
+            inst.op,
+            Op::SimdParallel {
+                op: SimdParallelOp::Uadd8,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                rm: Reg::R2,
+            }
+        );
+
+        // Thumb-32 SEL r0, r1, r2 -> hi=0xFAA1, lo=0xF082
+        let (inst, sz) = ThumbDecoder::decode(0xFAA1, Some(0xF082));
+        assert_eq!(sz, 4);
+        assert_eq!(
+            inst.op,
+            Op::SimdSel {
+                rd: Reg::R0,
+                rn: Reg::R1,
+                rm: Reg::R2,
+            }
+        );
+
+        // Thumb-32 PKHBT r0, r1, r2, LSL #1 -> hi=0xEAC1, lo=0x0042
+        let (inst, sz) = ThumbDecoder::decode(0xEAC1, Some(0x0042));
+        assert_eq!(sz, 4);
+        assert_eq!(
+            inst.op,
+            Op::SimdPkh {
+                op: PkhOp::Pkhbt,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                rm: Reg::R2,
+                shift: 1,
+            }
+        );
+
+        // Thumb-32 SXTAB r0, r1, r2 -> hi=0xFA41, lo=0xF082
+        let (inst, sz) = ThumbDecoder::decode(0xFA41, Some(0xF082));
+        assert_eq!(sz, 4);
+        assert_eq!(
+            inst.op,
+            Op::SimdExtend {
+                op: ExtendOp::Sxtb,
+                rd: Reg::R0,
+                rn: Some(Reg::R1),
+                rm: Reg::R2,
+                rotation: 0,
             }
         );
     }

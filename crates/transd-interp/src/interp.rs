@@ -506,6 +506,458 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
+            Op::SimdParallel { op, rd, rn, rm } => {
+                let n = cpu.reg(rn);
+                let m = cpu.reg(rm);
+
+                let n_b = [
+                    (n & 0xFF) as u8,
+                    ((n >> 8) & 0xFF) as u8,
+                    ((n >> 16) & 0xFF) as u8,
+                    ((n >> 24) & 0xFF) as u8,
+                ];
+                let m_b = [
+                    (m & 0xFF) as u8,
+                    ((m >> 8) & 0xFF) as u8,
+                    ((m >> 16) & 0xFF) as u8,
+                    ((m >> 24) & 0xFF) as u8,
+                ];
+                let n_h = [(n & 0xFFFF) as u16, ((n >> 16) & 0xFFFF) as u16];
+                let m_h = [(m & 0xFFFF) as u16, ((m >> 16) & 0xFFFF) as u16];
+
+                let res = match op {
+                    // Normal signed (sets GE flags)
+                    SimdParallelOp::Sadd8 => {
+                        let mut ge = 0u8;
+                        let mut res = 0u32;
+                        for i in 0..4 {
+                            let sum = (n_b[i] as i8 as i16) + (m_b[i] as i8 as i16);
+                            if sum >= 0 {
+                                ge |= 1 << i;
+                            }
+                            res |= ((sum as u8) as u32) << (i * 8);
+                        }
+                        cpu.cpsr.set_ge_bits(ge);
+                        res
+                    }
+                    SimdParallelOp::Ssub8 => {
+                        let mut ge = 0u8;
+                        let mut res = 0u32;
+                        for i in 0..4 {
+                            let diff = (n_b[i] as i8 as i16) - (m_b[i] as i8 as i16);
+                            if diff >= 0 {
+                                ge |= 1 << i;
+                            }
+                            res |= ((diff as u8) as u32) << (i * 8);
+                        }
+                        cpu.cpsr.set_ge_bits(ge);
+                        res
+                    }
+                    SimdParallelOp::Sadd16 => {
+                        let mut ge = 0u8;
+                        let mut res = 0u32;
+                        for i in 0..2 {
+                            let sum = (n_h[i] as i16 as i32) + (m_h[i] as i16 as i32);
+                            if sum >= 0 {
+                                ge |= 0b11 << (i * 2);
+                            }
+                            res |= ((sum as u16) as u32) << (i * 16);
+                        }
+                        cpu.cpsr.set_ge_bits(ge);
+                        res
+                    }
+                    SimdParallelOp::Ssub16 => {
+                        let mut ge = 0u8;
+                        let mut res = 0u32;
+                        for i in 0..2 {
+                            let diff = (n_h[i] as i16 as i32) - (m_h[i] as i16 as i32);
+                            if diff >= 0 {
+                                ge |= 0b11 << (i * 2);
+                            }
+                            res |= ((diff as u16) as u32) << (i * 16);
+                        }
+                        cpu.cpsr.set_ge_bits(ge);
+                        res
+                    }
+                    SimdParallelOp::Sasx => {
+                        let mut ge = 0u8;
+                        let diff_lo = (n_h[0] as i16 as i32) - (m_h[1] as i16 as i32);
+                        let sum_hi = (n_h[1] as i16 as i32) + (m_h[0] as i16 as i32);
+                        if diff_lo >= 0 {
+                            ge |= 0b0011;
+                        }
+                        if sum_hi >= 0 {
+                            ge |= 0b1100;
+                        }
+                        cpu.cpsr.set_ge_bits(ge);
+                        ((sum_hi as u16 as u32) << 16) | (diff_lo as u16 as u32)
+                    }
+                    SimdParallelOp::Ssax => {
+                        let mut ge = 0u8;
+                        let sum_lo = (n_h[0] as i16 as i32) + (m_h[1] as i16 as i32);
+                        let diff_hi = (n_h[1] as i16 as i32) - (m_h[0] as i16 as i32);
+                        if sum_lo >= 0 {
+                            ge |= 0b0011;
+                        }
+                        if diff_hi >= 0 {
+                            ge |= 0b1100;
+                        }
+                        cpu.cpsr.set_ge_bits(ge);
+                        ((diff_hi as u16 as u32) << 16) | (sum_lo as u16 as u32)
+                    }
+
+                    // Normal unsigned (sets GE flags)
+                    SimdParallelOp::Uadd8 => {
+                        let mut ge = 0u8;
+                        let mut res = 0u32;
+                        for i in 0..4 {
+                            let sum = (n_b[i] as u16) + (m_b[i] as u16);
+                            if sum >= 0x100 {
+                                ge |= 1 << i;
+                            }
+                            res |= ((sum as u8) as u32) << (i * 8);
+                        }
+                        cpu.cpsr.set_ge_bits(ge);
+                        res
+                    }
+                    SimdParallelOp::Usub8 => {
+                        let mut ge = 0u8;
+                        let mut res = 0u32;
+                        for i in 0..4 {
+                            let diff = (n_b[i] as i16) - (m_b[i] as i16);
+                            if diff >= 0 {
+                                ge |= 1 << i;
+                            }
+                            res |= ((diff as u8) as u32) << (i * 8);
+                        }
+                        cpu.cpsr.set_ge_bits(ge);
+                        res
+                    }
+                    SimdParallelOp::Uadd16 => {
+                        let mut ge = 0u8;
+                        let mut res = 0u32;
+                        for i in 0..2 {
+                            let sum = (n_h[i] as u32) + (m_h[i] as u32);
+                            if sum >= 0x10000 {
+                                ge |= 0b11 << (i * 2);
+                            }
+                            res |= ((sum as u16) as u32) << (i * 16);
+                        }
+                        cpu.cpsr.set_ge_bits(ge);
+                        res
+                    }
+                    SimdParallelOp::Usub16 => {
+                        let mut ge = 0u8;
+                        let mut res = 0u32;
+                        for i in 0..2 {
+                            let diff = (n_h[i] as i32) - (m_h[i] as i32);
+                            if diff >= 0 {
+                                ge |= 0b11 << (i * 2);
+                            }
+                            res |= ((diff as u16) as u32) << (i * 16);
+                        }
+                        cpu.cpsr.set_ge_bits(ge);
+                        res
+                    }
+                    SimdParallelOp::Uasx => {
+                        let mut ge = 0u8;
+                        let diff_lo = (n_h[0] as i32) - (m_h[1] as i32);
+                        let sum_hi = (n_h[1] as u32) + (m_h[0] as u32);
+                        if diff_lo >= 0 {
+                            ge |= 0b0011;
+                        }
+                        if sum_hi >= 0x10000 {
+                            ge |= 0b1100;
+                        }
+                        cpu.cpsr.set_ge_bits(ge);
+                        ((sum_hi as u16 as u32) << 16) | (diff_lo as u16 as u32)
+                    }
+                    SimdParallelOp::Usax => {
+                        let mut ge = 0u8;
+                        let sum_lo = (n_h[0] as u32) + (m_h[1] as u32);
+                        let diff_hi = (n_h[1] as i32) - (m_h[0] as i32);
+                        if sum_lo >= 0x10000 {
+                            ge |= 0b0011;
+                        }
+                        if diff_hi >= 0 {
+                            ge |= 0b1100;
+                        }
+                        cpu.cpsr.set_ge_bits(ge);
+                        ((diff_hi as u16 as u32) << 16) | (sum_lo as u16 as u32)
+                    }
+
+                    // Saturating signed
+                    SimdParallelOp::Qadd8 => {
+                        let mut res = 0u32;
+                        for i in 0..4 {
+                            let sum = ((n_b[i] as i8 as i16) + (m_b[i] as i8 as i16)).clamp(-128, 127);
+                            res |= ((sum as i8 as u8) as u32) << (i * 8);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Qsub8 => {
+                        let mut res = 0u32;
+                        for i in 0..4 {
+                            let diff = ((n_b[i] as i8 as i16) - (m_b[i] as i8 as i16)).clamp(-128, 127);
+                            res |= ((diff as i8 as u8) as u32) << (i * 8);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Qadd16 => {
+                        let mut res = 0u32;
+                        for i in 0..2 {
+                            let sum = ((n_h[i] as i16 as i32) + (m_h[i] as i16 as i32)).clamp(-32768, 32767);
+                            res |= ((sum as i16 as u16) as u32) << (i * 16);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Qsub16 => {
+                        let mut res = 0u32;
+                        for i in 0..2 {
+                            let diff = ((n_h[i] as i16 as i32) - (m_h[i] as i16 as i32)).clamp(-32768, 32767);
+                            res |= ((diff as i16 as u16) as u32) << (i * 16);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Qasx => {
+                        let diff_lo = ((n_h[0] as i16 as i32) - (m_h[1] as i16 as i32)).clamp(-32768, 32767);
+                        let sum_hi = ((n_h[1] as i16 as i32) + (m_h[0] as i16 as i32)).clamp(-32768, 32767);
+                        ((sum_hi as i16 as u16 as u32) << 16) | (diff_lo as i16 as u16 as u32)
+                    }
+                    SimdParallelOp::Qsax => {
+                        let sum_lo = ((n_h[0] as i16 as i32) + (m_h[1] as i16 as i32)).clamp(-32768, 32767);
+                        let diff_hi = ((n_h[1] as i16 as i32) - (m_h[0] as i16 as i32)).clamp(-32768, 32767);
+                        ((diff_hi as i16 as u16 as u32) << 16) | (sum_lo as i16 as u16 as u32)
+                    }
+
+                    // Saturating unsigned
+                    SimdParallelOp::Uqadd8 => {
+                        let mut res = 0u32;
+                        for i in 0..4 {
+                            let sum = ((n_b[i] as u16) + (m_b[i] as u16)).min(255);
+                            res |= (sum as u32) << (i * 8);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Uqsub8 => {
+                        let mut res = 0u32;
+                        for i in 0..4 {
+                            let diff = ((n_b[i] as i16) - (m_b[i] as i16)).max(0);
+                            res |= (diff as u32) << (i * 8);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Uqadd16 => {
+                        let mut res = 0u32;
+                        for i in 0..2 {
+                            let sum = ((n_h[i] as u32) + (m_h[i] as u32)).min(65535);
+                            res |= sum << (i * 16);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Uqsub16 => {
+                        let mut res = 0u32;
+                        for i in 0..2 {
+                            let diff = ((n_h[i] as i32) - (m_h[i] as i32)).max(0);
+                            res |= (diff as u32) << (i * 16);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Uqasx => {
+                        let diff_lo = ((n_h[0] as i32) - (m_h[1] as i32)).max(0) as u32;
+                        let sum_hi = ((n_h[1] as u32) + (m_h[0] as u32)).min(65535);
+                        (sum_hi << 16) | diff_lo
+                    }
+                    SimdParallelOp::Uqsax => {
+                        let sum_lo = ((n_h[0] as u32) + (m_h[1] as u32)).min(65535);
+                        let diff_hi = ((n_h[1] as i32) - (m_h[0] as i32)).max(0) as u32;
+                        (diff_hi << 16) | sum_lo
+                    }
+
+                    // Halving signed (average)
+                    SimdParallelOp::Shadd8 => {
+                        let mut res = 0u32;
+                        for i in 0..4 {
+                            let sum = ((n_b[i] as i8 as i16) + (m_b[i] as i8 as i16)) >> 1;
+                            res |= ((sum as u8) as u32) << (i * 8);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Shsub8 => {
+                        let mut res = 0u32;
+                        for i in 0..4 {
+                            let diff = ((n_b[i] as i8 as i16) - (m_b[i] as i8 as i16)) >> 1;
+                            res |= ((diff as u8) as u32) << (i * 8);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Shadd16 => {
+                        let mut res = 0u32;
+                        for i in 0..2 {
+                            let sum = ((n_h[i] as i16 as i32) + (m_h[i] as i16 as i32)) >> 1;
+                            res |= ((sum as u16) as u32) << (i * 16);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Shsub16 => {
+                        let mut res = 0u32;
+                        for i in 0..2 {
+                            let diff = ((n_h[i] as i16 as i32) - (m_h[i] as i16 as i32)) >> 1;
+                            res |= ((diff as u16) as u32) << (i * 16);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Shasx => {
+                        let diff_lo = (((n_h[0] as i16 as i32) - (m_h[1] as i16 as i32)) >> 1) as u16;
+                        let sum_hi = (((n_h[1] as i16 as i32) + (m_h[0] as i16 as i32)) >> 1) as u16;
+                        ((sum_hi as u32) << 16) | (diff_lo as u32)
+                    }
+                    SimdParallelOp::Shsax => {
+                        let sum_lo = (((n_h[0] as i16 as i32) + (m_h[1] as i16 as i32)) >> 1) as u16;
+                        let diff_hi = (((n_h[1] as i16 as i32) - (m_h[0] as i16 as i32)) >> 1) as u16;
+                        ((diff_hi as u32) << 16) | (sum_lo as u32)
+                    }
+
+                    // Halving unsigned (average)
+                    SimdParallelOp::Uhadd8 => {
+                        let mut res = 0u32;
+                        for i in 0..4 {
+                            let sum = ((n_b[i] as u16) + (m_b[i] as u16)) >> 1;
+                            res |= ((sum as u8) as u32) << (i * 8);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Uhsub8 => {
+                        let mut res = 0u32;
+                        for i in 0..4 {
+                            let diff = ((n_b[i] as i16) - (m_b[i] as i16)) >> 1;
+                            res |= ((diff as u8) as u32) << (i * 8);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Uhadd16 => {
+                        let mut res = 0u32;
+                        for i in 0..2 {
+                            let sum = ((n_h[i] as u32) + (m_h[i] as u32)) >> 1;
+                            res |= (sum & 0xFFFF) << (i * 16);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Uhsub16 => {
+                        let mut res = 0u32;
+                        for i in 0..2 {
+                            let diff = ((n_h[i] as i32) - (m_h[i] as i32)) >> 1;
+                            res |= ((diff as u16) as u32) << (i * 16);
+                        }
+                        res
+                    }
+                    SimdParallelOp::Uhasx => {
+                        let diff_lo = (((n_h[0] as i32) - (m_h[1] as i32)) >> 1) as u16;
+                        let sum_hi = (((n_h[1] as u32) + (m_h[0] as u32)) >> 1) as u16;
+                        ((sum_hi as u32) << 16) | (diff_lo as u32)
+                    }
+                    SimdParallelOp::Uhsax => {
+                        let sum_lo = (((n_h[0] as u32) + (m_h[1] as u32)) >> 1) as u16;
+                        let diff_hi = (((n_h[1] as i32) - (m_h[0] as i32)) >> 1) as u16;
+                        ((diff_hi as u32) << 16) | (sum_lo as u32)
+                    }
+                };
+
+                cpu.set_reg(rd, res);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::SimdSel { rd, rn, rm } => {
+                let n = cpu.reg(rn);
+                let m = cpu.reg(rm);
+                let ge = cpu.cpsr.ge_bits();
+                let mut res = 0u32;
+                for i in 0..4 {
+                    let byte = if (ge & (1 << i)) != 0 {
+                        (n >> (i * 8)) & 0xFF
+                    } else {
+                        (m >> (i * 8)) & 0xFF
+                    };
+                    res |= byte << (i * 8);
+                }
+                cpu.set_reg(rd, res);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::SimdPkh { op, rd, rn, rm, shift } => {
+                let n = cpu.reg(rn);
+                let m = cpu.reg(rm);
+                let res = match op {
+                    PkhOp::Pkhbt => {
+                        let m_shifted = m.wrapping_shl(shift as u32);
+                        (n & 0x0000_FFFF) | (m_shifted & 0xFFFF_0000)
+                    }
+                    PkhOp::Pkhtb => {
+                        let effective_shift = if shift == 0 { 32 } else { shift as u32 };
+                        let m_shifted = ((m as i32) >> effective_shift) as u32;
+                        (m_shifted & 0x0000_FFFF) | (n & 0xFFFF_0000)
+                    }
+                };
+                cpu.set_reg(rd, res);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::SimdExtend { op, rd, rn, rm, rotation } => {
+                let m = cpu.reg(rm);
+                let rotated = if rotation == 0 {
+                    m
+                } else {
+                    m.rotate_right(rotation as u32)
+                };
+                let n_val = rn.map(|r| cpu.reg(r));
+                let res = match op {
+                    ExtendOp::Sxtb => {
+                        let ext = (rotated as i8 as i32) as u32;
+                        n_val.map_or(ext, |n| n.wrapping_add(ext))
+                    }
+                    ExtendOp::Uxtb => {
+                        let ext = (rotated & 0xFF) as u32;
+                        n_val.map_or(ext, |n| n.wrapping_add(ext))
+                    }
+                    ExtendOp::Sxth => {
+                        let ext = (rotated as i16 as i32) as u32;
+                        n_val.map_or(ext, |n| n.wrapping_add(ext))
+                    }
+                    ExtendOp::Uxth => {
+                        let ext = (rotated & 0xFFFF) as u32;
+                        n_val.map_or(ext, |n| n.wrapping_add(ext))
+                    }
+                    ExtendOp::Sxtb16 => {
+                        let ext_lo = ((rotated as i8 as i16) as u16) as u32;
+                        let ext_hi = (((rotated >> 16) as i8 as i16) as u16) as u32;
+                        let ext = (ext_hi << 16) | ext_lo;
+                        match n_val {
+                            Some(n) => {
+                                let sum_lo = (n & 0xFFFF).wrapping_add(ext_lo) & 0xFFFF;
+                                let sum_hi = ((n >> 16) & 0xFFFF).wrapping_add(ext_hi) & 0xFFFF;
+                                (sum_hi << 16) | sum_lo
+                            }
+                            None => ext,
+                        }
+                    }
+                    ExtendOp::Uxtb16 => {
+                        let ext_lo = (rotated & 0xFF) as u32;
+                        let ext_hi = ((rotated >> 16) & 0xFF) as u32;
+                        let ext = (ext_hi << 16) | ext_lo;
+                        match n_val {
+                            Some(n) => {
+                                let sum_lo = (n & 0xFFFF).wrapping_add(ext_lo) & 0xFFFF;
+                                let sum_hi = ((n >> 16) & 0xFFFF).wrapping_add(ext_hi) & 0xFFFF;
+                                (sum_hi << 16) | sum_lo
+                            }
+                            None => ext,
+                        }
+                    }
+                };
+                cpu.set_reg(rd, res);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
             Op::VfpAlu {
                 op,
                 size,

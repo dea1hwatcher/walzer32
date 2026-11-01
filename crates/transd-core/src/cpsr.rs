@@ -15,6 +15,12 @@ bitflags! {
         /// Sticky saturation flag (Q)
         const Q = 1 << 27;
 
+        /// Greater than or Equal flags for SIMD parallel instructions (GE[3:0])
+        const GE3 = 1 << 19;
+        const GE2 = 1 << 18;
+        const GE1 = 1 << 17;
+        const GE0 = 1 << 16;
+
         /// Endianness execution state bit (0 = Little-endian, 1 = Big-endian)
         const E = 1 << 9;
         /// Asynchronous abort disable
@@ -29,6 +35,19 @@ bitflags! {
 }
 
 impl Cpsr {
+    /// Get the GE[3:0] SIMD condition flags (CPSR[19:16])
+    #[inline(always)]
+    pub fn ge_bits(self) -> u8 {
+        ((self.bits() >> 16) & 0xF) as u8
+    }
+
+    /// Set the GE[3:0] SIMD condition flags (CPSR[19:16])
+    #[inline(always)]
+    pub fn set_ge_bits(&mut self, ge: u8) {
+        let mask = 0xF << 16;
+        *self = Cpsr::from_bits_retain((self.bits() & !mask) | (((ge as u32) & 0xF) << 16));
+    }
+
     /// Get the current Thumb-2 IT block state (ITSTATE[7:0])
     /// IT[7:2] in CPSR[15:10], IT[1:0] in CPSR[26:25]
     #[inline(always)]

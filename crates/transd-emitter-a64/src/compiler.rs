@@ -3,9 +3,9 @@ use transd_core::{
     OFFSET_VFP,
 };
 use transd_decoder::{
-    AddrMode, AddrOffset, AluOp, ArmInst, BitFieldOp, BlockAddrMode, ByteRevOp, MemSize, MulOp, NeonCvtOp,
-    NeonOp, NeonPermuteOp, NeonRevOp, NeonSize, NeonWriteback, Op, Operand2, ShiftAmount, ShiftType,
-    VfpCvtOp, VfpOp, VfpReg, VfpSize,
+    AddrMode, AddrOffset, AluOp, ArmInst, BitFieldOp, BlockAddrMode, ByteRevOp, ExtendOp, MemSize, MulOp,
+    NeonCvtOp, NeonOp, NeonPermuteOp, NeonRevOp, NeonSize, NeonWriteback, Op, Operand2, PkhOp, ShiftAmount,
+    ShiftType, VfpCvtOp, VfpOp, VfpReg, VfpSize,
 };
 use transd_ir::{BlockExit, IrBlock, Superblock};
 use crate::assembler::A64Assembler;
@@ -568,6 +568,79 @@ impl A64Compiler {
                     ByteRevOp::Revsh => {
                         asm.rev16_w(dst_reg, rm_reg);
                         asm.sxth_w(dst_reg, dst_reg);
+                    }
+                }
+                store_guest_reg(asm, dst_reg, *rd);
+            }
+            Op::SimdPkh { op, rd, rn, rm, shift } => {
+                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                let rm_reg = load_guest_reg(asm, A64Reg::X10, *rm);
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+                match op {
+                    PkhOp::Pkhbt => {
+                        asm.uxth_w(dst_reg, rn_reg);
+                        if *shift != 0 {
+                            asm.lsl_w_imm(A64Reg::X10, rm_reg, *shift);
+                        }
+                        asm.bfi_w(dst_reg, A64Reg::X10, 16, 16);
+                    }
+                    PkhOp::Pkhtb => {
+                        let eff_shift = if *shift == 0 { 32 } else { *shift };
+                        asm.asr_w_imm(A64Reg::X10, rm_reg, eff_shift);
+                        asm.uxth_w(A64Reg::X10, A64Reg::X10);
+                        asm.mov_imm32(A64Reg::X12, 0xFFFF_0000);
+                        asm.and_w_reg(dst_reg, rn_reg, A64Reg::X12);
+                        asm.orr_w_reg(dst_reg, dst_reg, A64Reg::X10);
+                    }
+                }
+                store_guest_reg(asm, dst_reg, *rd);
+            }
+            Op::SimdExtend { op, rd, rn, rm, rotation } => {
+                let rm_reg = load_guest_reg(asm, A64Reg::X9, *rm);
+                if *rotation != 0 {
+                    asm.ror_w(A64Reg::X9, rm_reg, *rotation);
+                }
+                let ext_src = if *rotation != 0 { A64Reg::X9 } else { rm_reg };
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+
+                match op {
+                    ExtendOp::Sxtb => asm.sxtb_w(dst_reg, ext_src),
+                    ExtendOp::Uxtb => asm.uxtb_w(dst_reg, ext_src),
+                    ExtendOp::Sxth => asm.sxth_w(dst_reg, ext_src),
+                    ExtendOp::Uxth => asm.uxth_w(dst_reg, ext_src),
+                    ExtendOp::Sxtb16 => {
+                        asm.sxtb_w(A64Reg::X10, ext_src);
+                        asm.uxth_w(A64Reg::X10, A64Reg::X10);
+                        asm.lsr_w_imm(A64Reg::X12, ext_src, 16);
+                        asm.sxtb_w(A64Reg::X12, A64Reg::X12);
+                        asm.lsl_w_imm(A64Reg::X12, A64Reg::X12, 16);
+                        asm.orr_w_reg(dst_reg, A64Reg::X10, A64Reg::X12);
+                    }
+                    ExtendOp::Uxtb16 => {
+                        asm.uxtb_w(A64Reg::X10, ext_src);
+                        asm.lsr_w_imm(A64Reg::X12, ext_src, 16);
+                        asm.uxtb_w(A64Reg::X12, A64Reg::X12);
+                        asm.lsl_w_imm(A64Reg::X12, A64Reg::X12, 16);
+                        asm.orr_w_reg(dst_reg, A64Reg::X10, A64Reg::X12);
+                    }
+                }
+
+                if let Some(rn) = rn {
+                    let rn_reg = load_guest_reg(asm, A64Reg::X10, *rn);
+                    match op {
+                        ExtendOp::Sxtb16 | ExtendOp::Uxtb16 => {
+                            // Halfword-wise parallel add
+                            asm.add_w_reg(A64Reg::X12, rn_reg, dst_reg); // lo sum
+                            asm.uxth_w(A64Reg::X12, A64Reg::X12);
+                            asm.lsr_w_imm(A64Reg::X9, rn_reg, 16);
+                            asm.lsr_w_imm(A64Reg::X11, dst_reg, 16);
+                            asm.add_w_reg(A64Reg::X9, A64Reg::X9, A64Reg::X11); // hi sum
+                            asm.lsl_w_imm(A64Reg::X9, A64Reg::X9, 16);
+                            asm.orr_w_reg(dst_reg, A64Reg::X12, A64Reg::X9);
+                        }
+                        _ => {
+                            asm.add_w_reg(dst_reg, rn_reg, dst_reg);
+                        }
                     }
                 }
                 store_guest_reg(asm, dst_reg, *rd);

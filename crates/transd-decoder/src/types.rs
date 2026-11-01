@@ -125,6 +125,65 @@ pub enum ByteRevOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimdParallelOp {
+    // Normal (sets GE[3:0] flags)
+    Sadd8,
+    Sadd16,
+    Sasx,
+    Ssax,
+    Ssub8,
+    Ssub16,
+    Uadd8,
+    Uadd16,
+    Uasx,
+    Usax,
+    Usub8,
+    Usub16,
+    // Saturating
+    Qadd8,
+    Qadd16,
+    Qasx,
+    Qsax,
+    Qsub8,
+    Qsub16,
+    Uqadd8,
+    Uqadd16,
+    Uqasx,
+    Uqsax,
+    Uqsub8,
+    Uqsub16,
+    // Halving (average)
+    Shadd8,
+    Shadd16,
+    Shasx,
+    Shsax,
+    Shsub8,
+    Shsub16,
+    Uhadd8,
+    Uhadd16,
+    Uhasx,
+    Uhsax,
+    Uhsub8,
+    Uhsub16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtendOp {
+    Sxtb,
+    Sxth,
+    Sxtb16,
+    Uxtb,
+    Uxth,
+    Uxtb16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PkhOp {
+    Pkhbt,
+    Pkhtb,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsrValue {
     Reg(Reg),
     Imm(u32),
@@ -282,6 +341,31 @@ pub enum Op {
         op: ByteRevOp,
         rd: Reg,
         rm: Reg,
+    },
+    SimdParallel {
+        op: SimdParallelOp,
+        rd: Reg,
+        rn: Reg,
+        rm: Reg,
+    },
+    SimdSel {
+        rd: Reg,
+        rn: Reg,
+        rm: Reg,
+    },
+    SimdPkh {
+        op: PkhOp,
+        rd: Reg,
+        rn: Reg,
+        rm: Reg,
+        shift: u8,
+    },
+    SimdExtend {
+        op: ExtendOp,
+        rd: Reg,
+        rn: Option<Reg>,
+        rm: Reg,
+        rotation: u8,
     },
     Branch {
         link: bool,

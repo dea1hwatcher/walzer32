@@ -1181,6 +1181,106 @@ impl ArmDecoder {
             return Op::ByteRev { op: ByteRevOp::Revsh, rd, rm };
         }
 
+        // Parallel Addition and Subtraction (SADD8, SSUB8, SADD16, SSUB16, SASX, SSAX, U..., Q..., SH..., UH...)
+        // cond 0110 0 op1:3 Rn Rd 1111 op2:3 1 Rm
+        if (raw & 0x0F80_0F10) == 0x0600_0F10 {
+            let op1 = ((raw >> 20) & 0x7) as u8;
+            let op2 = ((raw >> 5) & 0x7) as u8;
+            let op = match (op1, op2) {
+                // S (Signed)
+                (1, 4) => Some(SimdParallelOp::Sadd8),
+                (1, 7) => Some(SimdParallelOp::Ssub8),
+                (1, 0) => Some(SimdParallelOp::Sadd16),
+                (1, 3) => Some(SimdParallelOp::Ssub16),
+                (1, 1) => Some(SimdParallelOp::Sasx),
+                (1, 2) => Some(SimdParallelOp::Ssax),
+                // Q (Signed Saturating)
+                (2, 4) => Some(SimdParallelOp::Qadd8),
+                (2, 7) => Some(SimdParallelOp::Qsub8),
+                (2, 0) => Some(SimdParallelOp::Qadd16),
+                (2, 3) => Some(SimdParallelOp::Qsub16),
+                (2, 1) => Some(SimdParallelOp::Qasx),
+                (2, 2) => Some(SimdParallelOp::Qsax),
+                // SH (Signed Halving)
+                (3, 4) => Some(SimdParallelOp::Shadd8),
+                (3, 7) => Some(SimdParallelOp::Shsub8),
+                (3, 0) => Some(SimdParallelOp::Shadd16),
+                (3, 3) => Some(SimdParallelOp::Shsub16),
+                (3, 1) => Some(SimdParallelOp::Shasx),
+                (3, 2) => Some(SimdParallelOp::Shsax),
+                // U (Unsigned)
+                (5, 4) => Some(SimdParallelOp::Uadd8),
+                (5, 7) => Some(SimdParallelOp::Usub8),
+                (5, 0) => Some(SimdParallelOp::Uadd16),
+                (5, 3) => Some(SimdParallelOp::Usub16),
+                (5, 1) => Some(SimdParallelOp::Uasx),
+                (5, 2) => Some(SimdParallelOp::Usax),
+                // UQ (Unsigned Saturating)
+                (6, 4) => Some(SimdParallelOp::Uqadd8),
+                (6, 7) => Some(SimdParallelOp::Uqsub8),
+                (6, 0) => Some(SimdParallelOp::Uqadd16),
+                (6, 3) => Some(SimdParallelOp::Uqsub16),
+                (6, 1) => Some(SimdParallelOp::Uqasx),
+                (6, 2) => Some(SimdParallelOp::Uqsax),
+                // UH (Unsigned Halving)
+                (7, 4) => Some(SimdParallelOp::Uhadd8),
+                (7, 7) => Some(SimdParallelOp::Uhsub8),
+                (7, 0) => Some(SimdParallelOp::Uhadd16),
+                (7, 3) => Some(SimdParallelOp::Uhsub16),
+                (7, 1) => Some(SimdParallelOp::Uhasx),
+                (7, 2) => Some(SimdParallelOp::Uhsax),
+                _ => None,
+            };
+            if let Some(op) = op {
+                let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+                let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+                let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+                return Op::SimdParallel { op, rd, rn, rm };
+            }
+        }
+
+        // SEL (Select bytes according to APSR GE flags): cond 0110 1000 Rn Rd 1111 1011 Rm
+        if (raw & 0x0FF0_0FF0) == 0x0680_0FB0 {
+            let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            return Op::SimdSel { rd, rn, rm };
+        }
+
+        // PKHBT and PKHTB (Pack Halfword): cond 0110 1000 Rn Rd imm5 tb 01 Rm
+        if (raw & 0x0FF0_0030) == 0x0680_0010 {
+            let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            let tb = ((raw >> 6) & 1) != 0;
+            let shift = ((raw >> 7) & 0x1F) as u8;
+            let op = if tb { PkhOp::Pkhtb } else { PkhOp::Pkhbt };
+            return Op::SimdPkh { op, rd, rn, rm, shift };
+        }
+
+        // Extend and Extend & Add (SXTB, UXTB, SXTH, UXTH, SXTAB, UXTAB, SXTAH, UXTAH, SXTAB16, UXTAB16)
+        // cond 0110 1xxx Rn Rd rot:2 00 0111 Rm
+        if (raw & 0x0F80_03F0) == 0x0680_0070 {
+            let op_bits = (raw >> 20) & 0x7;
+            let op = match op_bits {
+                0 => Some(ExtendOp::Sxtb16),
+                2 => Some(ExtendOp::Sxtb),
+                3 => Some(ExtendOp::Sxth),
+                4 => Some(ExtendOp::Uxtb16),
+                6 => Some(ExtendOp::Uxtb),
+                7 => Some(ExtendOp::Uxth),
+                _ => None,
+            };
+            if let Some(op) = op {
+                let rn_raw = ((raw >> 16) & 0xF) as u8;
+                let rn = if rn_raw == 15 { None } else { Reg::from_u8(rn_raw) };
+                let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+                let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+                let rotation = (((raw >> 10) & 0x3) as u8) * 8;
+                return Op::SimdExtend { op, rd, rn, rm, rotation };
+            }
+        }
+
         let is_reg_offset = ((raw >> 25) & 1) != 0;
         let p = ((raw >> 24) & 1) != 0;
         let u = ((raw >> 23) & 1) != 0;
@@ -2483,5 +2583,120 @@ mod tests {
         // REVSH r0, r1
         let inst = ArmDecoder::decode(0xE6FF_0FB1);
         assert_eq!(inst.op, Op::ByteRev { op: ByteRevOp::Revsh, rd: Reg::R0, rm: Reg::R1 });
+    }
+
+    #[test]
+    fn test_decode_arm_simd_media_parallel() {
+        // SADD8 r0, r1, r2 -> 0xE611_0F92
+        let inst = ArmDecoder::decode(0xE611_0F92);
+        assert_eq!(
+            inst.op,
+            Op::SimdParallel {
+                op: SimdParallelOp::Sadd8,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                rm: Reg::R2,
+            }
+        );
+
+        // SSUB8 r0, r1, r2 -> 0xE611_0FF2
+        let inst = ArmDecoder::decode(0xE611_0FF2);
+        assert_eq!(
+            inst.op,
+            Op::SimdParallel {
+                op: SimdParallelOp::Ssub8,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                rm: Reg::R2,
+            }
+        );
+
+        // UADD8 r0, r1, r2 -> 0xE651_0F92
+        let inst = ArmDecoder::decode(0xE651_0F92);
+        assert_eq!(
+            inst.op,
+            Op::SimdParallel {
+                op: SimdParallelOp::Uadd8,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                rm: Reg::R2,
+            }
+        );
+
+        // SEL r0, r1, r2 -> 0xE681_0FB2
+        let inst = ArmDecoder::decode(0xE681_0FB2);
+        assert_eq!(
+            inst.op,
+            Op::SimdSel {
+                rd: Reg::R0,
+                rn: Reg::R1,
+                rm: Reg::R2,
+            }
+        );
+
+        // PKHBT r0, r1, r2, LSL #2 -> 0xE681_0112
+        let inst = ArmDecoder::decode(0xE681_0112);
+        assert_eq!(
+            inst.op,
+            Op::SimdPkh {
+                op: PkhOp::Pkhbt,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                rm: Reg::R2,
+                shift: 2,
+            }
+        );
+
+        // PKHTB r0, r1, r2, ASR #2 -> 0xE681_0152
+        let inst = ArmDecoder::decode(0xE681_0152);
+        assert_eq!(
+            inst.op,
+            Op::SimdPkh {
+                op: PkhOp::Pkhtb,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                rm: Reg::R2,
+                shift: 2,
+            }
+        );
+
+        // SXTB r0, r2 -> 0xE6AF_0072 (Rn = 15)
+        let inst = ArmDecoder::decode(0xE6AF_0072);
+        assert_eq!(
+            inst.op,
+            Op::SimdExtend {
+                op: ExtendOp::Sxtb,
+                rd: Reg::R0,
+                rn: None,
+                rm: Reg::R2,
+                rotation: 0,
+            }
+        );
+
+        // SXTAB r0, r1, r2 -> 0xE6A1_0072
+        let inst = ArmDecoder::decode(0xE6A1_0072);
+        assert_eq!(
+            inst.op,
+            Op::SimdExtend {
+                op: ExtendOp::Sxtb,
+                rd: Reg::R0,
+                rn: Some(Reg::R1),
+                rm: Reg::R2,
+                rotation: 0,
+            }
+        );
+
+        // UXTH r0, r2, ROR #8 -> 0xE6FF_0472 (rot: 1 -> 8)
+        let inst = ArmDecoder::decode(0xE6FF_0472);
+        assert_eq!(
+            inst.op,
+            Op::SimdExtend {
+                op: ExtendOp::Uxth,
+                rd: Reg::R0,
+                rn: None,
+                rm: Reg::R2,
+                rotation: 8,
+            }
+        );
     }
 }

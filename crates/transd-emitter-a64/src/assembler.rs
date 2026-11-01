@@ -630,9 +630,34 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// SXTB Wd, Wn (Signed extend byte: SBFM Wd, Wn, #0, #7)
+    pub fn sxtb_w(&mut self, rd: A64Reg, rn: A64Reg) {
+        let inst = 0x1300_1C00 | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
     /// SXTH Wd, Wn (Signed extend halfword: SBFM Wd, Wn, #0, #15)
     pub fn sxth_w(&mut self, rd: A64Reg, rn: A64Reg) {
         let inst = 0x1300_3C00 | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// UXTB Wd, Wn (Unsigned extend byte: UBFM Wd, Wn, #0, #7)
+    pub fn uxtb_w(&mut self, rd: A64Reg, rn: A64Reg) {
+        let inst = 0x5300_1C00 | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// UXTH Wd, Wn (Unsigned extend halfword: UBFM Wd, Wn, #0, #15)
+    pub fn uxth_w(&mut self, rd: A64Reg, rn: A64Reg) {
+        let inst = 0x5300_3C00 | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// ROR Wd, Wn, #shift (Rotate right 32-bit register: EXTR Wd, Wn, Wn, #shift)
+    pub fn ror_w(&mut self, rd: A64Reg, rn: A64Reg, shift: u8) {
+        let imm = (shift & 31) as u32;
+        let inst = 0x1380_0000 | (rn.index() << 16) | (imm << 10) | (rn.index() << 5) | rd.index();
         self.emit(inst);
     }
 
@@ -1798,8 +1823,16 @@ mod tests {
         asm.rev16_w(A64Reg::X0, A64Reg::X1);
         // SXTH W0, W1 -> 0x1300_3C20
         asm.sxth_w(A64Reg::X0, A64Reg::X1);
+        // SXTB W0, W1 -> 0x1300_1C20
+        asm.sxtb_w(A64Reg::X0, A64Reg::X1);
+        // UXTB W0, W1 -> 0x5300_1C20
+        asm.uxtb_w(A64Reg::X0, A64Reg::X1);
+        // UXTH W0, W1 -> 0x5300_3C20
+        asm.uxth_w(A64Reg::X0, A64Reg::X1);
+        // ROR W0, W1, #8 -> 0x1381_2020
+        asm.ror_w(A64Reg::X0, A64Reg::X1, 8);
 
-        assert_eq!(asm.code.len(), 7);
+        assert_eq!(asm.code.len(), 11);
         assert_eq!(asm.code[0], 0x5304_2C20);
         assert_eq!(asm.code[1], 0x1304_2C20);
         assert_eq!(asm.code[2], 0x331C_1C20);
@@ -1807,6 +1840,10 @@ mod tests {
         assert_eq!(asm.code[4], 0x5AC0_0820);
         assert_eq!(asm.code[5], 0x5AC0_0420);
         assert_eq!(asm.code[6], 0x1300_3C20);
+        assert_eq!(asm.code[7], 0x1300_1C20);
+        assert_eq!(asm.code[8], 0x5300_1C20);
+        assert_eq!(asm.code[9], 0x5300_3C20);
+        assert_eq!(asm.code[10], 0x1381_2020);
     }
 
     #[test]
