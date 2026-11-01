@@ -1,3 +1,4 @@
+mod adb;
 mod apk_cmd;
 mod info;
 mod runner;
@@ -30,6 +31,9 @@ COMMANDS:
             --lib <name.so>   Specify which .so inside the APK to execute
             --func <name>     Function/JNI symbol to invoke
             --args <a,b,...>  Comma-separated integer arguments
+
+    devices
+        Inspect connected Android devices via ADB to determine 32-bit vs ARM64-only status
 
     help
         Print this help message
@@ -246,6 +250,9 @@ fn main() {
                     process::exit(1);
                 }
             }
+        }
+        "devices" => {
+            adb::check_adb_devices();
         }
         unknown => {
             eprintln!("Error: unknown command '{}'", unknown);

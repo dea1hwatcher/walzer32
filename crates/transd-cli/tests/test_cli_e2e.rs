@@ -125,3 +125,115 @@ fn test_cli_info_and_run_e2e() {
     // Cleanup
     let _ = std::fs::remove_file(test_so_path);
 }
+
+/// Helper to build a minimal valid ZIP/APK in memory
+fn build_test_apk(so_bytes: &[u8]) -> Vec<u8> {
+    let files = [
+        ("lib/armeabi-v7a/libtest.so", so_bytes),
+        ("AndroidManifest.xml", b"dummy_manifest"),
+    ];
+
+    let mut data = Vec::new();
+    let mut cd_offsets = Vec::new();
+
+    for (name, content) in &files {
+        let lfh_offset = data.len();
+        cd_offsets.push(lfh_offset);
+
+        let mut lfh = vec![0u8; 30];
+        LittleEndian::write_u32(&mut lfh[0..4], 0x04034B50);
+        LittleEndian::write_u16(&mut lfh[4..6], 20);
+        LittleEndian::write_u32(&mut lfh[18..22], content.len() as u32);
+        LittleEndian::write_u32(&mut lfh[22..26], content.len() as u32);
+        LittleEndian::write_u16(&mut lfh[26..28], name.len() as u16);
+
+        data.extend_from_slice(&lfh);
+        data.extend_from_slice(name.as_bytes());
+        data.extend_from_slice(content);
+    }
+
+    let cd_start = data.len();
+    for (i, (name, content)) in files.iter().enumerate() {
+        let mut cdh = vec![0u8; 46];
+        LittleEndian::write_u32(&mut cdh[0..4], 0x02014B50);
+        LittleEndian::write_u16(&mut cdh[4..6], 20);
+        LittleEndian::write_u16(&mut cdh[6..8], 20);
+        LittleEndian::write_u32(&mut cdh[20..24], content.len() as u32);
+        LittleEndian::write_u32(&mut cdh[24..28], content.len() as u32);
+        LittleEndian::write_u16(&mut cdh[28..30], name.len() as u16);
+        LittleEndian::write_u32(&mut cdh[42..46], cd_offsets[i] as u32);
+
+        data.extend_from_slice(&cdh);
+        data.extend_from_slice(name.as_bytes());
+    }
+
+    let cd_size = data.len() - cd_start;
+    let mut eocd = vec![0u8; 22];
+    LittleEndian::write_u32(&mut eocd[0..4], 0x06054B50);
+    LittleEndian::write_u16(&mut eocd[8..10], files.len() as u16);
+    LittleEndian::write_u16(&mut eocd[10..12], files.len() as u16);
+    LittleEndian::write_u32(&mut eocd[12..16], cd_size as u32);
+    LittleEndian::write_u32(&mut eocd[16..20], cd_start as u32);
+    data.extend_from_slice(&eocd);
+
+    data
+}
+
+#[test]
+fn test_cli_apk_and_devices_e2e() {
+    let temp_dir = std::env::temp_dir();
+    let test_so_path = temp_dir.join("libapk_test.so");
+    generate_test_so(&test_so_path);
+    let so_bytes = std::fs::read(&test_so_path).unwrap();
+    let _ = std::fs::remove_file(test_so_path);
+
+    let apk_bytes = build_test_apk(&so_bytes);
+    let test_apk_path = temp_dir.join("test_game.apk");
+    std::fs::write(&test_apk_path, apk_bytes).unwrap();
+
+    let cli_exe = env!("CARGO_BIN_EXE_transd-cli");
+
+    // 1. Inspect APK: transd-cli apk <test_game.apk>
+    let info_output = Command::new(cli_exe)
+        .arg("apk")
+        .arg(&test_apk_path)
+        .output()
+        .expect("Failed to execute transd-cli apk");
+
+    assert!(info_output.status.success());
+    let stdout = String::from_utf8_lossy(&info_output.stdout);
+    assert!(stdout.contains("Transd APK Inspector"));
+    assert!(stdout.contains("32-bit ARM Only: YES (Requires Transd DBT on ARMv9+)"));
+    assert!(stdout.contains("lib/armeabi-v7a/libtest.so"));
+
+    // 2. Execute APK: transd-cli apk <test_game.apk> --run --func add_and_square --args 3,4
+    // (3 + 4)^2 = 7^2 = 49
+    let run_output = Command::new(cli_exe)
+        .arg("apk")
+        .arg(&test_apk_path)
+        .arg("--run")
+        .arg("--func")
+        .arg("add_and_square")
+        .arg("--args")
+        .arg("3,4")
+        .output()
+        .expect("Failed to execute transd-cli apk --run");
+
+    assert_eq!(run_output.status.code(), Some(49));
+    let stdout = String::from_utf8_lossy(&run_output.stdout);
+    assert!(stdout.contains("Extracting & Running 32-bit Native Library: libtest.so"));
+    assert!(stdout.contains("Return value: 49 (0x00000031)"));
+
+    // 3. Test `transd-cli devices`
+    let dev_output = Command::new(cli_exe)
+        .arg("devices")
+        .output()
+        .expect("Failed to execute transd-cli devices");
+
+    assert!(dev_output.status.success());
+    let stdout = String::from_utf8_lossy(&dev_output.stdout);
+    assert!(stdout.contains("Transd Android ADB Device Inspector"));
+
+    // Cleanup
+    let _ = std::fs::remove_file(test_apk_path);
+}
