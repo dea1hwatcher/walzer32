@@ -264,3 +264,70 @@ fn test_cli_apk_and_devices_e2e() {
     // Cleanup
     let _ = std::fs::remove_file(test_apk_path);
 }
+
+#[test]
+fn test_cli_subcommands_run_apk_aot_compile_repackage() {
+    let temp_dir = std::env::temp_dir();
+    let test_so_path = temp_dir.join("libcli_subcmd_test.so");
+    generate_test_so(&test_so_path);
+    let so_bytes = std::fs::read(&test_so_path).unwrap();
+
+    let test_apk_path = temp_dir.join("cli_subcmd_test.apk");
+    let apk_bytes = build_test_apk(&so_bytes);
+    std::fs::write(&test_apk_path, apk_bytes).unwrap();
+
+    let cli_exe = env!("CARGO_BIN_EXE_transd-cli");
+
+    // 1. Test `transd-cli run <apk>` directly (without needing `apk --run`)
+    let run_apk_out = Command::new(cli_exe)
+        .arg("run")
+        .arg(&test_apk_path)
+        .arg("--func")
+        .arg("add_and_square")
+        .arg("--args")
+        .arg("6,7")
+        .output()
+        .expect("Failed to execute transd-cli run <apk>");
+
+    // (6 + 7)^2 = 13^2 = 169
+    assert_eq!(run_apk_out.status.code(), Some(169));
+    let run_stdout = String::from_utf8_lossy(&run_apk_out.stdout);
+    assert!(run_stdout.contains("Extracting & Running 32-bit Native Library: libtest.so"));
+    assert!(run_stdout.contains("Return value: 169 (0x000000a9)"));
+
+    // 2. Test `transd-cli aot-compile <so> -o <cache>`
+    let cache_path = temp_dir.join("libcli_subcmd_test.so.transd_cache");
+    let aot_out = Command::new(cli_exe)
+        .arg("aot-compile")
+        .arg(&test_so_path)
+        .arg("-o")
+        .arg(&cache_path)
+        .output()
+        .expect("Failed to execute transd-cli aot-compile");
+
+    assert!(aot_out.status.success());
+    let aot_stdout = String::from_utf8_lossy(&aot_out.stdout);
+    assert!(aot_stdout.contains("Transd AOT Pre-Compiler"));
+    assert!(cache_path.exists());
+
+    // 3. Test `transd-cli repackage <in.apk> -o <out.apk>`
+    let out_apk_path = temp_dir.join("repackaged_subcmd_out.apk");
+    let repkg_out = Command::new(cli_exe)
+        .arg("repackage")
+        .arg(&test_apk_path)
+        .arg("-o")
+        .arg(&out_apk_path)
+        .output()
+        .expect("Failed to execute transd-cli repackage");
+
+    assert!(repkg_out.status.success());
+    let repkg_stdout = String::from_utf8_lossy(&repkg_out.stdout);
+    assert!(repkg_stdout.contains("Repackaging Successful!"));
+    assert!(out_apk_path.exists());
+
+    // Cleanup
+    let _ = std::fs::remove_file(test_so_path);
+    let _ = std::fs::remove_file(test_apk_path);
+    let _ = std::fs::remove_file(cache_path);
+    let _ = std::fs::remove_file(out_apk_path);
+}

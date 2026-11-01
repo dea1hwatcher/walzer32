@@ -14,9 +14,10 @@ COMMANDS:
     info <file.so>
         Inspect 32-bit ELF headers, segments, dependencies, and exported symbols
 
-    run <file.so> [OPTIONS]
-        Execute a 32-bit ARM shared library in the DBT runtime
+    run <file.so|file.apk> [OPTIONS]
+        Execute a 32-bit ARM shared library or APK package in the DBT runtime
         Options:
+            --lib <name.so>   Specify which .so inside the APK to execute (for APK)
             --func <name>     Exported function name to call (default: JNI_OnLoad)
             --args <a,b,...>  Comma-separated 32-bit integer arguments
             --hud             Display real-time performance telemetry HUD
@@ -32,7 +33,7 @@ COMMANDS:
     devices
         Inspect connected Android devices via ADB to determine 32-bit vs ARM64-only status
 
-    package <file.apk> [OPTIONS]
+    package, repackage <file.apk> [OPTIONS]
         Repackage a 32-bit ARM APK to run on ARM64-only devices
         Options:
             -o, --output <file.apk>   Output repackaged APK path
@@ -58,7 +59,7 @@ COMMANDS:
             -s, --device <id>         Target device serial
             --activity <name>         Activity name to launch (auto-detected for APK)
 
-    aot <file.so> [OPTIONS]
+    aot, aot-compile <file.so> [OPTIONS]
         Ahead-Of-Time (AOT) pre-compile a 32-bit ARM ELF library into a .transd_cache file
         Options:
             -o, --output <file>       Output cache file path
@@ -122,11 +123,12 @@ fn main() {
         "run" => {
             if args.len() < 3 {
                 eprintln!("Error: missing file path for 'run' command");
-                eprintln!("Usage: transd-cli run <file.so> [--func <name>] [--args 1,2,3]");
+                eprintln!("Usage: transd-cli run <file.so|file.apk> [--lib <name.so>] [--func <name>] [--args 1,2,3]");
                 process::exit(1);
             }
             let file_path = &args[2];
 
+            let mut target_lib = None;
             let mut target_func = None;
             let mut parsed_args = Vec::new();
             let mut show_hud = false;
@@ -137,6 +139,15 @@ fn main() {
                     "--hud" => {
                         show_hud = true;
                         idx += 1;
+                    }
+                    "--lib" => {
+                        if idx + 1 < args.len() {
+                            target_lib = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --lib requires an argument");
+                            process::exit(1);
+                        }
                     }
                     "--func" => {
                         if idx + 1 < args.len() {
@@ -182,7 +193,22 @@ fn main() {
 
             match fs::read(file_path) {
                 Ok(data) => {
-                    match runner::execute_so(file_path, &data, target_func, &parsed_args, show_hud) {
+                    let is_apk = file_path.ends_with(".apk")
+                        || (data.len() >= 4 && &data[0..4] == b"PK\x03\x04");
+                    let res = if is_apk {
+                        apk_cmd::handle_apk_command(
+                            file_path,
+                            &data,
+                            true,
+                            target_lib,
+                            target_func,
+                            &parsed_args,
+                            show_hud,
+                        )
+                    } else {
+                        runner::execute_so(file_path, &data, target_func, &parsed_args, show_hud)
+                    };
+                    match res {
                         Ok(code) => {
                             process::exit(code as i32);
                         }
@@ -389,7 +415,7 @@ fn main() {
                 }
             }
         }
-        "package" => {
+        "package" | "repackage" => {
             if args.len() < 3 {
                 eprintln!("Error: missing file path for 'package' command");
                 eprintln!("Usage: transd-cli package <file.apk> [-o output.apk] [--bridge libtransd.so] [--primary-lib name.so] [--align 4096]");
@@ -597,7 +623,7 @@ fn main() {
                 process::exit(1);
             }
         }
-        "aot" => {
+        "aot" | "aot-compile" => {
             if args.len() < 3 {
                 eprintln!("Error: missing file path for 'aot' command");
                 eprintln!("Usage: transd-cli aot <file.so> [-o output.transd_cache] [--max-blocks 10000]");
