@@ -104,7 +104,7 @@ fn test_cli_info_and_run_e2e() {
     assert!(stdout.contains("ARMv7-A (32-bit Little-Endian"));
     assert!(stdout.contains("SONAME: libtest.so"));
 
-    // 2. Test `transd-cli run <file.so> --func add_and_square --args 5,6`
+    // 2. Test `transd-cli run <file.so> --func add_and_square --args 5,6 --hud`
     // (5 + 6)^2 = 11^2 = 121
     let run_output = Command::new(cli_exe)
         .arg("run")
@@ -113,6 +113,7 @@ fn test_cli_info_and_run_e2e() {
         .arg("add_and_square")
         .arg("--args")
         .arg("5,6")
+        .arg("--hud")
         .output()
         .expect("Failed to execute transd-cli run");
 
@@ -121,6 +122,11 @@ fn test_cli_info_and_run_e2e() {
     let stdout = String::from_utf8_lossy(&run_output.stdout);
     assert!(stdout.contains("Return value: 121 (0x00000079)"));
     assert!(stdout.contains("=== Execution Completed ==="));
+    assert!(stdout.contains("TRANSD DBT ENGINE TELEMETRY HUD"));
+    assert!(stdout.contains("FPS:"));
+    assert!(stdout.contains("MIPS:"));
+    assert!(stdout.contains("JIT Cache:"));
+    assert!(stdout.contains("Arena Memory:"));
 
     // 3. Test `transd-cli bench <file.so> --func add_and_square --args 5,6 --iter 25`
     let bench_output = Command::new(cli_exe)

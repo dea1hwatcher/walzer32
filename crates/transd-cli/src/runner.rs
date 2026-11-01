@@ -10,6 +10,7 @@ pub fn execute_so(
     data: &[u8],
     target_func: Option<&str>,
     args: &[u32],
+    show_hud: bool,
 ) -> Result<u32, Box<dyn std::error::Error>> {
     println!("=== Transd Execution Runner: {} ===", path);
 
@@ -98,56 +99,92 @@ pub fn execute_so(
 
     let start_time = std::time::Instant::now();
 
-    let result = if func_name == "JNI_OnLoad" {
-        invoke_jni_onload(&mut engine, &mut bionic, &mut jni, func_addr)?
+    let res = if func_name == "JNI_OnLoad" {
+        invoke_jni_onload(&mut engine, &mut bionic, &mut jni, func_addr)
     } else {
-        invoke_guest_full(&mut engine, &mut bionic, &mut jni, Some(&mut gles), func_addr, args)?
+        invoke_guest_full(&mut engine, &mut bionic, &mut jni, Some(&mut gles), func_addr, args)
     };
 
     let elapsed = start_time.elapsed();
 
-    println!("\n=== Execution Completed ===");
-    println!("Return value: {} (0x{:08x})", result, result);
-    println!("Execution time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
-    println!("Insts executed: {}", engine.total_insts_executed);
-    println!(
-        "JIT Cache:    {} blocks cached (hits: {}, misses: {})",
-        engine.cache.count(),
-        engine.cache.hits,
-        engine.cache.misses
-    );
+    match res {
+        Ok(result) => {
+            println!("\n=== Execution Completed ===");
+            println!("Return value: {} (0x{:08x})", result, result);
+            println!("Execution time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
+            println!("Insts executed: {}", engine.total_insts_executed);
+            println!(
+                "JIT Cache:    {} blocks cached (hits: {}, misses: {})",
+                engine.cache.count(),
+                engine.cache.hits,
+                engine.cache.misses
+            );
 
-    if !gles.draw_calls.is_empty() || gles.swap_count > 0 {
-        println!("\n[Graphics (EGL/GLES) Passthrough Stats]");
-        println!("  Total draw calls: {}", gles.draw_calls.len());
-        println!("  Buffer swaps:     {}", gles.swap_count);
-        println!("  Active program:   {}", gles.active_program);
-        println!("  Viewport:         {:?}", gles.viewport);
-        println!("  Clear color:      {:?}", gles.clear_color);
-    }
+            if !gles.draw_calls.is_empty() || gles.swap_count > 0 {
+                println!("\n[Graphics (EGL/GLES) Passthrough Stats]");
+                println!("  Total draw calls: {}", gles.draw_calls.len());
+                println!("  Buffer swaps:     {}", gles.swap_count);
+                println!("  Active program:   {}", gles.active_program);
+                println!("  Viewport:         {:?}", gles.viewport);
+                println!("  Clear color:      {:?}", gles.clear_color);
+            }
 
-    if !bionic.logs.is_empty() {
-        println!("\n[Captured Android Logs (Logcat)]");
-        for log in &bionic.logs {
-            let prio_char = match log.priority {
-                2 => 'V',
-                3 => 'D',
-                4 => 'I',
-                5 => 'W',
-                6 => 'E',
-                7 => 'F',
-                _ => '?',
-            };
-            println!("  [{}/{}] {}", prio_char, log.tag, log.text);
+            if !bionic.logs.is_empty() {
+                println!("\n[Captured Android Logs (Logcat)]");
+                for log in &bionic.logs {
+                    let prio_char = match log.priority {
+                        2 => 'V',
+                        3 => 'D',
+                        4 => 'I',
+                        5 => 'W',
+                        6 => 'E',
+                        7 => 'F',
+                        _ => '?',
+                    };
+                    println!("  [{}/{}] {}", prio_char, log.tag, log.text);
+                }
+            }
+
+            if !jni.registered_natives.is_empty() {
+                println!("\n[Dynamically Registered JNI Methods]");
+                for m in &jni.registered_natives {
+                    println!("  -> {} {} at {}", m.name, m.signature, m.fn_ptr);
+                }
+            }
+
+            if show_hud {
+                engine
+                    .telemetry
+                    .update_memory_usage(lib.total_size, engine.pool.allocated_bytes());
+                engine
+                    .telemetry
+                    .update_mips(engine.total_insts_executed, elapsed.as_secs_f64());
+                println!("\n{}", engine.render_telemetry_hud());
+            }
+
+            Ok(result)
+        }
+        Err(e) => {
+            eprintln!("\nExecution Trapped with Error: {}", e);
+            let lib_name = lib.soname.as_deref().unwrap_or(path);
+            let mut info =
+                transd_rt::tombstone::LibraryInfo::new(lib_name, lib.load_base, lib.total_size);
+            for (sym, &addr) in &lib.symbols {
+                info.add_symbol(sym, addr);
+            }
+            let tombstone = engine.capture_tombstone(
+                transd_rt::tombstone::TombstoneSignal::Trap {
+                    message: e.to_string(),
+                },
+                &[info],
+                "main",
+                std::process::id(),
+                std::process::id(),
+                Some(&e.to_string()),
+            );
+            println!("\n[Android Tombstone Crash Report]");
+            println!("{}", tombstone.format_tombstone());
+            Err(e.into())
         }
     }
-
-    if !jni.registered_natives.is_empty() {
-        println!("\n[Dynamically Registered JNI Methods]");
-        for m in &jni.registered_natives {
-            println!("  -> {} {} at {}", m.name, m.signature, m.fn_ptr);
-        }
-    }
-
-    Ok(result)
 }

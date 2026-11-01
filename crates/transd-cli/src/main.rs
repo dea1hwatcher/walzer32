@@ -19,6 +19,7 @@ COMMANDS:
         Options:
             --func <name>     Exported function name to call (default: JNI_OnLoad)
             --args <a,b,...>  Comma-separated 32-bit integer arguments
+            --hud             Display real-time performance telemetry HUD
 
     apk <file.apk> [OPTIONS]
         Inspect and execute an Android APK package
@@ -122,10 +123,15 @@ fn main() {
 
             let mut target_func = None;
             let mut parsed_args = Vec::new();
+            let mut show_hud = false;
 
             let mut idx = 3;
             while idx < args.len() {
                 match args[idx].as_str() {
+                    "--hud" => {
+                        show_hud = true;
+                        idx += 1;
+                    }
                     "--func" => {
                         if idx + 1 < args.len() {
                             target_func = Some(args[idx + 1].as_str());
@@ -170,7 +176,7 @@ fn main() {
 
             match fs::read(file_path) {
                 Ok(data) => {
-                    match runner::execute_so(file_path, &data, target_func, &parsed_args) {
+                    match runner::execute_so(file_path, &data, target_func, &parsed_args, show_hud) {
                         Ok(code) => {
                             process::exit(code as i32);
                         }
@@ -198,10 +204,15 @@ fn main() {
             let mut target_lib = None;
             let mut target_func = None;
             let mut parsed_args = Vec::new();
+            let mut show_hud = false;
 
             let mut idx = 3;
             while idx < args.len() {
                 match args[idx].as_str() {
+                    "--hud" => {
+                        show_hud = true;
+                        idx += 1;
+                    }
                     "--run" => {
                         run_app = true;
                         idx += 1;
@@ -265,6 +276,7 @@ fn main() {
                         target_lib,
                         target_func,
                         &parsed_args,
+                        show_hud,
                     ) {
                         Ok(code) => {
                             process::exit(code as i32);

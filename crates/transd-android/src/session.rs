@@ -193,10 +193,38 @@ impl TransdSession {
 
     /// Triggers frame render in guest DBT if a render callback is registered
     pub fn on_draw_frame(&mut self) -> Result<(), SessionError> {
+        self.engine.telemetry.record_frame(16.6);
         if let Some(render_fn) = self.surface.draw_frame_fn {
             let _ = self.call_native(render_fn, &[])?;
         }
         Ok(())
+    }
+
+    /// Returns the ASCII telemetry HUD overlay from the DBT engine
+    pub fn get_telemetry_hud(&self) -> String {
+        self.engine.render_telemetry_hud()
+    }
+
+    /// Returns structured telemetry metrics in JSON format
+    pub fn get_telemetry_json(&self) -> String {
+        self.engine.telemetry.render_json()
+    }
+
+    /// Generates a comprehensive Android Tombstone crash dump from current session state
+    pub fn generate_tombstone(
+        &self,
+        signal: transd_rt::tombstone::TombstoneSignal,
+        abort_message: Option<&str>,
+    ) -> transd_rt::tombstone::TombstoneReport {
+        let mut libs = Vec::new();
+        for (name, lib) in &self.loaded_libraries {
+            let mut info = transd_rt::tombstone::LibraryInfo::new(name, lib.load_base, lib.total_size);
+            for (sym, &addr) in &lib.symbols {
+                info.add_symbol(sym, addr);
+            }
+            libs.push(info);
+        }
+        self.engine.capture_tombstone(signal, &libs, "main", 1000, 1000, abort_message)
     }
 
     /// Forwards touch input event into guest touch queue

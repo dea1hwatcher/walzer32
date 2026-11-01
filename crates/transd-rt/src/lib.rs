@@ -5,7 +5,9 @@ pub mod jit_memory;
 pub mod jit_pool;
 pub mod signals;
 pub mod syscall;
+pub mod telemetry;
 pub mod thread;
+pub mod tombstone;
 pub mod vfs;
 
 pub use cache::{ConcurrentJitCache, JitCache};
@@ -15,5 +17,9 @@ pub use jit_memory::{JitPage, flush_icache, PAGE_SIZE};
 pub use jit_pool::{CommittedBlock, HostCodePtr, JitPool};
 pub use signals::{FaultOrigin, SignalManager};
 pub use syscall::{futex_op, nr, SyscallArgs};
+pub use telemetry::TelemetryManager;
 pub use thread::{DEFAULT_THREAD_STACK_SIZE, MAIN_THREAD_TID, ThreadDescriptor, ThreadManager};
+pub use tombstone::{
+    BacktraceFrame, CodeDumpLine, LibraryInfo, StackDumpLine, TombstoneReport, TombstoneSignal,
+};
 pub use vfs::{read_cstring_from_mem, OpenFile, Stat64, VirtualFileSystem};

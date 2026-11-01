@@ -10,7 +10,7 @@ use transd_core::{GuestAddr, Memory, MemoryError};
 
 /// Generic decoder that inspects CPU state/mode (ARM vs Thumb) and fetches/decodes from memory
 pub fn decode_next(
-    mem: &impl Memory,
+    mem: &(impl Memory + ?Sized),
     addr: GuestAddr,
     is_thumb: bool,
 ) -> Result<(ArmInst, usize), MemoryError> {

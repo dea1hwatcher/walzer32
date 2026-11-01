@@ -62,6 +62,11 @@ impl JitPool {
         }
     }
 
+    /// Total bytes of compiled machine code currently allocated in the pool
+    pub fn allocated_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
     /// Commit `code_bytes` into an executable page and return a descriptor.
     ///
     /// Internally:

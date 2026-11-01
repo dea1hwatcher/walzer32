@@ -359,6 +359,7 @@ pub struct DbtEngine<M: Memory> {
     pub pool: JitPool,
     pub syscall_handler: Box<dyn SyscallHandler>,
     pub total_insts_executed: u64,
+    pub telemetry: crate::telemetry::TelemetryManager,
 }
 
 impl<M: Memory> DbtEngine<M> {
@@ -370,12 +371,40 @@ impl<M: Memory> DbtEngine<M> {
             pool: JitPool::new(),
             syscall_handler: Box::new(DefaultSyscallHandler::default()),
             total_insts_executed: 0,
+            telemetry: crate::telemetry::TelemetryManager::new(),
         }
     }
 
     /// Access the Virtual File System (VFS) of the engine
     pub fn vfs_mut(&mut self) -> Option<&mut crate::vfs::VirtualFileSystem> {
         self.syscall_handler.vfs_mut()
+    }
+
+    /// Captures a structured Android Tombstone crash dump from current CPU and memory state
+    pub fn capture_tombstone(
+        &self,
+        signal: crate::tombstone::TombstoneSignal,
+        libraries: &[crate::tombstone::LibraryInfo],
+        thread_name: &str,
+        pid: u32,
+        tid: u32,
+        abort_msg: Option<&str>,
+    ) -> crate::tombstone::TombstoneReport {
+        crate::tombstone::TombstoneReport::capture(
+            &self.cpu,
+            &self.mem,
+            signal,
+            libraries,
+            thread_name,
+            pid,
+            tid,
+            abort_msg,
+        )
+    }
+
+    /// Renders an on-screen ASCII performance telemetry HUD overlay
+    pub fn render_telemetry_hud(&self) -> String {
+        self.telemetry.render_hud_overlay()
     }
 
     /// Single step execution through DBT pipeline.
@@ -387,14 +416,20 @@ impl<M: Memory> DbtEngine<M> {
 
         // 1. JIT Compilation Check (lift, compile, and commit basic block)
         if self.cache.lookup(pc).is_none() {
+            self.telemetry.record_cache_miss();
+            let start_t = std::time::Instant::now();
             if let Ok(block) = Lifter::lift_block(&self.mem, pc, is_thumb) {
                 let compiled = A64Compiler::compile(&block);
+                let compile_us = start_t.elapsed().as_micros() as u64;
+                self.telemetry.record_compilation(compile_us.max(1));
                 if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
                     self.cache.insert_committed(pc, compiled, committed.code_ptr);
                 } else {
                     self.cache.insert(pc, compiled);
                 }
             }
+        } else {
+            self.telemetry.record_cache_hit();
         }
 
         // 2. Direct AArch64 execution dispatch if running on ARM64 silicon
@@ -448,6 +483,7 @@ impl<M: Memory> DbtEngine<M> {
         // 3. Fallback: Step execution using the verified interpreter engine
         let step_res = Interpreter::step(&mut self.cpu, &mut self.mem)?;
         self.total_insts_executed += 1;
+        self.telemetry.record_instructions(1);
 
         match step_res {
             StepResult::Continue | StepResult::Branch { .. } => Ok(EngineStepResult::Continue),
@@ -524,6 +560,7 @@ impl<M: Memory> DbtEngine<M> {
                                     }
                                     crate::jit_memory::flush_icache(slice.as_mut_ptr(), 4);
                                 }
+                                self.telemetry.record_chained_jump();
                                 return true;
                             }
                         }

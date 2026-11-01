@@ -8,6 +8,7 @@ pub fn handle_apk_command(
     target_lib: Option<&str>,
     target_func: Option<&str>,
     args: &[u32],
+    show_hud: bool,
 ) -> Result<u32, Box<dyn std::error::Error>> {
     println!("=== Transd APK Inspector: {} ===", path);
 
@@ -98,7 +99,7 @@ pub fn handle_apk_command(
         }
 
         // Execute in DBT
-        return runner::execute_so(lib_filename, &so_bytes, target_func, args);
+        return runner::execute_so(lib_filename, &so_bytes, target_func, args, show_hud);
     }
 
     println!("\nTip: Use 'transd-cli apk {} --run' to execute primary native library in DBT.", path);

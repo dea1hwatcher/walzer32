@@ -256,3 +256,94 @@ pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeKeyEvent(
         JNI_ERR_GENERIC
     }
 }
+
+/// JNI Export: Query ASCII Telemetry HUD overlay
+/// Returns bytes written into out_buf (or total required buffer length if out_buf is null)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeGetTelemetryHud(
+    _env: JNIEnv,
+    _clazz: JClass,
+    out_buf: *mut u8,
+    max_len: usize,
+) -> JInt {
+    let guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_ref() {
+        let text = session.get_telemetry_hud();
+        let bytes = text.as_bytes();
+        if out_buf.is_null() || max_len == 0 {
+            return bytes.len() as JInt;
+        }
+        let copy_len = bytes.len().min(max_len);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, copy_len);
+        }
+        copy_len as JInt
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Query JSON Telemetry metrics
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeGetTelemetryJson(
+    _env: JNIEnv,
+    _clazz: JClass,
+    out_buf: *mut u8,
+    max_len: usize,
+) -> JInt {
+    let guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_ref() {
+        let text = session.get_telemetry_json();
+        let bytes = text.as_bytes();
+        if out_buf.is_null() || max_len == 0 {
+            return bytes.len() as JInt;
+        }
+        let copy_len = bytes.len().min(max_len);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, copy_len);
+        }
+        copy_len as JInt
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Captures Android Tombstone crash report
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeGenerateTombstone(
+    _env: JNIEnv,
+    _clazz: JClass,
+    out_buf: *mut u8,
+    max_len: usize,
+) -> JInt {
+    let guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+    if let Some(session) = guard.as_ref() {
+        let tombstone = session.generate_tombstone(
+            transd_rt::tombstone::TombstoneSignal::Trap {
+                message: "Native tombstone requested via JNI".into(),
+            },
+            Some("JNI Diagnostic Dump"),
+        );
+        let text = tombstone.format_tombstone();
+        let bytes = text.as_bytes();
+        if out_buf.is_null() || max_len == 0 {
+            return bytes.len() as JInt;
+        }
+        let copy_len = bytes.len().min(max_len);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, copy_len);
+        }
+        copy_len as JInt
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
