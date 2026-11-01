@@ -1,4 +1,5 @@
 use transd_core::{Cond, Reg};
+use crate::arm::ArmDecoder;
 use crate::types::*;
 
 pub struct ThumbDecoder;
@@ -705,6 +706,23 @@ impl ThumbDecoder {
             );
         }
 
+        // Thumb-2 NEON 3-same and 2-register misc (0xEF.. / 0xFF..)
+        if (hw1 & 0xEF00) == 0xEF00 {
+            let u = ((hw1 >> 12) & 1) as u32;
+            let arm_raw = 0xF200_0000 | (u << 24) | (((hw1 & 0x00FF) as u32) << 16) | (hw2 as u32);
+            if let Some(inst) = ArmDecoder::decode_neon(arm_raw) {
+                return ArmInst::new(Cond::AL, inst.op, raw);
+            }
+        }
+
+        // Thumb-2 NEON Load/Store (VLD1 / VST1: 0xF900.. / 0xF910..)
+        if (hw1 & 0xFF10) == 0xF900 || (hw1 & 0xFF10) == 0xF910 {
+            let arm_raw = 0xF400_0000 | (((hw1 & 0x00FF) as u32) << 16) | (hw2 as u32);
+            if let Some(inst) = ArmDecoder::decode_neon(arm_raw) {
+                return ArmInst::new(Cond::AL, inst.op, raw);
+            }
+        }
+
         ArmInst::new(Cond::AL, Op::Unknown(raw), raw)
     }
 }
@@ -799,6 +817,67 @@ mod tests {
             Op::BranchExchange {
                 link: false,
                 rm: Reg::LR
+            }
+        );
+    }
+
+    #[test]
+    fn test_thumb_neon_decode() {
+        // VADD.F32 Q0, Q0, Q0 -> hi=0xEF00, lo=0x0D40
+        let (inst, size) = ThumbDecoder::decode(0xEF00, Some(0x0D40));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Add,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 0,
+                src1: 0,
+                src2: 0,
+            }
+        );
+
+        // VMUL.F32 Q0, Q0, Q0 -> hi=0xFF00, lo=0x0D50
+        let (inst, size) = ThumbDecoder::decode(0xFF00, Some(0x0D50));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Mul,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 0,
+                src1: 0,
+                src2: 0,
+            }
+        );
+
+        // VABS.F32 Q1, Q2 -> hi=0xFFB9, lo=0x2744
+        let (inst, size) = ThumbDecoder::decode(0xFFB9, Some(0x2744));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Abs,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 2,
+                src1: 4,
+                src2: 4,
+            }
+        );
+
+        // VLD1.8 {d0, d1}, [r0] -> hi=0xF920, lo=0x0A00
+        let (inst, size) = ThumbDecoder::decode(0xF920, Some(0x0A00));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst.op,
+            Op::NeonLoadStore {
+                is_load: true,
+                is_quad: true,
+                reg: 0,
+                rn: Reg::R0,
             }
         );
     }

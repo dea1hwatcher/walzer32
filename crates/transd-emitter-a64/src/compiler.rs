@@ -2,8 +2,8 @@ use transd_core::{
     Cond, GuestAddr, Reg, OFFSET_EXCLUSIVE, OFFSET_PC, OFFSET_TLS, OFFSET_VFP,
 };
 use transd_decoder::{
-    AddrMode, AddrOffset, AluOp, ArmInst, BlockAddrMode, MemSize, MulOp, NeonOp, Op, Operand2,
-    ShiftAmount, ShiftType, VfpOp, VfpReg, VfpSize,
+    AddrMode, AddrOffset, AluOp, ArmInst, BlockAddrMode, MemSize, MulOp, NeonOp, NeonSize, Op,
+    Operand2, ShiftAmount, ShiftType, VfpOp, VfpReg, VfpSize,
 };
 use transd_ir::{BlockExit, IrBlock};
 use crate::assembler::A64Assembler;
@@ -703,26 +703,99 @@ impl A64Compiler {
             }
             Op::NeonAlu {
                 op,
+                size,
+                is_quad,
                 dst,
                 src1,
                 src2,
-                ..
             } => {
                 let src1_off = (OFFSET_VFP + (*src1 as usize) * 8) as u32;
                 let src2_off = (OFFSET_VFP + (*src2 as usize) * 8) as u32;
                 let dst_off = (OFFSET_VFP + (*dst as usize) * 8) as u32;
 
-                asm.ldr_d_imm(0, A64Reg::X0, src1_off);
-                asm.ldr_d_imm(1, A64Reg::X0, src2_off);
-                match op {
-                    NeonOp::Add => asm.neon_add_4s(2, 0, 1),
-                    NeonOp::Sub => asm.neon_sub_4s(2, 0, 1),
-                    NeonOp::Mul => asm.neon_mul_4s(2, 0, 1),
-                    NeonOp::And => asm.neon_and_16b(2, 0, 1),
-                    NeonOp::Orr => asm.neon_orr_16b(2, 0, 1),
-                    NeonOp::Eor => asm.neon_eor_16b(2, 0, 1),
+                // Load operands
+                if *is_quad {
+                    asm.add_x_imm(A64Reg::X9, A64Reg::X0, src1_off as u16);
+                    asm.ldr_q_imm(0, A64Reg::X9, 0);
+                    asm.add_x_imm(A64Reg::X10, A64Reg::X0, src2_off as u16);
+                    asm.ldr_q_imm(1, A64Reg::X10, 0);
+                    if matches!(op, NeonOp::Mla | NeonOp::Mls) {
+                        asm.add_x_imm(A64Reg::X9, A64Reg::X0, dst_off as u16);
+                        asm.ldr_q_imm(2, A64Reg::X9, 0);
+                    }
+                } else {
+                    asm.ldr_d_imm(0, A64Reg::X0, src1_off);
+                    asm.ldr_d_imm(1, A64Reg::X0, src2_off);
+                    if matches!(op, NeonOp::Mla | NeonOp::Mls) {
+                        asm.ldr_d_imm(2, A64Reg::X0, dst_off);
+                    }
                 }
-                asm.str_d_imm(2, A64Reg::X0, dst_off);
+
+                // Perform operation
+                match (op, size) {
+                    // Vector Float 32-bit operations
+                    (NeonOp::Add, NeonSize::F32) => asm.neon_fadd(2, 0, 1, *is_quad),
+                    (NeonOp::Sub, NeonSize::F32) => asm.neon_fsub(2, 0, 1, *is_quad),
+                    (NeonOp::Mul, NeonSize::F32) => asm.neon_fmul(2, 0, 1, *is_quad),
+                    (NeonOp::Mla, NeonSize::F32) => asm.neon_fmla(2, 0, 1, *is_quad),
+                    (NeonOp::Mls, NeonSize::F32) => asm.neon_fmls(2, 0, 1, *is_quad),
+                    (NeonOp::Min, NeonSize::F32) => asm.neon_fmin(2, 0, 1, *is_quad),
+                    (NeonOp::Max, NeonSize::F32) => asm.neon_fmax(2, 0, 1, *is_quad),
+                    (NeonOp::Abs, NeonSize::F32) => asm.neon_fabs(2, 1, *is_quad),
+                    (NeonOp::Neg, NeonSize::F32) => asm.neon_fneg(2, 1, *is_quad),
+
+                    // Vector Bitwise operations
+                    (NeonOp::And, _) => asm.neon_and(2, 0, 1, *is_quad),
+                    (NeonOp::Orr, _) => asm.neon_orr(2, 0, 1, *is_quad),
+                    (NeonOp::Eor, _) => asm.neon_eor(2, 0, 1, *is_quad),
+                    (NeonOp::Bic, _) => asm.neon_bic(2, 0, 1, *is_quad),
+
+                    // Vector Integer operations
+                    (NeonOp::Add, _) => asm.neon_add_int(2, 0, 1, *is_quad),
+                    (NeonOp::Sub, _) => asm.neon_sub_int(2, 0, 1, *is_quad),
+                    (NeonOp::Mul, _) => asm.neon_mul_int(2, 0, 1, *is_quad),
+
+                    // Fallback
+                    _ => asm.neon_and(2, 0, 1, *is_quad),
+                }
+
+                // Store result
+                if *is_quad {
+                    asm.add_x_imm(A64Reg::X9, A64Reg::X0, dst_off as u16);
+                    asm.str_q_imm(2, A64Reg::X9, 0);
+                } else {
+                    asm.str_d_imm(2, A64Reg::X0, dst_off);
+                }
+            }
+            Op::NeonLoadStore {
+                is_load,
+                is_quad,
+                reg,
+                rn,
+            } => {
+                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, rn_reg);
+                let vfp_off = (OFFSET_VFP + (*reg as usize) * 8) as u32;
+
+                if *is_load {
+                    if *is_quad {
+                        asm.ldr_q_imm(0, A64Reg::X10, 0);
+                        asm.add_x_imm(A64Reg::X9, A64Reg::X0, vfp_off as u16);
+                        asm.str_q_imm(0, A64Reg::X9, 0);
+                    } else {
+                        asm.ldr_d_imm(0, A64Reg::X10, 0);
+                        asm.str_d_imm(0, A64Reg::X0, vfp_off);
+                    }
+                } else {
+                    if *is_quad {
+                        asm.add_x_imm(A64Reg::X9, A64Reg::X0, vfp_off as u16);
+                        asm.ldr_q_imm(0, A64Reg::X9, 0);
+                        asm.str_q_imm(0, A64Reg::X10, 0);
+                    } else {
+                        asm.ldr_d_imm(0, A64Reg::X0, vfp_off);
+                        asm.str_d_imm(0, A64Reg::X10, 0);
+                    }
+                }
             }
             _ => {
                 // Branches and exchanges are fully handled in compile_exit; avoid spurious NOPs
@@ -996,5 +1069,64 @@ mod tests {
         let inst_cond = u32::from_le_bytes(code[8..12].try_into().unwrap());
         // 0x54000000 | (5 << 5) | 0 (EQ) -> 0x540000A0
         assert_eq!(inst_cond, 0x5400_00A0);
+    }
+
+    #[test]
+    fn test_compile_neon_quad_and_load_store() {
+        let mut block = IrBlock::new(GuestAddr::new(0x8000), false);
+        // VLD1 Q0, [r0]
+        block.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::NeonLoadStore {
+                is_load: true,
+                is_quad: true,
+                reg: 0,
+                rn: Reg::R0,
+            },
+            0,
+        ));
+        // VMUL.F32 Q2, Q0, Q1
+        block.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::NeonAlu {
+                op: NeonOp::Mul,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 4,
+                src1: 0,
+                src2: 2,
+            },
+            0,
+        ));
+        // VMLA.F32 Q2, Q0, Q1
+        block.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::NeonAlu {
+                op: NeonOp::Mla,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 4,
+                src1: 0,
+                src2: 2,
+            },
+            0,
+        ));
+        // VST1 Q2, [r1]
+        block.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::NeonLoadStore {
+                is_load: false,
+                is_quad: true,
+                reg: 4,
+                rn: Reg::R1,
+            },
+            0,
+        ));
+        block.exit = BlockExit::Direct(GuestAddr::new(0x8010));
+
+        let compiled = A64Compiler::compile(&block);
+        assert_eq!(compiled.inst_count, 4);
+        assert!(!compiled.code_bytes.is_empty());
+        assert_eq!(compiled.patch_sites.len(), 1);
     }
 }

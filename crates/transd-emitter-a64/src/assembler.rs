@@ -767,47 +767,183 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// LDR Qt, [Xn, #offset] (128-bit vector load, offset multiple of 16)
+    pub fn ldr_q_imm(&mut self, rt: u8, rn: A64Reg, offset: u32) {
+        assert!(rt < 32);
+        assert_eq!(offset % 16, 0);
+        let imm12 = offset / 16;
+        assert!(imm12 <= 0xFFF);
+        let inst = 0x3DC0_0000 | (imm12 << 10) | (rn.index() << 5) | (rt as u32);
+        self.emit(inst);
+    }
+
+    /// STR Qt, [Xn, #offset] (128-bit vector store, offset multiple of 16)
+    pub fn str_q_imm(&mut self, rt: u8, rn: A64Reg, offset: u32) {
+        assert!(rt < 32);
+        assert_eq!(offset % 16, 0);
+        let imm12 = offset / 16;
+        assert!(imm12 <= 0xFFF);
+        let inst = 0x3D80_0000 | (imm12 << 10) | (rn.index() << 5) | (rt as u32);
+        self.emit(inst);
+    }
+
     // --- NEON Advanced SIMD Operations ---
 
-    /// ADD Vd.4S, Vn.4S, Vm.4S (Vector 4 x 32-bit integer/float add)
+    /// ADD Vd.4S / Vd.2S, Vn, Vm (Vector 32-bit integer add)
+    pub fn neon_add_int(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0EA0_8400 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SUB Vd.4S / Vd.2S, Vn, Vm (Vector 32-bit integer sub)
+    pub fn neon_sub_int(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2EA0_8400 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// MUL Vd.4S / Vd.2S, Vn, Vm (Vector 32-bit integer mul)
+    pub fn neon_mul_int(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0EA0_9C00 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
     pub fn neon_add_4s(&mut self, rd: u8, rn: u8, rm: u8) {
-        assert!(rd < 32 && rn < 32 && rm < 32);
-        let inst = 0x4E20_8400 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
-        self.emit(inst);
+        self.neon_add_int(rd, rn, rm, true);
     }
 
-    /// SUB Vd.4S, Vn.4S, Vm.4S (Vector 4 x 32-bit sub)
     pub fn neon_sub_4s(&mut self, rd: u8, rn: u8, rm: u8) {
-        assert!(rd < 32 && rn < 32 && rm < 32);
-        let inst = 0x4E60_8400 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
-        self.emit(inst);
+        self.neon_sub_int(rd, rn, rm, true);
     }
 
-    /// MUL Vd.4S, Vn.4S, Vm.4S (Vector 4 x 32-bit multiply)
     pub fn neon_mul_4s(&mut self, rd: u8, rn: u8, rm: u8) {
+        self.neon_mul_int(rd, rn, rm, true);
+    }
+
+    /// AND Vd.16B / Vd.8B
+    pub fn neon_and(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
         assert!(rd < 32 && rn < 32 && rm < 32);
-        let inst = 0x4E20_9C00 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_1C00 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
         self.emit(inst);
     }
 
-    /// AND Vd.16B, Vn.16B, Vm.16B (Vector bitwise AND 128-bit)
+    /// ORR Vd.16B / Vd.8B
+    pub fn neon_orr(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0EA0_1C00 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// EOR Vd.16B / Vd.8B
+    pub fn neon_eor(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2E20_1C00 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// BIC Vd.16B / Vd.8B
+    pub fn neon_bic(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E60_1C00 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
     pub fn neon_and_16b(&mut self, rd: u8, rn: u8, rm: u8) {
-        assert!(rd < 32 && rn < 32 && rm < 32);
-        let inst = 0x4E20_1C00 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
-        self.emit(inst);
+        self.neon_and(rd, rn, rm, true);
     }
 
-    /// ORR Vd.16B, Vn.16B, Vm.16B (Vector bitwise OR 128-bit)
     pub fn neon_orr_16b(&mut self, rd: u8, rn: u8, rm: u8) {
+        self.neon_orr(rd, rn, rm, true);
+    }
+
+    pub fn neon_eor_16b(&mut self, rd: u8, rn: u8, rm: u8) {
+        self.neon_eor(rd, rn, rm, true);
+    }
+
+    pub fn neon_bic_16b(&mut self, rd: u8, rn: u8, rm: u8) {
+        self.neon_bic(rd, rn, rm, true);
+    }
+
+    // --- Vector Single-Precision Float Operations ---
+
+    /// FADD Vd.4S / Vd.2S, Vn, Vm
+    pub fn neon_fadd(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
         assert!(rd < 32 && rn < 32 && rm < 32);
-        let inst = 0x4EA0_1C00 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_D400 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
         self.emit(inst);
     }
 
-    /// EOR Vd.16B, Vn.16B, Vm.16B (Vector bitwise EOR 128-bit)
-    pub fn neon_eor_16b(&mut self, rd: u8, rn: u8, rm: u8) {
+    /// FSUB Vd.4S / Vd.2S, Vn, Vm
+    pub fn neon_fsub(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
         assert!(rd < 32 && rn < 32 && rm < 32);
-        let inst = 0x6E20_1C00 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0EA0_D400 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FMUL Vd.4S / Vd.2S, Vn, Vm
+    pub fn neon_fmul(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2E20_DC00 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FMLA Vd.4S / Vd.2S, Vn, Vm (Vector floating-point multiply-accumulate: Vd += Vn * Vm)
+    pub fn neon_fmla(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_CC00 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FMLS Vd.4S / Vd.2S, Vn, Vm (Vector floating-point multiply-subtract: Vd -= Vn * Vm)
+    pub fn neon_fmls(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0EA0_CC00 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FMAX Vd.4S / Vd.2S, Vn, Vm
+    pub fn neon_fmax(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_F400 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FMIN Vd.4S / Vd.2S, Vn, Vm
+    pub fn neon_fmin(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0EA0_F400 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FABS Vd.4S / Vd.2S, Vn
+    pub fn neon_fabs(&mut self, rd: u8, rn: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0EA0_F800 | q | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FNEG Vd.4S / Vd.2S, Vn
+    pub fn neon_fneg(&mut self, rd: u8, rn: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2EA0_F800 | q | ((rn as u32) << 5) | (rd as u32);
         self.emit(inst);
     }
 
@@ -1041,5 +1177,33 @@ mod tests {
         assert_eq!(asm.code[3] & 0xFFC0_0000, 0x2940_0000); // LDP W
         assert_eq!(asm.code[4], 0xAA09_03E0);               // MOV X0, X9
         assert_eq!(asm.code.len(), 9); // 5 + 4 for 64-bit mov
+    }
+
+    #[test]
+    fn test_asm_neon_vector_fp_and_quad_mem() {
+        let mut asm = A64Assembler::new();
+        asm.neon_fadd(0, 1, 2, true);
+        asm.neon_fsub(0, 1, 2, true);
+        asm.neon_fmul(0, 1, 2, true);
+        asm.neon_fmla(0, 1, 2, true);
+        asm.neon_fmls(0, 1, 2, true);
+        asm.neon_fmax(0, 1, 2, true);
+        asm.neon_fmin(0, 1, 2, true);
+        asm.neon_fabs(0, 1, true);
+        asm.neon_fneg(0, 1, true);
+        asm.ldr_q_imm(1, A64Reg::X0, 160);
+        asm.str_q_imm(1, A64Reg::X0, 160);
+
+        assert_eq!(asm.code[0], 0x4E20_D400 | (2 << 16) | (1 << 5) | 0);
+        assert_eq!(asm.code[1], 0x4EA0_D400 | (2 << 16) | (1 << 5) | 0);
+        assert_eq!(asm.code[2], 0x6E20_DC00 | (2 << 16) | (1 << 5) | 0);
+        assert_eq!(asm.code[3], 0x4E20_CC00 | (2 << 16) | (1 << 5) | 0);
+        assert_eq!(asm.code[4], 0x4EA0_CC00 | (2 << 16) | (1 << 5) | 0);
+        assert_eq!(asm.code[5], 0x4E20_F400 | (2 << 16) | (1 << 5) | 0);
+        assert_eq!(asm.code[6], 0x4EA0_F400 | (2 << 16) | (1 << 5) | 0);
+        assert_eq!(asm.code[7], 0x4EA0_F800 | (1 << 5) | 0);
+        assert_eq!(asm.code[8], 0x6EA0_F800 | (1 << 5) | 0);
+        assert_eq!(asm.code[9], 0x3DC0_0000 | (10 << 10) | (0 << 5) | 1);
+        assert_eq!(asm.code[10], 0x3D80_0000 | (10 << 10) | (0 << 5) | 1);
     }
 }

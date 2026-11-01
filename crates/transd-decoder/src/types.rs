@@ -144,9 +144,16 @@ pub enum NeonOp {
     Add,
     Sub,
     Mul,
+    Mla,
+    Mls,
     And,
     Orr,
     Eor,
+    Bic,
+    Abs,
+    Neg,
+    Min,
+    Max,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

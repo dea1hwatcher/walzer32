@@ -57,6 +57,40 @@ impl ArmDecoder {
             return ArmInst::new(Cond::AL, Op::MemoryBarrier { is_data: false }, raw);
         }
 
+        // NEON Data Processing & Load/Store
+        if let Some(inst) = Self::decode_neon(raw) {
+            return inst;
+        }
+
+        ArmInst::new(Cond::AL, Op::Unknown(raw), raw)
+    }
+
+    /// Decodes ARM NEON (Advanced SIMD) data processing and memory operations
+    pub fn decode_neon(raw: u32) -> Option<ArmInst> {
+        // NEON 2-register misc (VABS.F32, VNEG.F32): 1111 0011 1 D 11 ...
+        if (raw & 0xFFBF_0F80) == 0xF3B9_0700 || (raw & 0xFFBF_0F80) == 0xF3B9_0780 {
+            let d_bit = (raw >> 22) & 1;
+            let m_bit = (raw >> 5) & 1;
+            let q_bit = (raw >> 6) & 1;
+            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let vm = (raw & 0xF) | (m_bit << 4);
+            let is_quad = q_bit != 0;
+            let is_neg = (raw & 0x80) != 0;
+            let op = if is_neg { NeonOp::Neg } else { NeonOp::Abs };
+            return Some(ArmInst::new(
+                Cond::AL,
+                Op::NeonAlu {
+                    op,
+                    size: NeonSize::F32,
+                    is_quad,
+                    dst: vd as u8,
+                    src1: vm as u8,
+                    src2: vm as u8,
+                },
+                raw,
+            ));
+        }
+
         // NEON Data Processing (3-register same: 1111 001x ...)
         if (raw & 0xFE00_0000) == 0xF200_0000 {
             let d_bit = (raw >> 22) & 1;
@@ -81,11 +115,69 @@ impl ArmDecoder {
             let bit24 = (raw >> 24) & 1;
             let bit4 = (raw >> 4) & 1;
 
-            // VADD / VSUB: op_code == 0b1000, bit4 == 0
+            // Vector Float 3-register same: op_code == 0b1101
+            if op_code == 0b1101 {
+                if bit4 == 0 {
+                    // VADD.F32 (size_bits == 0b00) / VSUB.F32 (size_bits == 0b10)
+                    let op = if (raw & (1 << 21)) != 0 { NeonOp::Sub } else { NeonOp::Add };
+                    return Some(ArmInst::new(
+                        Cond::AL,
+                        Op::NeonAlu {
+                            op,
+                            size: NeonSize::F32,
+                            is_quad,
+                            dst: vd as u8,
+                            src1: vn as u8,
+                            src2: vm as u8,
+                        },
+                        raw,
+                    ));
+                } else {
+                    // VMLA.F32 (bit24 == 0, bit21 == 0), VMLS.F32 (bit24 == 0, bit21 == 1), VMUL.F32 (bit24 == 1, bit21 == 0)
+                    let op = if bit24 != 0 {
+                        NeonOp::Mul
+                    } else if (raw & (1 << 21)) != 0 {
+                        NeonOp::Mls
+                    } else {
+                        NeonOp::Mla
+                    };
+                    return Some(ArmInst::new(
+                        Cond::AL,
+                        Op::NeonAlu {
+                            op,
+                            size: NeonSize::F32,
+                            is_quad,
+                            dst: vd as u8,
+                            src1: vn as u8,
+                            src2: vm as u8,
+                        },
+                        raw,
+                    ));
+                }
+            }
+
+            // Vector Float Min/Max: op_code == 0b1111, bit4 == 0
+            if op_code == 0b1111 && bit4 == 0 {
+                let op = if (raw & (1 << 21)) != 0 { NeonOp::Min } else { NeonOp::Max };
+                return Some(ArmInst::new(
+                    Cond::AL,
+                    Op::NeonAlu {
+                        op,
+                        size: NeonSize::F32,
+                        is_quad,
+                        dst: vd as u8,
+                        src1: vn as u8,
+                        src2: vm as u8,
+                    },
+                    raw,
+                ));
+            }
+
+            // Integer VADD / VSUB: op_code == 0b1000, bit4 == 0
             if op_code == 0b1000 && bit4 == 0 {
                 let is_sub = (raw & (1 << 9)) != 0;
                 let op = if is_sub { NeonOp::Sub } else { NeonOp::Add };
-                return ArmInst::new(
+                return Some(ArmInst::new(
                     Cond::AL,
                     Op::NeonAlu {
                         op,
@@ -96,12 +188,12 @@ impl ArmDecoder {
                         src2: vm as u8,
                     },
                     raw,
-                );
+                ));
             }
 
-            // VMUL: op_code == 0b1001, bit4 == 1
+            // Integer VMUL: op_code == 0b1001, bit4 == 1
             if op_code == 0b1001 && bit4 == 1 {
-                return ArmInst::new(
+                return Some(ArmInst::new(
                     Cond::AL,
                     Op::NeonAlu {
                         op: NeonOp::Mul,
@@ -112,18 +204,19 @@ impl ArmDecoder {
                         src2: vm as u8,
                     },
                     raw,
-                );
+                ));
             }
 
-            // VAND / VORR / VEOR
+            // VAND / VORR / VEOR / VBIC: op_code == 0b0001 && bit4 == 1
             if op_code == 0b0001 && bit4 == 1 {
                 let op = match (bit24, size_bits) {
                     (0, 0b00) => NeonOp::And,
+                    (0, 0b01) => NeonOp::Bic,
                     (0, 0b10) => NeonOp::Orr,
                     (1, _) => NeonOp::Eor,
                     _ => NeonOp::Orr,
                 };
-                return ArmInst::new(
+                return Some(ArmInst::new(
                     Cond::AL,
                     Op::NeonAlu {
                         op,
@@ -134,7 +227,7 @@ impl ArmDecoder {
                         src2: vm as u8,
                     },
                     raw,
-                );
+                ));
             }
         }
 
@@ -144,19 +237,20 @@ impl ArmDecoder {
             let d_bit = (raw >> 22) & 1;
             let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
             let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
-            return ArmInst::new(
+            let is_quad = ((raw >> 8) & 0xF) == 0xA;
+            return Some(ArmInst::new(
                 Cond::AL,
                 Op::NeonLoadStore {
                     is_load,
-                    is_quad: false,
+                    is_quad,
                     reg: vd as u8,
                     rn,
                 },
                 raw,
-            );
+            ));
         }
 
-        ArmInst::new(Cond::AL, Op::Unknown(raw), raw)
+        None
     }
 
     fn decode_conditional(raw: u32) -> Op {
@@ -863,6 +957,173 @@ mod tests {
                 rn: Reg::R0,
                 op2: Operand2::Imm(240),
                 set_flags: false
+            }
+        );
+    }
+
+    #[test]
+    fn test_arm_neon_vector_decode() {
+        // VADD.F32 Q0, Q0, Q0
+        let inst = ArmDecoder::decode(0xF200_0D40);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Add,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 0,
+                src1: 0,
+                src2: 0,
+            }
+        );
+
+        // VSUB.F32 Q0, Q0, Q0
+        let inst = ArmDecoder::decode(0xF220_0D40);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Sub,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 0,
+                src1: 0,
+                src2: 0,
+            }
+        );
+
+        // VMUL.F32 Q0, Q0, Q0
+        let inst = ArmDecoder::decode(0xF300_0D50);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Mul,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 0,
+                src1: 0,
+                src2: 0,
+            }
+        );
+
+        // VMLA.F32 Q0, Q0, Q0
+        let inst = ArmDecoder::decode(0xF200_0D50);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Mla,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 0,
+                src1: 0,
+                src2: 0,
+            }
+        );
+
+        // VMLS.F32 Q0, Q0, Q0
+        let inst = ArmDecoder::decode(0xF220_0D50);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Mls,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 0,
+                src1: 0,
+                src2: 0,
+            }
+        );
+
+        // VMAX.F32 Q0, Q0, Q0
+        let inst = ArmDecoder::decode(0xF200_0F40);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Max,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 0,
+                src1: 0,
+                src2: 0,
+            }
+        );
+
+        // VMIN.F32 Q0, Q0, Q0
+        let inst = ArmDecoder::decode(0xF220_0F40);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Min,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 0,
+                src1: 0,
+                src2: 0,
+            }
+        );
+
+        // VABS.F32 Q1, Q2
+        let inst = ArmDecoder::decode(0xF3B9_2744);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Abs,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 2,
+                src1: 4,
+                src2: 4,
+            }
+        );
+
+        // VNEG.F32 Q3, Q4
+        let inst = ArmDecoder::decode(0xF3B9_67C8);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Neg,
+                size: NeonSize::F32,
+                is_quad: true,
+                dst: 6,
+                src1: 8,
+                src2: 8,
+            }
+        );
+
+        // VBIC Q0, Q0, Q0
+        let inst = ArmDecoder::decode(0xF210_0150);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Bic,
+                size: NeonSize::I16,
+                is_quad: true,
+                dst: 0,
+                src1: 0,
+                src2: 0,
+            }
+        );
+
+        // VLD1.8 {d0, d1}, [r0] (Quadword 128-bit)
+        let inst = ArmDecoder::decode(0xF420_0A00);
+        assert_eq!(
+            inst.op,
+            Op::NeonLoadStore {
+                is_load: true,
+                is_quad: true,
+                reg: 0,
+                rn: Reg::R0,
+            }
+        );
+
+        // VST1.8 {d0, d1}, [r0] (Quadword 128-bit)
+        let inst = ArmDecoder::decode(0xF400_0A00);
+        assert_eq!(
+            inst.op,
+            Op::NeonLoadStore {
+                is_load: false,
+                is_quad: true,
+                reg: 0,
+                rn: Reg::R0,
             }
         );
     }

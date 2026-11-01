@@ -647,10 +647,93 @@ impl Interpreter {
                     if d_idx < 32 && s1_idx < 32 && s2_idx < 32 {
                         let a = cpu.vfp[s1_idx];
                         let b = cpu.vfp[s2_idx];
+                        let acc = cpu.vfp[d_idx];
                         let res = match (op, size) {
                             (NeonOp::And, _) => a & b,
                             (NeonOp::Orr, _) => a | b,
                             (NeonOp::Eor, _) => a ^ b,
+                            (NeonOp::Bic, _) => a & !b,
+                            (NeonOp::Add, NeonSize::F32) => {
+                                let a0 = f32::from_bits((a & 0xFFFF_FFFF) as u32);
+                                let a1 = f32::from_bits((a >> 32) as u32);
+                                let b0 = f32::from_bits((b & 0xFFFF_FFFF) as u32);
+                                let b1 = f32::from_bits((b >> 32) as u32);
+                                let r0 = (a0 + b0).to_bits() as u64;
+                                let r1 = ((a1 + b1).to_bits() as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Sub, NeonSize::F32) => {
+                                let a0 = f32::from_bits((a & 0xFFFF_FFFF) as u32);
+                                let a1 = f32::from_bits((a >> 32) as u32);
+                                let b0 = f32::from_bits((b & 0xFFFF_FFFF) as u32);
+                                let b1 = f32::from_bits((b >> 32) as u32);
+                                let r0 = (a0 - b0).to_bits() as u64;
+                                let r1 = ((a1 - b1).to_bits() as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Mul, NeonSize::F32) => {
+                                let a0 = f32::from_bits((a & 0xFFFF_FFFF) as u32);
+                                let a1 = f32::from_bits((a >> 32) as u32);
+                                let b0 = f32::from_bits((b & 0xFFFF_FFFF) as u32);
+                                let b1 = f32::from_bits((b >> 32) as u32);
+                                let r0 = (a0 * b0).to_bits() as u64;
+                                let r1 = ((a1 * b1).to_bits() as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Mla, NeonSize::F32) => {
+                                let a0 = f32::from_bits((a & 0xFFFF_FFFF) as u32);
+                                let a1 = f32::from_bits((a >> 32) as u32);
+                                let b0 = f32::from_bits((b & 0xFFFF_FFFF) as u32);
+                                let b1 = f32::from_bits((b >> 32) as u32);
+                                let acc0 = f32::from_bits((acc & 0xFFFF_FFFF) as u32);
+                                let acc1 = f32::from_bits((acc >> 32) as u32);
+                                let r0 = (acc0 + (a0 * b0)).to_bits() as u64;
+                                let r1 = ((acc1 + (a1 * b1)).to_bits() as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Mls, NeonSize::F32) => {
+                                let a0 = f32::from_bits((a & 0xFFFF_FFFF) as u32);
+                                let a1 = f32::from_bits((a >> 32) as u32);
+                                let b0 = f32::from_bits((b & 0xFFFF_FFFF) as u32);
+                                let b1 = f32::from_bits((b >> 32) as u32);
+                                let acc0 = f32::from_bits((acc & 0xFFFF_FFFF) as u32);
+                                let acc1 = f32::from_bits((acc >> 32) as u32);
+                                let r0 = (acc0 - (a0 * b0)).to_bits() as u64;
+                                let r1 = ((acc1 - (a1 * b1)).to_bits() as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Min, NeonSize::F32) => {
+                                let a0 = f32::from_bits((a & 0xFFFF_FFFF) as u32);
+                                let a1 = f32::from_bits((a >> 32) as u32);
+                                let b0 = f32::from_bits((b & 0xFFFF_FFFF) as u32);
+                                let b1 = f32::from_bits((b >> 32) as u32);
+                                let r0 = a0.min(b0).to_bits() as u64;
+                                let r1 = (a1.min(b1).to_bits() as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Max, NeonSize::F32) => {
+                                let a0 = f32::from_bits((a & 0xFFFF_FFFF) as u32);
+                                let a1 = f32::from_bits((a >> 32) as u32);
+                                let b0 = f32::from_bits((b & 0xFFFF_FFFF) as u32);
+                                let b1 = f32::from_bits((b >> 32) as u32);
+                                let r0 = a0.max(b0).to_bits() as u64;
+                                let r1 = (a1.max(b1).to_bits() as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Abs, NeonSize::F32) => {
+                                let b0 = f32::from_bits((b & 0xFFFF_FFFF) as u32);
+                                let b1 = f32::from_bits((b >> 32) as u32);
+                                let r0 = b0.abs().to_bits() as u64;
+                                let r1 = (b1.abs().to_bits() as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Neg, NeonSize::F32) => {
+                                let b0 = f32::from_bits((b & 0xFFFF_FFFF) as u32);
+                                let b1 = f32::from_bits((b >> 32) as u32);
+                                let r0 = (-b0).to_bits() as u64;
+                                let r1 = ((-b1).to_bits() as u64) << 32;
+                                r0 | r1
+                            }
                             (NeonOp::Add, NeonSize::I32) => {
                                 let a0 = (a & 0xFFFF_FFFF) as u32;
                                 let a1 = (a >> 32) as u32;
@@ -678,6 +761,36 @@ impl Interpreter {
                                 let r1 = (a1.wrapping_mul(b1) as u64) << 32;
                                 r0 | r1
                             }
+                            (NeonOp::Add, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak = ((a >> (k * 16)) & 0xFFFF) as u16;
+                                    let bk = ((b >> (k * 16)) & 0xFFFF) as u16;
+                                    let rk = (ak.wrapping_add(bk) as u64) << (k * 16);
+                                    r |= rk;
+                                }
+                                r
+                            }
+                            (NeonOp::Sub, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak = ((a >> (k * 16)) & 0xFFFF) as u16;
+                                    let bk = ((b >> (k * 16)) & 0xFFFF) as u16;
+                                    let rk = (ak.wrapping_sub(bk) as u64) << (k * 16);
+                                    r |= rk;
+                                }
+                                r
+                            }
+                            (NeonOp::Mul, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak = ((a >> (k * 16)) & 0xFFFF) as u16;
+                                    let bk = ((b >> (k * 16)) & 0xFFFF) as u16;
+                                    let rk = (ak.wrapping_mul(bk) as u64) << (k * 16);
+                                    r |= rk;
+                                }
+                                r
+                            }
                             (NeonOp::Add, NeonSize::I8) => {
                                 let mut r = 0u64;
                                 for byte_idx in 0..8 {
@@ -694,6 +807,16 @@ impl Interpreter {
                                     let ab = ((a >> (byte_idx * 8)) & 0xFF) as u8;
                                     let bb = ((b >> (byte_idx * 8)) & 0xFF) as u8;
                                     let rb = (ab.wrapping_sub(bb) as u64) << (byte_idx * 8);
+                                    r |= rb;
+                                }
+                                r
+                            }
+                            (NeonOp::Mul, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for byte_idx in 0..8 {
+                                    let ab = ((a >> (byte_idx * 8)) & 0xFF) as u8;
+                                    let bb = ((b >> (byte_idx * 8)) & 0xFF) as u8;
+                                    let rb = (ab.wrapping_mul(bb) as u64) << (byte_idx * 8);
                                     r |= rb;
                                 }
                                 r
@@ -1114,5 +1237,56 @@ mod tests {
         Interpreter::step(&mut cpu, &mut mem).unwrap();
         assert_eq!(mem.read_u32(GuestAddr::new(0x1600)).unwrap(), 400);
         assert_eq!(mem.read_u32(GuestAddr::new(0x1604)).unwrap(), 600);
+    }
+
+    #[test]
+    fn test_interp_neon_f32x4_vector_pipeline() {
+        let mut cpu = CpuState::new();
+        let mut mem = FlatMemory::new(GuestAddr::new(0x1000), 0x2000);
+
+        // Input vector in memory at 0x1500: [1.0, 2.0, 3.0, 4.0]
+        let input_a = [1.0f32, 2.0f32, 3.0f32, 4.0f32];
+        for (i, val) in input_a.iter().enumerate() {
+            mem.write_u32(GuestAddr::new(0x1500 + (i as u32) * 4), val.to_bits()).unwrap();
+        }
+
+        cpu.set_reg(Reg::R0, 0x1500); // source pointer
+        cpu.set_reg(Reg::R1, 0x1600); // destination pointer
+
+        // Q1 (d2, d3) preset with [10.0, 20.0, 30.0, 40.0]
+        cpu.set_q_reg_f32x4(1, [10.0, 20.0, 30.0, 40.0]);
+
+        // Instructions:
+        // 0x1000: VLD1.8 {d0, d1}, [r0] (Quadword 128-bit load -> Q0) -> 0xF4200A00
+        // 0x1004: VMUL.F32 Q2, Q0, Q1 (0xF3004D52) -> Q2 = [10.0, 40.0, 90.0, 160.0]
+        // 0x1008: VMLA.F32 Q2, Q0, Q1 (0xF2004D52) -> Q2 += [10.0, 40.0, 90.0, 160.0] => [20.0, 80.0, 180.0, 320.0]
+        // 0x100C: VST1.8 {d4, d5}, [r1] (Quadword 128-bit store from Q2 -> d4, d5) -> 0xF4014A00
+        mem.write_u32(GuestAddr::new(0x1000), 0xF420_0A00).unwrap();
+        mem.write_u32(GuestAddr::new(0x1004), 0xF300_4D52).unwrap();
+        mem.write_u32(GuestAddr::new(0x1008), 0xF200_4D52).unwrap();
+        mem.write_u32(GuestAddr::new(0x100C), 0xF401_4A00).unwrap();
+
+        cpu.set_pc(GuestAddr::new(0x1000));
+
+        // 1. VLD1 Q0
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.q_reg_f32x4(0), [1.0, 2.0, 3.0, 4.0]);
+
+        // 2. VMUL.F32 Q2 = Q0 * Q1
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.q_reg_f32x4(2), [10.0, 40.0, 90.0, 160.0]);
+
+        // 3. VMLA.F32 Q2 += Q0 * Q1
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.q_reg_f32x4(2), [20.0, 80.0, 180.0, 320.0]);
+
+        // 4. VST1 Q2
+        Interpreter::step(&mut cpu, &mut mem).unwrap();
+        let mut out = [0.0f32; 4];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let bits = mem.read_u32(GuestAddr::new(0x1600 + (i as u32) * 4)).unwrap();
+            *slot = f32::from_bits(bits);
+        }
+        assert_eq!(out, [20.0, 80.0, 180.0, 320.0]);
     }
 }

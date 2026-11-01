@@ -145,6 +145,86 @@ impl CpuState {
         self.vfp[idx as usize] = val.to_bits();
     }
 
+    /// Reads 128-bit quadword register Q0 - Q15 (composed of d[2*idx], d[2*idx+1])
+    pub fn q_reg(&self, idx: u8) -> [u64; 2] {
+        assert!(idx < 16);
+        let base = (idx * 2) as usize;
+        [self.vfp[base], self.vfp[base + 1]]
+    }
+
+    /// Writes 128-bit quadword register Q0 - Q15
+    pub fn set_q_reg(&mut self, idx: u8, val: [u64; 2]) {
+        assert!(idx < 16);
+        let base = (idx * 2) as usize;
+        self.vfp[base] = val[0];
+        self.vfp[base + 1] = val[1];
+    }
+
+    /// Reads Q0 - Q15 as four 32-bit floats
+    pub fn q_reg_f32x4(&self, idx: u8) -> [f32; 4] {
+        assert!(idx < 16);
+        let base = (idx * 2) as usize;
+        let d0 = self.vfp[base];
+        let d1 = self.vfp[base + 1];
+        [
+            f32::from_bits(d0 as u32),
+            f32::from_bits((d0 >> 32) as u32),
+            f32::from_bits(d1 as u32),
+            f32::from_bits((d1 >> 32) as u32),
+        ]
+    }
+
+    /// Writes Q0 - Q15 from four 32-bit floats
+    pub fn set_q_reg_f32x4(&mut self, idx: u8, val: [f32; 4]) {
+        assert!(idx < 16);
+        let base = (idx * 2) as usize;
+        let d0 = (val[0].to_bits() as u64) | ((val[1].to_bits() as u64) << 32);
+        let d1 = (val[2].to_bits() as u64) | ((val[3].to_bits() as u64) << 32);
+        self.vfp[base] = d0;
+        self.vfp[base + 1] = d1;
+    }
+
+    /// Reads Q0 - Q15 as four 32-bit integers
+    pub fn q_reg_u32x4(&self, idx: u8) -> [u32; 4] {
+        assert!(idx < 16);
+        let base = (idx * 2) as usize;
+        let d0 = self.vfp[base];
+        let d1 = self.vfp[base + 1];
+        [
+            d0 as u32,
+            (d0 >> 32) as u32,
+            d1 as u32,
+            (d1 >> 32) as u32,
+        ]
+    }
+
+    /// Writes Q0 - Q15 from four 32-bit integers
+    pub fn set_q_reg_u32x4(&mut self, idx: u8, val: [u32; 4]) {
+        assert!(idx < 16);
+        let base = (idx * 2) as usize;
+        let d0 = (val[0] as u64) | ((val[1] as u64) << 32);
+        let d1 = (val[2] as u64) | ((val[3] as u64) << 32);
+        self.vfp[base] = d0;
+        self.vfp[base + 1] = d1;
+    }
+
+    /// Reads D0 - D31 as two 32-bit floats
+    pub fn d_reg_f32x2(&self, idx: u8) -> [f32; 2] {
+        assert!(idx < 32);
+        let d = self.vfp[idx as usize];
+        [
+            f32::from_bits(d as u32),
+            f32::from_bits((d >> 32) as u32),
+        ]
+    }
+
+    /// Writes D0 - D31 from two 32-bit floats
+    pub fn set_d_reg_f32x2(&mut self, idx: u8, val: [f32; 2]) {
+        assert!(idx < 32);
+        let d = (val[0].to_bits() as u64) | ((val[1].to_bits() as u64) << 32);
+        self.vfp[idx as usize] = d;
+    }
+
     // --- Flag helpers ---
 
     /// Sets N and Z flags based on 32-bit result
