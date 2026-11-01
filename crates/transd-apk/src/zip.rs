@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use byteorder::{ByteOrder, LittleEndian};
 use thiserror::Error;
 
@@ -14,6 +16,38 @@ pub enum ZipError {
     UnsupportedCompression(u16),
     #[error("Decompression failed: {0}")]
     DecompressError(String),
+    #[error("I/O Error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Precomputed CRC32 IEEE 802.3 lookup table
+const CRC32_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut j = 0;
+        while j < 8 {
+            if c & 1 != 0 {
+                c = 0xEDB8_8320 ^ (c >> 1);
+            } else {
+                c >>= 1;
+            }
+            j += 1;
+        }
+        table[i] = c;
+        i += 1;
+    }
+    table
+};
+
+/// Computes standard IEEE 802.3 CRC32 checksum for a slice of bytes
+pub fn calculate_crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc = CRC32_TABLE[((crc ^ (b as u32)) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    !crc
 }
 
 /// Metadata and location for a file stored inside a ZIP archive
@@ -41,6 +75,33 @@ impl<'a> ZipArchive<'a> {
 
         archive.parse_central_directory()?;
         Ok(archive)
+    }
+
+    /// Returns reference to all entry descriptors
+    pub fn entries(&self) -> &HashMap<String, ZipEntry> {
+        &self.entries
+    }
+
+    /// Returns sorted list of all file paths inside the archive
+    pub fn file_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.entries.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Checks if a file exists in the archive
+    pub fn contains_file(&self, name: &str) -> bool {
+        self.entries.contains_key(name)
+    }
+
+    /// Reads and extracts all files from the archive
+    pub fn read_all_files(&self) -> Result<Vec<(String, Vec<u8>)>, ZipError> {
+        let mut files = Vec::new();
+        for name in self.file_names() {
+            let data = self.read_file(&name)?;
+            files.push((name, data));
+        }
+        Ok(files)
     }
 
     fn parse_central_directory(&mut self) -> Result<(), ZipError> {
@@ -295,5 +356,191 @@ impl<'a> ZipArchive<'a> {
         }
 
         Ok(output)
+    }
+}
+
+/// A file descriptor to be stored in a new ZIP archive
+#[derive(Debug, Clone)]
+pub struct ZipFileEntry {
+    pub name: String,
+    pub data: Vec<u8>,
+    pub compression_method: u16,
+    pub alignment: usize,
+}
+
+/// In-memory builder for creating valid Android APK and ZIP archives with data alignment
+#[derive(Debug, Clone)]
+pub struct ZipBuilder {
+    entries: Vec<ZipFileEntry>,
+    default_so_alignment: usize,
+}
+
+impl Default for ZipBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ZipBuilder {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            default_so_alignment: 4096, // 4KB alignment for Android 64-bit ELF .so mmap
+        }
+    }
+
+    /// Sets default alignment for .so shared libraries (e.g. 4096 or 16384)
+    pub fn set_default_so_alignment(&mut self, align: usize) {
+        self.default_so_alignment = align;
+    }
+
+    /// Adds a file with automatic alignment (4KB for .so files, 0 for others)
+    pub fn add_file(&mut self, name: &str, data: &[u8]) {
+        let alignment = if name.ends_with(".so") {
+            self.default_so_alignment
+        } else {
+            0
+        };
+        self.add_file_aligned(name, data, alignment);
+    }
+
+    /// Adds a file with explicit byte alignment for its uncompressed data payload
+    pub fn add_file_aligned(&mut self, name: &str, data: &[u8], alignment: usize) {
+        self.add_file_with_method(name, data, 0, alignment);
+    }
+
+    /// Adds a file with explicit compression method (0 = Stored, 8 = Deflated) and alignment
+    pub fn add_file_with_method(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        method: u16,
+        alignment: usize,
+    ) {
+        self.entries.push(ZipFileEntry {
+            name: name.to_string(),
+            data: data.to_vec(),
+            compression_method: method,
+            alignment,
+        });
+    }
+
+    /// Number of entries currently queued
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns true if no entries have been added
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Builds the complete ZIP archive bytes in memory
+    pub fn build(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+        let mut cd_entries = Vec::new();
+
+        // 1. Write Local File Headers + Payload
+        for entry in &self.entries {
+            let lfh_offset = data.len();
+
+            let extra = if entry.alignment > 1 {
+                let unaligned_offset = lfh_offset + 30 + entry.name.len();
+                let rem = unaligned_offset % entry.alignment;
+                if rem != 0 {
+                    let mut padding = entry.alignment - rem;
+                    if padding < 4 {
+                        padding += entry.alignment;
+                    }
+                    let mut ex = vec![0u8; padding];
+                    LittleEndian::write_u16(&mut ex[0..2], 0xD935); // Android zipalign extra field tag
+                    LittleEndian::write_u16(&mut ex[2..4], (padding - 4) as u16);
+                    ex
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            let crc = calculate_crc32(&entry.data);
+            let comp_size = entry.data.len() as u32;
+            let uncomp_size = entry.data.len() as u32;
+
+            let mut lfh = vec![0u8; 30];
+            LittleEndian::write_u32(&mut lfh[0..4], 0x04034B50); // Signature
+            LittleEndian::write_u16(&mut lfh[4..6], 20);         // Version needed
+            LittleEndian::write_u16(&mut lfh[6..8], 0);          // General purpose flags
+            LittleEndian::write_u16(&mut lfh[8..10], entry.compression_method);
+            LittleEndian::write_u16(&mut lfh[10..12], 0);        // Mod time
+            LittleEndian::write_u16(&mut lfh[12..14], 0);        // Mod date
+            LittleEndian::write_u32(&mut lfh[14..18], crc);
+            LittleEndian::write_u32(&mut lfh[18..22], comp_size);
+            LittleEndian::write_u32(&mut lfh[22..26], uncomp_size);
+            LittleEndian::write_u16(&mut lfh[26..28], entry.name.len() as u16);
+            LittleEndian::write_u16(&mut lfh[28..30], extra.len() as u16);
+
+            data.extend_from_slice(&lfh);
+            data.extend_from_slice(entry.name.as_bytes());
+            data.extend_from_slice(&extra);
+            data.extend_from_slice(&entry.data);
+
+            cd_entries.push((
+                entry.name.clone(),
+                entry.compression_method,
+                crc,
+                comp_size,
+                uncomp_size,
+                lfh_offset,
+            ));
+        }
+
+        // 2. Write Central Directory
+        let cd_start = data.len();
+        for (name, method, crc, comp_size, uncomp_size, lfh_offset) in &cd_entries {
+            let mut cdh = vec![0u8; 46];
+            LittleEndian::write_u32(&mut cdh[0..4], 0x02014B50);
+            LittleEndian::write_u16(&mut cdh[4..6], 20); // Version made by
+            LittleEndian::write_u16(&mut cdh[6..8], 20); // Version needed
+            LittleEndian::write_u16(&mut cdh[8..10], 0);
+            LittleEndian::write_u16(&mut cdh[10..12], *method);
+            LittleEndian::write_u16(&mut cdh[12..14], 0);
+            LittleEndian::write_u16(&mut cdh[14..16], 0);
+            LittleEndian::write_u32(&mut cdh[16..20], *crc);
+            LittleEndian::write_u32(&mut cdh[20..24], *comp_size);
+            LittleEndian::write_u32(&mut cdh[24..28], *uncomp_size);
+            LittleEndian::write_u16(&mut cdh[28..30], name.len() as u16);
+            LittleEndian::write_u16(&mut cdh[30..32], 0); // Extra field len
+            LittleEndian::write_u16(&mut cdh[32..34], 0); // Comment len
+            LittleEndian::write_u16(&mut cdh[34..36], 0); // Disk start
+            LittleEndian::write_u16(&mut cdh[36..38], 0); // Internal attr
+            LittleEndian::write_u32(&mut cdh[38..42], 0); // External attr
+            LittleEndian::write_u32(&mut cdh[42..46], *lfh_offset as u32);
+
+            data.extend_from_slice(&cdh);
+            data.extend_from_slice(name.as_bytes());
+        }
+        let cd_size = data.len() - cd_start;
+
+        // 3. Write End of Central Directory
+        let mut eocd = vec![0u8; 22];
+        LittleEndian::write_u32(&mut eocd[0..4], 0x06054B50);
+        LittleEndian::write_u16(&mut eocd[4..6], 0);
+        LittleEndian::write_u16(&mut eocd[6..8], 0);
+        LittleEndian::write_u16(&mut eocd[8..10], cd_entries.len() as u16);
+        LittleEndian::write_u16(&mut eocd[10..12], cd_entries.len() as u16);
+        LittleEndian::write_u32(&mut eocd[12..16], cd_size as u32);
+        LittleEndian::write_u32(&mut eocd[16..20], cd_start as u32);
+        LittleEndian::write_u16(&mut eocd[20..22], 0);
+
+        data.extend_from_slice(&eocd);
+        data
+    }
+
+    /// Writes the built ZIP archive directly to a file
+    pub fn write_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), ZipError> {
+        let bytes = self.build();
+        fs::write(path, bytes)?;
+        Ok(())
     }
 }

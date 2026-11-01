@@ -1,12 +1,7 @@
-mod adb;
-mod apk_cmd;
-mod bench;
-mod info;
-mod runner;
-
 use std::env;
 use std::fs;
 use std::process;
+use transd_cli::{adb, apk_cmd, bench, info, package, runner};
 
 fn print_usage() {
     println!(
@@ -35,6 +30,32 @@ COMMANDS:
 
     devices
         Inspect connected Android devices via ADB to determine 32-bit vs ARM64-only status
+
+    package <file.apk> [OPTIONS]
+        Repackage a 32-bit ARM APK to run on ARM64-only devices
+        Options:
+            -o, --output <file.apk>   Output repackaged APK path
+            --bridge <path.so>        Custom host arm64-v8a libtransd.so
+            --primary-lib <name.so>   Specify primary 32-bit native library
+            --align <bytes>           Alignment for .so files (default: 4096)
+            --config <k=v>            Extra properties for transd_config.prop
+
+    test-device [OPTIONS]
+        Test connected Android device capabilities and APK compatibility
+        Options:
+            -s, --device <id>         Target device serial
+            --apk <file.apk>          Test compatibility of a specific APK
+
+    install <file.apk> [OPTIONS]
+        Install an APK onto a connected Android device via ADB
+        Options:
+            -s, --device <id>         Target device serial
+
+    launch <pkg_or_apk> [OPTIONS]
+        Launch an installed application or APK on a connected Android device
+        Options:
+            -s, --device <id>         Target device serial
+            --activity <name>         Activity name to launch (auto-detected for APK)
 
     bench <file.so> [OPTIONS]
         Benchmark execution throughput (MIPS), compilation latency, and JIT caching
@@ -348,6 +369,214 @@ fn main() {
                     eprintln!("Error reading file '{}': {}", file_path, e);
                     process::exit(1);
                 }
+            }
+        }
+        "package" => {
+            if args.len() < 3 {
+                eprintln!("Error: missing file path for 'package' command");
+                eprintln!("Usage: transd-cli package <file.apk> [-o output.apk] [--bridge libtransd.so] [--primary-lib name.so] [--align 4096]");
+                process::exit(1);
+            }
+            let input_path = &args[2];
+            let mut output_path = None;
+            let mut bridge_path = None;
+            let mut primary_lib = None;
+            let mut align = None;
+            let mut config_props = Vec::new();
+
+            let mut idx = 3;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "-o" | "--output" => {
+                        if idx + 1 < args.len() {
+                            output_path = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: -o/--output requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    "--bridge" => {
+                        if idx + 1 < args.len() {
+                            bridge_path = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --bridge requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    "--primary-lib" => {
+                        if idx + 1 < args.len() {
+                            primary_lib = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --primary-lib requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    "--align" => {
+                        if idx + 1 < args.len() {
+                            if let Ok(val) = args[idx + 1].parse::<usize>() {
+                                align = Some(val);
+                            } else {
+                                eprintln!("Error: invalid alignment value '{}'", args[idx + 1]);
+                                process::exit(1);
+                            }
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --align requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    "--config" => {
+                        if idx + 1 < args.len() {
+                            let kv = &args[idx + 1];
+                            if let Some((k, v)) = kv.split_once('=') {
+                                config_props.push((k.to_string(), v.to_string()));
+                            } else {
+                                eprintln!("Error: --config requires key=value format");
+                                process::exit(1);
+                            }
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --config requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    unknown => {
+                        eprintln!("Error: unknown option '{}'", unknown);
+                        print_usage();
+                        process::exit(1);
+                    }
+                }
+            }
+
+            if let Err(e) = package::handle_package_command(
+                input_path,
+                output_path,
+                bridge_path,
+                primary_lib,
+                align,
+                &config_props,
+            ) {
+                eprintln!("Repackage Error: {}", e);
+                process::exit(1);
+            }
+        }
+        "test-device" => {
+            let mut device_id = None;
+            let mut apk_path = None;
+
+            let mut idx = 2;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "-s" | "--device" => {
+                        if idx + 1 < args.len() {
+                            device_id = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: -s/--device requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    "--apk" => {
+                        if idx + 1 < args.len() {
+                            apk_path = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --apk requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    unknown => {
+                        eprintln!("Error: unknown option '{}'", unknown);
+                        print_usage();
+                        process::exit(1);
+                    }
+                }
+            }
+
+            if let Err(e) = adb::test_device(device_id, apk_path) {
+                eprintln!("ADB Test Error: {}", e);
+                process::exit(1);
+            }
+        }
+        "install" => {
+            if args.len() < 3 {
+                eprintln!("Error: missing APK file path for 'install' command");
+                eprintln!("Usage: transd-cli install <file.apk> [-s <device>]");
+                process::exit(1);
+            }
+            let apk_path = &args[2];
+            let mut device_id = None;
+
+            let mut idx = 3;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "-s" | "--device" => {
+                        if idx + 1 < args.len() {
+                            device_id = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: -s/--device requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    unknown => {
+                        eprintln!("Error: unknown option '{}'", unknown);
+                        print_usage();
+                        process::exit(1);
+                    }
+                }
+            }
+
+            if let Err(e) = adb::install_apk(device_id, apk_path) {
+                eprintln!("ADB Install Error: {}", e);
+                process::exit(1);
+            }
+        }
+        "launch" => {
+            if args.len() < 3 {
+                eprintln!("Error: missing target package or APK for 'launch' command");
+                eprintln!("Usage: transd-cli launch <package_or_apk> [--activity <act>] [-s <device>]");
+                process::exit(1);
+            }
+            let target = &args[2];
+            let mut device_id = None;
+            let mut activity = None;
+
+            let mut idx = 3;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "-s" | "--device" => {
+                        if idx + 1 < args.len() {
+                            device_id = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: -s/--device requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    "-a" | "--activity" => {
+                        if idx + 1 < args.len() {
+                            activity = Some(args[idx + 1].as_str());
+                            idx += 2;
+                        } else {
+                            eprintln!("Error: --activity requires an argument");
+                            process::exit(1);
+                        }
+                    }
+                    unknown => {
+                        eprintln!("Error: unknown option '{}'", unknown);
+                        print_usage();
+                        process::exit(1);
+                    }
+                }
+            }
+
+            if let Err(e) = adb::launch_app(device_id, target, activity) {
+                eprintln!("ADB Launch Error: {}", e);
+                process::exit(1);
             }
         }
         unknown => {

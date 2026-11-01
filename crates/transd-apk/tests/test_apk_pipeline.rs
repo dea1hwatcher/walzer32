@@ -1,79 +1,5 @@
 use byteorder::{ByteOrder, LittleEndian};
-use transd_apk::{ApkPackage, DexParser, ZipArchive};
-
-/// Helper to construct standard ZIP archives in memory
-struct MockZipBuilder {
-    files: Vec<(String, Vec<u8>)>,
-}
-
-impl MockZipBuilder {
-    fn new() -> Self {
-        Self { files: Vec::new() }
-    }
-
-    fn add_file(&mut self, name: &str, content: &[u8]) {
-        self.files.push((name.to_string(), content.to_vec()));
-    }
-
-    fn build(&self) -> Vec<u8> {
-        let mut data = Vec::new();
-        let mut cd_offsets = Vec::new();
-
-        // 1. Write Local File Headers and Data
-        for (name, content) in &self.files {
-            let lfh_offset = data.len();
-            cd_offsets.push(lfh_offset);
-
-            let mut lfh = vec![0u8; 30];
-            LittleEndian::write_u32(&mut lfh[0..4], 0x04034B50); // Signature
-            LittleEndian::write_u16(&mut lfh[4..6], 20); // Version needed
-            LittleEndian::write_u16(&mut lfh[6..8], 0);  // Flags
-            LittleEndian::write_u16(&mut lfh[8..10], 0); // Method 0 (Stored)
-            LittleEndian::write_u32(&mut lfh[14..18], 0); // CRC32
-            LittleEndian::write_u32(&mut lfh[18..22], content.len() as u32); // Comp size
-            LittleEndian::write_u32(&mut lfh[22..26], content.len() as u32); // Uncomp size
-            LittleEndian::write_u16(&mut lfh[26..28], name.len() as u16);
-            LittleEndian::write_u16(&mut lfh[28..30], 0); // Extra len
-
-            data.extend_from_slice(&lfh);
-            data.extend_from_slice(name.as_bytes());
-            data.extend_from_slice(content);
-        }
-
-        // 2. Write Central Directory
-        let cd_start = data.len();
-        for (i, (name, content)) in self.files.iter().enumerate() {
-            let mut cdh = vec![0u8; 46];
-            LittleEndian::write_u32(&mut cdh[0..4], 0x02014B50); // Signature
-            LittleEndian::write_u16(&mut cdh[4..6], 20); // Version made by
-            LittleEndian::write_u16(&mut cdh[6..8], 20); // Version needed
-            LittleEndian::write_u16(&mut cdh[8..10], 0); // Flags
-            LittleEndian::write_u16(&mut cdh[10..12], 0); // Method 0 (Stored)
-            LittleEndian::write_u32(&mut cdh[20..24], content.len() as u32);
-            LittleEndian::write_u32(&mut cdh[24..28], content.len() as u32);
-            LittleEndian::write_u16(&mut cdh[28..30], name.len() as u16);
-            LittleEndian::write_u16(&mut cdh[30..32], 0); // Extra len
-            LittleEndian::write_u16(&mut cdh[32..34], 0); // Comment len
-            LittleEndian::write_u32(&mut cdh[42..46], cd_offsets[i] as u32); // Local header offset
-
-            data.extend_from_slice(&cdh);
-            data.extend_from_slice(name.as_bytes());
-        }
-
-        let cd_size = data.len() - cd_start;
-
-        // 3. Write End of Central Directory
-        let mut eocd = vec![0u8; 22];
-        LittleEndian::write_u32(&mut eocd[0..4], 0x06054B50);
-        LittleEndian::write_u16(&mut eocd[8..10], self.files.len() as u16);
-        LittleEndian::write_u16(&mut eocd[10..12], self.files.len() as u16);
-        LittleEndian::write_u32(&mut eocd[12..16], cd_size as u32);
-        LittleEndian::write_u32(&mut eocd[16..20], cd_start as u32);
-
-        data.extend_from_slice(&eocd);
-        data
-    }
-}
+use transd_apk::{ApkPackage, DexParser, ZipArchive, ZipBuilder};
 
 /// Helper to build a minimal DEX file in memory with native methods
 fn build_mock_dex() -> Vec<u8> {
@@ -152,7 +78,7 @@ fn build_mock_dex() -> Vec<u8> {
 
 #[test]
 fn test_zip_archive_read() {
-    let mut builder = MockZipBuilder::new();
+    let mut builder = ZipBuilder::new();
     builder.add_file("hello.txt", b"Hello Transd DBT!");
     builder.add_file("lib/armeabi-v7a/libtest.so", b"\x7FELF\x01\x01\x01");
 
@@ -185,7 +111,7 @@ fn test_dex_native_method_parsing() {
 
 #[test]
 fn test_apk_package_integration() {
-    let mut builder = MockZipBuilder::new();
+    let mut builder = ZipBuilder::new();
     let dex_bytes = build_mock_dex();
     builder.add_file("classes.dex", &dex_bytes);
     builder.add_file("lib/armeabi-v7a/libgame.so", b"\x7FELF\x01\x01\x01ARM32_SO_BYTES");

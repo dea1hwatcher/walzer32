@@ -84,6 +84,16 @@ impl<'a> ApkPackage<'a> {
         })
     }
 
+    /// Access the underlying ZIP archive
+    pub fn archive(&self) -> &ZipArchive<'a> {
+        &self.archive
+    }
+
+    /// Extracts all files contained in the APK archive
+    pub fn read_all_files(&self) -> Result<Vec<(String, Vec<u8>)>, ApkError> {
+        self.archive.read_all_files().map_err(ApkError::Zip)
+    }
+
     /// Returns list of unique ABIs present in this APK (e.g. ["armeabi-v7a", "arm64-v8a"])
     pub fn available_abis(&self) -> Vec<String> {
         let mut abis: HashSet<String> = HashSet::new();
