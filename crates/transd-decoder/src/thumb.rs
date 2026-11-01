@@ -715,8 +715,8 @@ impl ThumbDecoder {
             }
         }
 
-        // Thumb-2 NEON Load/Store (VLD1 / VST1: 0xF900.. / 0xF910..)
-        if (hw1 & 0xFF10) == 0xF900 || (hw1 & 0xFF10) == 0xF910 {
+        // Thumb-2 NEON Load/Store (VLD1..4 / VST1..4: 0xF900..)
+        if (hw1 & 0xFF00) == 0xF900 {
             let arm_raw = 0xF400_0000 | (((hw1 & 0x00FF) as u32) << 16) | (hw2 as u32);
             if let Some(inst) = ArmDecoder::decode_neon(arm_raw) {
                 return ArmInst::new(Cond::AL, inst.op, raw);
@@ -911,16 +911,37 @@ mod tests {
             }
         );
 
-        // VLD1.8 {d0, d1}, [r0] -> hi=0xF920, lo=0x0A00
-        let (inst, size) = ThumbDecoder::decode(0xF920, Some(0x0A00));
+        // VLD1.8 {d0, d1}, [r0] -> hi=0xF920, lo=0x0A0F
+        let (inst, size) = ThumbDecoder::decode(0xF920, Some(0x0A0F));
         assert_eq!(size, 4);
         assert_eq!(
             inst.op,
             Op::NeonLoadStore {
                 is_load: true,
-                is_quad: true,
-                reg: 0,
+                structure_elements: 1,
+                reg_count: 2,
+                stride: 1,
+                size: NeonSize::I8,
+                first_reg: 0,
                 rn: Reg::R0,
+                writeback: NeonWriteback::None,
+            }
+        );
+
+        // VLD2.8 {d0, d1}, [r0]! -> hi=0xF920, lo=0x080D
+        let (inst_vld2, size_vld2) = ThumbDecoder::decode(0xF920, Some(0x080D));
+        assert_eq!(size_vld2, 4);
+        assert_eq!(
+            inst_vld2.op,
+            Op::NeonLoadStore {
+                is_load: true,
+                structure_elements: 2,
+                reg_count: 2,
+                stride: 1,
+                size: NeonSize::I8,
+                first_reg: 0,
+                rn: Reg::R0,
+                writeback: NeonWriteback::PostInc,
             }
         );
 

@@ -1439,6 +1439,116 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// LD1 {Vt.8B..}, [Xn] (Multiple 1-element structures load: 1 to 4 registers)
+    pub fn neon_ld1_mult(&mut self, q: u8, opcode: u8, size: u8, rn: A64Reg, rt: u8) {
+        assert!(rt < 32);
+        let inst = ((q as u32) << 30)
+            | (0b001100 << 24)
+            | (1 << 22)
+            | (((opcode as u32) & 0xF) << 12)
+            | (((size as u32) & 0x3) << 10)
+            | (rn.index() << 5)
+            | (rt as u32);
+        self.emit(inst);
+    }
+
+    /// ST1 {Vt.8B..}, [Xn] (Multiple 1-element structures store: 1 to 4 registers)
+    pub fn neon_st1_mult(&mut self, q: u8, opcode: u8, size: u8, rn: A64Reg, rt: u8) {
+        assert!(rt < 32);
+        let inst = ((q as u32) << 30)
+            | (0b001100 << 24)
+            | (0 << 22)
+            | (((opcode as u32) & 0xF) << 12)
+            | (((size as u32) & 0x3) << 10)
+            | (rn.index() << 5)
+            | (rt as u32);
+        self.emit(inst);
+    }
+
+    /// LD2 {Vt, Vt+1}, [Xn] (2-element structures load: 8B/16B/4H/8H/2S/4S)
+    pub fn neon_ld2(&mut self, q: u8, size: u8, rn: A64Reg, rt: u8) {
+        self.neon_ld1_mult(q, 0b1000, size, rn, rt);
+    }
+
+    /// ST2 {Vt, Vt+1}, [Xn] (2-element structures store)
+    pub fn neon_st2(&mut self, q: u8, size: u8, rn: A64Reg, rt: u8) {
+        self.neon_st1_mult(q, 0b1000, size, rn, rt);
+    }
+
+    /// LD3 {Vt, Vt+1, Vt+2}, [Xn] (3-element structures load)
+    pub fn neon_ld3(&mut self, q: u8, size: u8, rn: A64Reg, rt: u8) {
+        self.neon_ld1_mult(q, 0b0100, size, rn, rt);
+    }
+
+    /// ST3 {Vt, Vt+1, Vt+2}, [Xn] (3-element structures store)
+    pub fn neon_st3(&mut self, q: u8, size: u8, rn: A64Reg, rt: u8) {
+        self.neon_st1_mult(q, 0b0100, size, rn, rt);
+    }
+
+    /// LD4 {Vt, Vt+1, Vt+2, Vt+3}, [Xn] (4-element structures load)
+    pub fn neon_ld4(&mut self, q: u8, size: u8, rn: A64Reg, rt: u8) {
+        self.neon_ld1_mult(q, 0b0000, size, rn, rt);
+    }
+
+    /// ST4 {Vt, Vt+1, Vt+2, Vt+3}, [Xn] (4-element structures store)
+    pub fn neon_st4(&mut self, q: u8, size: u8, rn: A64Reg, rt: u8) {
+        self.neon_st1_mult(q, 0b0000, size, rn, rt);
+    }
+
+    /// LD1R {Vt}, [Xn] (Load 1 element and replicate to all lanes of 1 vector)
+    pub fn neon_ld1r(&mut self, q: u8, size: u8, rn: A64Reg, rt: u8) {
+        assert!(rt < 32);
+        let inst = ((q as u32) << 30)
+            | (0b001101 << 24)
+            | (1 << 22)
+            | (0b01100 << 12)
+            | (((size as u32) & 0x3) << 10)
+            | (rn.index() << 5)
+            | (rt as u32);
+        self.emit(inst);
+    }
+
+    /// LD2R {Vt, Vt+1}, [Xn] (Load 2 elements and replicate to all lanes of 2 vectors)
+    pub fn neon_ld2r(&mut self, q: u8, size: u8, rn: A64Reg, rt: u8) {
+        assert!(rt < 32);
+        let inst = ((q as u32) << 30)
+            | (0b001101 << 24)
+            | (1 << 22)
+            | (1 << 21)
+            | (0b01100 << 12)
+            | (((size as u32) & 0x3) << 10)
+            | (rn.index() << 5)
+            | (rt as u32);
+        self.emit(inst);
+    }
+
+    /// LD3R {Vt, Vt+1, Vt+2}, [Xn] (Load 3 elements and replicate to all lanes of 3 vectors)
+    pub fn neon_ld3r(&mut self, q: u8, size: u8, rn: A64Reg, rt: u8) {
+        assert!(rt < 32);
+        let inst = ((q as u32) << 30)
+            | (0b001101 << 24)
+            | (1 << 22)
+            | (0b01110 << 12)
+            | (((size as u32) & 0x3) << 10)
+            | (rn.index() << 5)
+            | (rt as u32);
+        self.emit(inst);
+    }
+
+    /// LD4R {Vt, Vt+1, Vt+2, Vt+3}, [Xn] (Load 4 elements and replicate to all lanes of 4 vectors)
+    pub fn neon_ld4r(&mut self, q: u8, size: u8, rn: A64Reg, rt: u8) {
+        assert!(rt < 32);
+        let inst = ((q as u32) << 30)
+            | (0b001101 << 24)
+            | (1 << 22)
+            | (1 << 21)
+            | (0b01110 << 12)
+            | (((size as u32) & 0x3) << 10)
+            | (rn.index() << 5)
+            | (rt as u32);
+        self.emit(inst);
+    }
+
     /// LDXR Wt, [Xn] (Load exclusive 32-bit register)
     pub fn ldxr_w(&mut self, rt: A64Reg, rn: A64Reg) {
         let inst = 0x885F_7C00 | (rn.index() << 5) | rt.index();
@@ -1618,6 +1728,37 @@ mod tests {
         asm.tst_w_reg(A64Reg::X0, A64Reg::X1);
 
         assert_eq!(asm.code.len(), 11);
+    }
+
+    #[test]
+    fn test_asm_neon_interleaved_multi_load_store() {
+        let mut asm = A64Assembler::new();
+        // LD2 {V0.8B, V1.8B}, [X10] -> 0x0C40_8140
+        asm.neon_ld2(0, 0, A64Reg::X10, 0);
+        // ST2 {V0.8B, V1.8B}, [X10] -> 0x0C00_8140
+        asm.neon_st2(0, 0, A64Reg::X10, 0);
+        // LD3 {V0.8B, V1.8B, V2.8B}, [X10] -> 0x0C40_4140
+        asm.neon_ld3(0, 0, A64Reg::X10, 0);
+        // ST3 {V0.8B, V1.8B, V2.8B}, [X10] -> 0x0C00_4140
+        asm.neon_st3(0, 0, A64Reg::X10, 0);
+        // LD4 {V0.8B, V1.8B, V2.8B, V3.8B}, [X10] -> 0x0C40_0140
+        asm.neon_ld4(0, 0, A64Reg::X10, 0);
+        // ST4 {V0.8B, V1.8B, V2.8B, V3.8B}, [X10] -> 0x0C00_0140
+        asm.neon_st4(0, 0, A64Reg::X10, 0);
+        // LD2 {V0.16B, V1.16B}, [X10] -> 0x4C40_8140
+        asm.neon_ld2(1, 0, A64Reg::X10, 0);
+        // LD1R {V0.8B}, [X10] -> 0x0D40_C140
+        asm.neon_ld1r(0, 0, A64Reg::X10, 0);
+
+        assert_eq!(asm.code.len(), 8);
+        assert_eq!(asm.code[0], 0x0C40_8140);
+        assert_eq!(asm.code[1], 0x0C00_8140);
+        assert_eq!(asm.code[2], 0x0C40_4140);
+        assert_eq!(asm.code[3], 0x0C00_4140);
+        assert_eq!(asm.code[4], 0x0C40_0140);
+        assert_eq!(asm.code[5], 0x0C00_0140);
+        assert_eq!(asm.code[6], 0x4C40_8140);
+        assert_eq!(asm.code[7], 0x0D40_C140);
     }
 
     #[test]

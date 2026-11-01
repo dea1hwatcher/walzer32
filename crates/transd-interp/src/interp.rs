@@ -24,6 +24,31 @@ pub enum StepResult {
     Bkpt { imm: u16 },
 }
 
+fn get_lane_u64(val: u64, lane: usize, elem_bytes: usize) -> u32 {
+    let shift = lane * elem_bytes * 8;
+    let mask = match elem_bytes {
+        1 => 0xFFu64,
+        2 => 0xFFFFu64,
+        _ => 0xFFFF_FFFFu64,
+    };
+    ((val >> shift) & mask) as u32
+}
+
+fn set_lane_u64(val: u64, lane: usize, elem_bytes: usize, elem: u32) -> u64 {
+    let shift = lane * elem_bytes * 8;
+    let mask = match elem_bytes {
+        1 => 0xFFu64,
+        2 => 0xFFFFu64,
+        _ => 0xFFFF_FFFFu64,
+    } << shift;
+    let elem_masked = (elem as u64) & match elem_bytes {
+        1 => 0xFF,
+        2 => 0xFFFF,
+        _ => 0xFFFF_FFFF,
+    };
+    (val & !mask) | (elem_masked << shift)
+}
+
 pub struct Interpreter;
 
 impl Interpreter {
@@ -1470,27 +1495,220 @@ impl Interpreter {
             }
             Op::NeonLoadStore {
                 is_load,
-                is_quad,
-                reg,
+                structure_elements,
+                reg_count,
+                stride,
+                size,
+                first_reg,
                 rn,
+                writeback,
             } => {
+                let elem_bytes = match size {
+                    NeonSize::I8 => 1,
+                    NeonSize::I16 => 2,
+                    _ => 4,
+                };
                 let base_addr = cpu.reg(rn);
-                let count = if is_quad { 2 } else { 1 };
-                for i in 0..count {
-                    let d_idx = (reg as usize) + i;
-                    let addr = GuestAddr::new(base_addr.wrapping_add((i * 8) as u32));
-                    if d_idx < 32 {
-                        if is_load {
-                            let lo = mem.read_u32(addr)? as u64;
-                            let hi = (mem.read_u32(addr.add(4))? as u64) << 32;
-                            cpu.vfp[d_idx] = lo | hi;
+
+                if structure_elements == 1 {
+                    // Sequential transfer without interleaving (VLD1 / VST1)
+                    for i in 0..(reg_count as usize) {
+                        let d_idx = (first_reg as usize) + i * (stride as usize);
+                        let addr = GuestAddr::new(base_addr.wrapping_add((i * 8) as u32));
+                        if d_idx < 32 {
+                            if is_load {
+                                let lo = mem.read_u32(addr)? as u64;
+                                let hi = (mem.read_u32(addr.add(4))? as u64) << 32;
+                                cpu.vfp[d_idx] = lo | hi;
+                            } else {
+                                let val = cpu.vfp[d_idx];
+                                mem.write_u32(addr, val as u32)?;
+                                mem.write_u32(addr.add(4), (val >> 32) as u32)?;
+                            }
+                        }
+                    }
+                } else if structure_elements == 2 && reg_count == 4 {
+                    // Two 128-bit vectors (2 Quadwords): Vector 0 = (first_reg, first_reg+1), Vector 1 = (first_reg+2, first_reg+3)
+                    let num_structures = 16 / elem_bytes;
+                    let elements_per_d = 8 / elem_bytes;
+                    for s in 0..num_structures {
+                        let offset0 = ((2 * s) * elem_bytes) as u32;
+                        let offset1 = ((2 * s + 1) * elem_bytes) as u32;
+                        let addr0 = GuestAddr::new(base_addr.wrapping_add(offset0));
+                        let addr1 = GuestAddr::new(base_addr.wrapping_add(offset1));
+
+                        let (d0_idx, l0) = if s < elements_per_d {
+                            (first_reg as usize, s)
                         } else {
-                            let val = cpu.vfp[d_idx];
-                            mem.write_u32(addr, (val & 0xFFFF_FFFF) as u32)?;
-                            mem.write_u32(addr.add(4), (val >> 32) as u32)?;
+                            ((first_reg + 1) as usize, s - elements_per_d)
+                        };
+                        let (d1_idx, l1) = if s < elements_per_d {
+                            ((first_reg + 2) as usize, s)
+                        } else {
+                            ((first_reg + 3) as usize, s - elements_per_d)
+                        };
+
+                        if is_load {
+                            let e0 = match elem_bytes {
+                                1 => mem.read_u8(addr0)? as u32,
+                                2 => mem.read_u16(addr0)? as u32,
+                                _ => mem.read_u32(addr0)?,
+                            };
+                            let e1 = match elem_bytes {
+                                1 => mem.read_u8(addr1)? as u32,
+                                2 => mem.read_u16(addr1)? as u32,
+                                _ => mem.read_u32(addr1)?,
+                            };
+                            if d0_idx < 32 {
+                                cpu.vfp[d0_idx] = set_lane_u64(cpu.vfp[d0_idx], l0, elem_bytes, e0);
+                            }
+                            if d1_idx < 32 {
+                                cpu.vfp[d1_idx] = set_lane_u64(cpu.vfp[d1_idx], l1, elem_bytes, e1);
+                            }
+                        } else {
+                            if d0_idx < 32 {
+                                let e0 = get_lane_u64(cpu.vfp[d0_idx], l0, elem_bytes);
+                                match elem_bytes {
+                                    1 => mem.write_u8(addr0, e0 as u8)?,
+                                    2 => mem.write_u16(addr0, e0 as u16)?,
+                                    _ => mem.write_u32(addr0, e0)?,
+                                }
+                            }
+                            if d1_idx < 32 {
+                                let e1 = get_lane_u64(cpu.vfp[d1_idx], l1, elem_bytes);
+                                match elem_bytes {
+                                    1 => mem.write_u8(addr1, e1 as u8)?,
+                                    2 => mem.write_u16(addr1, e1 as u16)?,
+                                    _ => mem.write_u32(addr1, e1)?,
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Standard 2, 3, or 4 D registers interleaved
+                    let num_structures = 8 / elem_bytes;
+                    let se = structure_elements as usize;
+                    for s in 0..num_structures {
+                        for e in 0..se {
+                            let mem_offset = ((s * se + e) * elem_bytes) as u32;
+                            let addr = GuestAddr::new(base_addr.wrapping_add(mem_offset));
+                            let d_idx = (first_reg as usize) + e * (stride as usize);
+
+                            if is_load {
+                                let val = match elem_bytes {
+                                    1 => mem.read_u8(addr)? as u32,
+                                    2 => mem.read_u16(addr)? as u32,
+                                    _ => mem.read_u32(addr)?,
+                                };
+                                if d_idx < 32 {
+                                    cpu.vfp[d_idx] = set_lane_u64(cpu.vfp[d_idx], s, elem_bytes, val);
+                                }
+                            } else {
+                                if d_idx < 32 {
+                                    let val = get_lane_u64(cpu.vfp[d_idx], s, elem_bytes);
+                                    match elem_bytes {
+                                        1 => mem.write_u8(addr, val as u8)?,
+                                        2 => mem.write_u16(addr, val as u16)?,
+                                        _ => mem.write_u32(addr, val)?,
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+
+                // Writeback
+                match writeback {
+                    NeonWriteback::None => {},
+                    NeonWriteback::PostInc => {
+                        let total_bytes = (reg_count as u32) * 8;
+                        cpu.set_reg(rn, cpu.reg(rn).wrapping_add(total_bytes));
+                    }
+                    NeonWriteback::Reg(rm) => {
+                        cpu.set_reg(rn, cpu.reg(rn).wrapping_add(cpu.reg(rm)));
+                    }
+                }
+
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonLoadStoreLane {
+                is_load,
+                structure_elements,
+                all_lanes,
+                lane,
+                size,
+                first_reg,
+                stride,
+                rn,
+                writeback,
+            } => {
+                let elem_bytes = match size {
+                    NeonSize::I8 => 1,
+                    NeonSize::I16 => 2,
+                    _ => 4,
+                };
+                let base_addr = cpu.reg(rn);
+                let se = structure_elements as usize;
+
+                if all_lanes {
+                    // Broadcast / replicate to all lanes
+                    let num_lanes = 8 / elem_bytes;
+                    for e in 0..se {
+                        let addr = GuestAddr::new(base_addr.wrapping_add((e * elem_bytes) as u32));
+                        let val = match elem_bytes {
+                            1 => mem.read_u8(addr)? as u32,
+                            2 => mem.read_u16(addr)? as u32,
+                            _ => mem.read_u32(addr)?,
+                        };
+                        let d_idx = (first_reg as usize) + e * (stride as usize);
+                        if d_idx < 32 {
+                            let mut reg_val = 0u64;
+                            for l in 0..num_lanes {
+                                reg_val = set_lane_u64(reg_val, l, elem_bytes, val);
+                            }
+                            cpu.vfp[d_idx] = reg_val;
+                        }
+                    }
+                } else {
+                    // Single lane transfer
+                    for e in 0..se {
+                        let addr = GuestAddr::new(base_addr.wrapping_add((e * elem_bytes) as u32));
+                        let d_idx = (first_reg as usize) + e * (stride as usize);
+                        if is_load {
+                            let val = match elem_bytes {
+                                1 => mem.read_u8(addr)? as u32,
+                                2 => mem.read_u16(addr)? as u32,
+                                _ => mem.read_u32(addr)?,
+                            };
+                            if d_idx < 32 {
+                                cpu.vfp[d_idx] = set_lane_u64(cpu.vfp[d_idx], lane as usize, elem_bytes, val);
+                            }
+                        } else {
+                            if d_idx < 32 {
+                                let val = get_lane_u64(cpu.vfp[d_idx], lane as usize, elem_bytes);
+                                match elem_bytes {
+                                    1 => mem.write_u8(addr, val as u8)?,
+                                    2 => mem.write_u16(addr, val as u16)?,
+                                    _ => mem.write_u32(addr, val)?,
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Writeback
+                let transferred = (se * elem_bytes) as u32;
+                match writeback {
+                    NeonWriteback::None => {},
+                    NeonWriteback::PostInc => {
+                        cpu.set_reg(rn, cpu.reg(rn).wrapping_add(transferred));
+                    }
+                    NeonWriteback::Reg(rm) => {
+                        cpu.set_reg(rn, cpu.reg(rn).wrapping_add(cpu.reg(rm)));
+                    }
+                }
+
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }

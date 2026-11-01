@@ -727,23 +727,114 @@ impl ArmDecoder {
             }
         }
 
-        // NEON Load/Store (VLD1 / VST1: 1111 0100 ...)
-        if (raw & 0xFF10_0000) == 0xF400_0000 || (raw & 0xFF10_0000) == 0xF410_0000 {
+        // NEON Element and Structure Load/Store (VLD1..4, VST1..4: 1111 0100 ...)
+        if (raw & 0xFF00_0000) == 0xF400_0000 {
             let is_load = (raw & (1 << 21)) != 0;
             let d_bit = (raw >> 22) & 1;
-            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let first_reg = (((raw >> 12) & 0xF) | (d_bit << 4)) as u8;
             let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
-            let is_quad = ((raw >> 8) & 0xF) == 0xA;
-            return Some(ArmInst::new(
-                Cond::AL,
-                Op::NeonLoadStore {
-                    is_load,
-                    is_quad,
-                    reg: vd as u8,
-                    rn,
-                },
-                raw,
-            ));
+            let rm_bits = (raw & 0xF) as u8;
+            let writeback = match rm_bits {
+                0b1111 => NeonWriteback::None,
+                0b1101 => NeonWriteback::PostInc,
+                other => NeonWriteback::Reg(Reg::from_u8(other).unwrap_or(Reg::R0)),
+            };
+
+            if (raw & (1 << 23)) == 0 {
+                // Multiple structures
+                let itype = ((raw >> 8) & 0xF) as u8;
+                let (structure_elements, reg_count, stride) = match itype {
+                    0b0000 => (4, 4, 1),
+                    0b0001 => (4, 4, 2),
+                    0b0010 => (1, 4, 1),
+                    0b0011 => (2, 4, 1),
+                    0b0100 => (3, 3, 1),
+                    0b0101 => (3, 3, 2),
+                    0b0110 => (1, 3, 1),
+                    0b0111 => (1, 1, 1),
+                    0b1000 => (2, 2, 1),
+                    0b1001 => (2, 2, 2),
+                    0b1010 => (1, 2, 1),
+                    _ => return None,
+                };
+                let size_bits = (raw >> 6) & 0x3;
+                let size = match size_bits {
+                    0b00 => NeonSize::I8,
+                    0b01 => NeonSize::I16,
+                    0b10 => NeonSize::I32,
+                    0b11 => NeonSize::I32,
+                    _ => unreachable!(),
+                };
+                return Some(ArmInst::new(
+                    Cond::AL,
+                    Op::NeonLoadStore {
+                        is_load,
+                        structure_elements,
+                        reg_count,
+                        stride,
+                        size,
+                        first_reg,
+                        rn,
+                        writeback,
+                    },
+                    raw,
+                ));
+            } else {
+                // Single element / all lanes
+                let b11_10 = (raw >> 10) & 0x3;
+                if b11_10 == 0b11 {
+                    // All lanes (broadcast/replicate)
+                    let se_bits = (raw >> 8) & 0x3;
+                    let structure_elements = se_bits as u8 + 1;
+                    let size_bits = (raw >> 6) & 0x3;
+                    let size = match size_bits {
+                        0b00 => NeonSize::I8,
+                        0b01 => NeonSize::I16,
+                        0b10 => NeonSize::I32,
+                        _ => NeonSize::I32,
+                    };
+                    return Some(ArmInst::new(
+                        Cond::AL,
+                        Op::NeonLoadStoreLane {
+                            is_load,
+                            structure_elements,
+                            all_lanes: true,
+                            lane: 0,
+                            size,
+                            first_reg,
+                            stride: 1,
+                            rn,
+                            writeback,
+                        },
+                        raw,
+                    ));
+                } else {
+                    // Single lane
+                    let se_bits = (raw >> 8) & 0x3;
+                    let structure_elements = se_bits as u8 + 1;
+                    let (size, lane) = match b11_10 {
+                        0b00 => (NeonSize::I8, ((raw >> 5) & 0x7) as u8),
+                        0b01 => (NeonSize::I16, ((raw >> 6) & 0x3) as u8),
+                        0b10 => (NeonSize::I32, ((raw >> 7) & 0x1) as u8),
+                        _ => unreachable!(),
+                    };
+                    return Some(ArmInst::new(
+                        Cond::AL,
+                        Op::NeonLoadStoreLane {
+                            is_load,
+                            structure_elements,
+                            all_lanes: false,
+                            lane,
+                            size,
+                            first_reg,
+                            stride: 1,
+                            rn,
+                            writeback,
+                        },
+                        raw,
+                    ));
+                }
+            }
         }
 
         None
@@ -1760,27 +1851,100 @@ mod tests {
             }
         );
 
-        // VLD1.8 {d0, d1}, [r0] (Quadword 128-bit)
-        let inst = ArmDecoder::decode(0xF420_0A00);
+        // VLD1.8 {d0, d1}, [r0] (2 D registers)
+        let inst = ArmDecoder::decode(0xF420_0A0F);
         assert_eq!(
             inst.op,
             Op::NeonLoadStore {
                 is_load: true,
-                is_quad: true,
-                reg: 0,
+                structure_elements: 1,
+                reg_count: 2,
+                stride: 1,
+                size: NeonSize::I8,
+                first_reg: 0,
                 rn: Reg::R0,
+                writeback: NeonWriteback::None,
             }
         );
 
-        // VST1.8 {d0, d1}, [r0] (Quadword 128-bit)
-        let inst = ArmDecoder::decode(0xF400_0A00);
+        // VST1.8 {d0, d1}, [r0] (2 D registers)
+        let inst = ArmDecoder::decode(0xF400_0A0F);
         assert_eq!(
             inst.op,
             Op::NeonLoadStore {
                 is_load: false,
-                is_quad: true,
-                reg: 0,
+                structure_elements: 1,
+                reg_count: 2,
+                stride: 1,
+                size: NeonSize::I8,
+                first_reg: 0,
                 rn: Reg::R0,
+                writeback: NeonWriteback::None,
+            }
+        );
+
+        // VLD2.8 {d0, d1}, [r0]! (2 D registers with post-inc)
+        let inst_vld2 = ArmDecoder::decode(0xF420_080D);
+        assert_eq!(
+            inst_vld2.op,
+            Op::NeonLoadStore {
+                is_load: true,
+                structure_elements: 2,
+                reg_count: 2,
+                stride: 1,
+                size: NeonSize::I8,
+                first_reg: 0,
+                rn: Reg::R0,
+                writeback: NeonWriteback::PostInc,
+            }
+        );
+
+        // VLD3.8 {d0, d1, d2}, [r0]
+        let inst_vld3 = ArmDecoder::decode(0xF420_040F);
+        assert_eq!(
+            inst_vld3.op,
+            Op::NeonLoadStore {
+                is_load: true,
+                structure_elements: 3,
+                reg_count: 3,
+                stride: 1,
+                size: NeonSize::I8,
+                first_reg: 0,
+                rn: Reg::R0,
+                writeback: NeonWriteback::None,
+            }
+        );
+
+        // VLD4.8 {d0, d1, d2, d3}, [r0]
+        let inst_vld4 = ArmDecoder::decode(0xF420_000F);
+        assert_eq!(
+            inst_vld4.op,
+            Op::NeonLoadStore {
+                is_load: true,
+                structure_elements: 4,
+                reg_count: 4,
+                stride: 1,
+                size: NeonSize::I8,
+                first_reg: 0,
+                rn: Reg::R0,
+                writeback: NeonWriteback::None,
+            }
+        );
+
+        // VLD1.8 {d0[]}, [r0] (all lanes broadcast)
+        let inst_vld1_all = ArmDecoder::decode(0xF4A0_0C0F);
+        assert_eq!(
+            inst_vld1_all.op,
+            Op::NeonLoadStoreLane {
+                is_load: true,
+                structure_elements: 1,
+                all_lanes: true,
+                lane: 0,
+                size: NeonSize::I8,
+                first_reg: 0,
+                stride: 1,
+                rn: Reg::R0,
+                writeback: NeonWriteback::None,
             }
         );
 

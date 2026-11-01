@@ -4,7 +4,7 @@ use transd_core::{
 };
 use transd_decoder::{
     AddrMode, AddrOffset, AluOp, ArmInst, BlockAddrMode, MemSize, MulOp, NeonCvtOp, NeonOp, NeonPermuteOp,
-    NeonRevOp, NeonSize, Op, Operand2, ShiftAmount, ShiftType, VfpCvtOp, VfpOp, VfpReg, VfpSize,
+    NeonRevOp, NeonSize, NeonWriteback, Op, Operand2, ShiftAmount, ShiftType, VfpCvtOp, VfpOp, VfpReg, VfpSize,
 };
 use transd_ir::{BlockExit, IrBlock, Superblock};
 use crate::assembler::A64Assembler;
@@ -1166,31 +1166,165 @@ impl A64Compiler {
             }
             Op::NeonLoadStore {
                 is_load,
-                is_quad,
-                reg,
+                structure_elements,
+                reg_count,
+                stride,
+                size,
+                first_reg,
                 rn,
+                writeback,
             } => {
                 let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
                 asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, rn_reg);
-                let vfp_off = (OFFSET_VFP + (*reg as usize) * 8) as u32;
+                let sz = match size {
+                    NeonSize::I8 => 0,
+                    NeonSize::I16 => 1,
+                    _ => 2,
+                };
 
-                if *is_load {
-                    if *is_quad {
-                        asm.ldr_q_imm(0, A64Reg::X10, 0);
-                        asm.add_x_imm(A64Reg::X9, A64Reg::X0, vfp_off as u16);
+                if *structure_elements == 2 && *reg_count == 4 {
+                    // 2 quadword registers (128-bit each)
+                    let vfp_off0 = (OFFSET_VFP + (*first_reg as usize) * 8) as u16;
+                    let vfp_off1 = (OFFSET_VFP + ((*first_reg + 2) as usize) * 8) as u16;
+
+                    if *is_load {
+                        asm.neon_ld2(1, sz, A64Reg::X10, 0);
+                        asm.add_x_imm(A64Reg::X9, A64Reg::X0, vfp_off0);
                         asm.str_q_imm(0, A64Reg::X9, 0);
+                        asm.add_x_imm(A64Reg::X9, A64Reg::X0, vfp_off1);
+                        asm.str_q_imm(1, A64Reg::X9, 0);
                     } else {
-                        asm.ldr_d_imm(0, A64Reg::X10, 0);
-                        asm.str_d_imm(0, A64Reg::X0, vfp_off);
+                        asm.add_x_imm(A64Reg::X9, A64Reg::X0, vfp_off0);
+                        asm.ldr_q_imm(0, A64Reg::X9, 0);
+                        asm.add_x_imm(A64Reg::X9, A64Reg::X0, vfp_off1);
+                        asm.ldr_q_imm(1, A64Reg::X9, 0);
+                        asm.neon_st2(1, sz, A64Reg::X10, 0);
+                    }
+                } else if *structure_elements == 1 {
+                    // Sequential transfer without interleaving (VLD1 / VST1)
+                    if *is_load {
+                        let opcode = match *reg_count {
+                            1 => 0b0111,
+                            2 => 0b1010,
+                            3 => 0b0110,
+                            _ => 0b0010,
+                        };
+                        asm.neon_ld1_mult(0, opcode, sz, A64Reg::X10, 0);
+                        for i in 0..*reg_count {
+                            let d_idx = *first_reg + i * stride;
+                            let vfp_off = (OFFSET_VFP + (d_idx as usize) * 8) as u32;
+                            asm.str_d_imm(i, A64Reg::X0, vfp_off);
+                        }
+                    } else {
+                        for i in 0..*reg_count {
+                            let d_idx = *first_reg + i * stride;
+                            let vfp_off = (OFFSET_VFP + (d_idx as usize) * 8) as u32;
+                            asm.ldr_d_imm(i, A64Reg::X0, vfp_off);
+                        }
+                        let opcode = match *reg_count {
+                            1 => 0b0111,
+                            2 => 0b1010,
+                            3 => 0b0110,
+                            _ => 0b0010,
+                        };
+                        asm.neon_st1_mult(0, opcode, sz, A64Reg::X10, 0);
                     }
                 } else {
-                    if *is_quad {
-                        asm.add_x_imm(A64Reg::X9, A64Reg::X0, vfp_off as u16);
-                        asm.ldr_q_imm(0, A64Reg::X9, 0);
-                        asm.str_q_imm(0, A64Reg::X10, 0);
+                    // Standard 2, 3, or 4 D registers interleaved
+                    if *is_load {
+                        match *structure_elements {
+                            2 => asm.neon_ld2(0, sz, A64Reg::X10, 0),
+                            3 => asm.neon_ld3(0, sz, A64Reg::X10, 0),
+                            _ => asm.neon_ld4(0, sz, A64Reg::X10, 0),
+                        }
+                        for i in 0..*reg_count {
+                            let d_idx = *first_reg + i * stride;
+                            let vfp_off = (OFFSET_VFP + (d_idx as usize) * 8) as u32;
+                            asm.str_d_imm(i, A64Reg::X0, vfp_off);
+                        }
                     } else {
-                        asm.ldr_d_imm(0, A64Reg::X0, vfp_off);
-                        asm.str_d_imm(0, A64Reg::X10, 0);
+                        for i in 0..*reg_count {
+                            let d_idx = *first_reg + i * stride;
+                            let vfp_off = (OFFSET_VFP + (d_idx as usize) * 8) as u32;
+                            asm.ldr_d_imm(i, A64Reg::X0, vfp_off);
+                        }
+                        match *structure_elements {
+                            2 => asm.neon_st2(0, sz, A64Reg::X10, 0),
+                            3 => asm.neon_st3(0, sz, A64Reg::X10, 0),
+                            _ => asm.neon_st4(0, sz, A64Reg::X10, 0),
+                        }
+                    }
+                }
+
+                // Writeback
+                match writeback {
+                    NeonWriteback::None => {},
+                    NeonWriteback::PostInc => {
+                        let total_bytes = (*reg_count as u16) * 8;
+                        let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                        asm.add_x_imm(A64Reg::X9, rn_reg, total_bytes);
+                        store_guest_reg(asm, A64Reg::X9, *rn);
+                    }
+                    NeonWriteback::Reg(rm) => {
+                        let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                        let rm_reg = load_guest_reg(asm, A64Reg::X11, *rm);
+                        asm.add_x_uxtw(A64Reg::X9, rn_reg, rm_reg);
+                        store_guest_reg(asm, A64Reg::X9, *rn);
+                    }
+                }
+            }
+            Op::NeonLoadStoreLane {
+                is_load,
+                structure_elements,
+                all_lanes,
+                lane: _,
+                size,
+                first_reg,
+                stride,
+                rn,
+                writeback,
+            } => {
+                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, rn_reg);
+                let sz = match size {
+                    NeonSize::I8 => 0,
+                    NeonSize::I16 => 1,
+                    _ => 2,
+                };
+                let elem_bytes = match size {
+                    NeonSize::I8 => 1u16,
+                    NeonSize::I16 => 2u16,
+                    _ => 4u16,
+                };
+
+                if *all_lanes && *is_load {
+                    match *structure_elements {
+                        1 => asm.neon_ld1r(0, sz, A64Reg::X10, 0),
+                        2 => asm.neon_ld2r(0, sz, A64Reg::X10, 0),
+                        3 => asm.neon_ld3r(0, sz, A64Reg::X10, 0),
+                        _ => asm.neon_ld4r(0, sz, A64Reg::X10, 0),
+                    }
+                    for i in 0..*structure_elements {
+                        let d_idx = *first_reg + i * stride;
+                        let vfp_off = (OFFSET_VFP + (d_idx as usize) * 8) as u32;
+                        asm.str_d_imm(i, A64Reg::X0, vfp_off);
+                    }
+                }
+
+                // Writeback
+                let transferred = (*structure_elements as u16) * elem_bytes;
+                match writeback {
+                    NeonWriteback::None => {},
+                    NeonWriteback::PostInc => {
+                        let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                        asm.add_x_imm(A64Reg::X9, rn_reg, transferred);
+                        store_guest_reg(asm, A64Reg::X9, *rn);
+                    }
+                    NeonWriteback::Reg(rm) => {
+                        let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                        let rm_reg = load_guest_reg(asm, A64Reg::X11, *rm);
+                        asm.add_x_uxtw(A64Reg::X9, rn_reg, rm_reg);
+                        store_guest_reg(asm, A64Reg::X9, *rn);
                     }
                 }
             }
@@ -1750,14 +1884,18 @@ mod tests {
     #[test]
     fn test_compile_neon_quad_and_load_store() {
         let mut block = IrBlock::new(GuestAddr::new(0x8000), false);
-        // VLD1 Q0, [r0]
+        // VLD1 Q0, [r0] (2 D registers)
         block.insts.push(ArmInst::new(
             Cond::AL,
             Op::NeonLoadStore {
                 is_load: true,
-                is_quad: true,
-                reg: 0,
+                structure_elements: 1,
+                reg_count: 2,
+                stride: 1,
+                size: NeonSize::I32,
+                first_reg: 0,
                 rn: Reg::R0,
+                writeback: NeonWriteback::None,
             },
             0,
         ));
@@ -1787,14 +1925,18 @@ mod tests {
             },
             0,
         ));
-        // VST1 Q2, [r1]
+        // VST1 Q2, [r1] (2 D registers)
         block.insts.push(ArmInst::new(
             Cond::AL,
             Op::NeonLoadStore {
                 is_load: false,
-                is_quad: true,
-                reg: 4,
+                structure_elements: 1,
+                reg_count: 2,
+                stride: 1,
+                size: NeonSize::I32,
+                first_reg: 4,
                 rn: Reg::R1,
+                writeback: NeonWriteback::None,
             },
             0,
         ));

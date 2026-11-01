@@ -208,6 +208,13 @@ pub enum NeonCvtOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeonWriteback {
+    None,
+    PostInc,
+    Reg(Reg),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NeonSize {
     I8,
     I16,
@@ -369,9 +376,24 @@ pub enum Op {
     },
     NeonLoadStore {
         is_load: bool,
-        is_quad: bool,
-        reg: u8,
+        structure_elements: u8, // 1 = VLD1/VST1, 2 = VLD2/VST2, 3 = VLD3/VST3, 4 = VLD4/VST4
+        reg_count: u8,          // 1, 2, 3, or 4 doubleword registers
+        stride: u8,             // 1 = contiguous, 2 = spaced (e.g. d0, d2)
+        size: NeonSize,
+        first_reg: u8,
         rn: Reg,
+        writeback: NeonWriteback,
+    },
+    NeonLoadStoreLane {
+        is_load: bool,
+        structure_elements: u8, // 1..=4
+        all_lanes: bool,        // true = replicate/broadcast to all lanes
+        lane: u8,               // specific lane index if !all_lanes
+        size: NeonSize,
+        first_reg: u8,
+        stride: u8,
+        rn: Reg,
+        writeback: NeonWriteback,
     },
     NeonPermute {
         op: NeonPermuteOp,
