@@ -347,3 +347,87 @@ pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeGenerateTombs
         JNI_ERR_GENERIC
     }
 }
+
+
+/// JNI Export: Render Host Audio PCM Frames from Lock-Free Ring Buffer
+/// Fills `out_buf` with 48 kHz stereo 16-bit PCM samples [L0, R0, L1, R1, ...]
+/// Returns the number of frames rendered (frames = samples / 2)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeRenderAudioPcm(
+    _env: JNIEnv,
+    _clazz: JClass,
+    out_buf: *mut i16,
+    max_samples: usize,
+) -> JInt {
+    if out_buf.is_null() || max_samples == 0 {
+        return 0;
+    }
+
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    if let Some(session) = guard.as_mut() {
+        let slice = unsafe { std::slice::from_raw_parts_mut(out_buf, max_samples) };
+        session.read_audio_frames(slice) as JInt
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Set Audio Volume Level in millibels (-9600 = mute, 0 = max)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeSetAudioVolume(
+    _env: JNIEnv,
+    _clazz: JClass,
+    millibels: JInt,
+) -> JInt {
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    if let Some(session) = guard.as_mut() {
+        session.set_audio_volume(millibels as i32);
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Get Audio Buffer Underrun Count
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeGetAudioUnderruns(
+    _env: JNIEnv,
+    _clazz: JClass,
+) -> JLong {
+    let guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+
+    if let Some(session) = guard.as_ref() {
+        session.get_audio_underruns() as JLong
+    } else {
+        0
+    }
+}
+
+/// JNI Export: Get Audio Buffer Overrun Count
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeGetAudioOverruns(
+    _env: JNIEnv,
+    _clazz: JClass,
+) -> JLong {
+    let guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+
+    if let Some(session) = guard.as_ref() {
+        session.get_audio_overruns() as JLong
+    } else {
+        0
+    }
+}

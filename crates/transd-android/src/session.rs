@@ -3,8 +3,8 @@ use std::sync::Mutex;
 use thiserror::Error;
 use transd_apk::{ApkError, ApkPackage};
 use transd_bridge::{
-    invoke_guest, invoke_jni_onload, BionicBridge, GlesBridge, JniBridge,
-    RegisteredNativeMethod, SurfaceBridge, TouchEvent, KeyEvent,
+    invoke_guest_extended, invoke_jni_onload, AudioBridge, BionicBridge, GlesBridge, JniBridge,
+    KeyEvent, RegisteredNativeMethod, SurfaceBridge, TouchEvent,
 };
 use transd_core::{FlatMemory, GuestAddr};
 use transd_elf::{CompositeResolver, ElfLoader, LoadedLibrary, LoaderError, SymbolResolver};
@@ -35,6 +35,7 @@ pub struct TransdSession {
     pub gles: GlesBridge,
     pub jni: JniBridge,
     pub surface: SurfaceBridge,
+    pub audio: AudioBridge,
     pub apk_bytes: Option<Vec<u8>>,
     pub loaded_libraries: HashMap<String, LoadedLibrary>,
     pub next_load_addr: GuestAddr,
@@ -58,6 +59,7 @@ impl TransdSession {
         let gles_stubs = arena_base.add(0x500_000);
         let gles_heap = arena_base.add(0x580_000);
         let jni_base = arena_base.add(0x600_000);
+        let audio_stubs = arena_base.add(0x700_000);
         let stack_top = arena_base.add(0x800_000);
         let lib_load_base = arena_base.add(0x100_0000);
 
@@ -70,6 +72,9 @@ impl TransdSession {
         let jni = JniBridge::new(jni_base);
         jni.install(&mut mem)?;
 
+        let audio = AudioBridge::with_stub_base(audio_stubs);
+        audio.install_stubs(&mut mem)?;
+
         let surface = SurfaceBridge::new();
 
         let mut engine = DbtEngine::new(mem);
@@ -81,6 +86,7 @@ impl TransdSession {
             gles,
             jni,
             surface,
+            audio,
             apk_bytes: None,
             loaded_libraries: HashMap::new(),
             next_load_addr: lib_load_base,
@@ -119,10 +125,11 @@ impl TransdSession {
     pub fn load_library_bytes(&mut self, name: &str, elf_bytes: &[u8]) -> Result<LoadedLibrary, SessionError> {
         let load_addr = self.next_load_addr;
 
-        // Create composite resolver combining Bionic, GLES, and previously loaded libraries
+        // Create composite resolver combining Bionic, GLES, Audio, and previously loaded libraries
         let mut composite = CompositeResolver::new();
         composite.add(&self.bionic);
         composite.add(&self.gles);
+        composite.add(&self.audio);
 
         struct LoadedMapResolver<'a>(&'a HashMap<String, LoadedLibrary>);
         impl<'a> SymbolResolver for LoadedMapResolver<'a> {
@@ -161,14 +168,47 @@ impl TransdSession {
 
     /// Call a 32-bit native function by guest address
     pub fn call_native(&mut self, fn_addr: GuestAddr, args: &[u32]) -> Result<u32, SessionError> {
-        let res = invoke_guest(
+        let res = invoke_guest_extended(
             &mut self.engine,
             &mut self.bionic,
             &mut self.jni,
+            Some(&mut self.gles),
+            Some(&mut self.audio),
             fn_addr,
             args,
         )?;
         Ok(res)
+    }
+
+    /// Reads host stereo PCM frames (48 kHz) from the lock-free audio ring buffer.
+    /// `out` format: [L0, R0, L1, R1, ...]
+    /// Returns the number of frames read (frames = samples / 2).
+    pub fn read_audio_frames(&mut self, out: &mut [i16]) -> usize {
+        let frames = self.audio.read_host_frames(out);
+        if let Some(_completed) = self.audio.consume_next_buffer() {
+            if self.audio.has_callback() {
+                let cb = self.audio.callback_fn;
+                let bq_itf = self.audio.stub_base.add(0x1200).as_u32();
+                let ctx = self.audio.callback_context.as_u32();
+                let _ = self.call_native(cb, &[bq_itf, ctx]);
+            }
+        }
+        frames
+    }
+
+    /// Sets audio playback volume in millibels (-9600 to 0 mB)
+    pub fn set_audio_volume(&mut self, millibels: i32) {
+        self.audio.set_volume_millibels(millibels);
+    }
+
+    /// Returns total number of audio underruns encountered
+    pub fn get_audio_underruns(&self) -> u64 {
+        self.audio.underrun_count()
+    }
+
+    /// Returns total number of audio overruns encountered
+    pub fn get_audio_overruns(&self) -> u64 {
+        self.audio.overrun_count()
     }
 
     /// Get list of native methods registered via JNI env->RegisterNatives

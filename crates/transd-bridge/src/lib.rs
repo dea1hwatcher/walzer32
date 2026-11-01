@@ -1,4 +1,6 @@
 pub mod audio;
+pub mod audio_resample;
+pub mod audio_ring;
 pub mod bionic;
 pub mod gles;
 pub mod host;
@@ -8,7 +10,13 @@ pub mod surface;
 pub mod trampoline;
 pub mod vulkan;
 
-pub use audio::{AudioBridge, AudioBuffer, SL_PLAYSTATE_PAUSED, SL_PLAYSTATE_PLAYING, SL_PLAYSTATE_STOPPED};
+pub use audio::{
+    AudioBridge, AudioBuffer, AudioFormat, AudioFuncId, AUDIO_SVC_MAGIC,
+    SL_PLAYSTATE_PAUSED, SL_PLAYSTATE_PLAYING, SL_PLAYSTATE_STOPPED,
+    SL_RESULT_PARAMETER_INVALID, SL_RESULT_SUCCESS,
+};
+pub use audio_resample::AudioResampler;
+pub use audio_ring::AudioRingBuffer;
 pub use bionic::{BionicBridge, BionicFuncId, LogMessage, ThreadDescriptor};
 pub use gles::{
     DrawCallRecord, GlesBridge, GlesFuncId, GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT,
@@ -22,7 +30,8 @@ pub use jni::{
 pub use jni_thunk::{JniThunk, JniThunkGenerator};
 pub use surface::{KeyEvent, SurfaceBridge, TouchEvent, GUEST_SURFACE_HANDLE};
 pub use trampoline::{
-    invoke_guest, invoke_guest_full, invoke_jni_method, invoke_jni_onload, SENTINEL_RETURN_ADDR,
+    invoke_guest, invoke_guest_extended, invoke_guest_full, invoke_jni_method, invoke_jni_onload,
+    SENTINEL_RETURN_ADDR,
 };
 pub use vulkan::{
     VkApplicationInfo32, VkDeviceCreateInfo32, VkInstanceCreateInfo32, VkSubmitInfo32, VulkanBridge,

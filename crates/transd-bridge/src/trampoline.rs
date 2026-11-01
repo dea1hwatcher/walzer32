@@ -1,5 +1,6 @@
 use transd_core::{GuestAddr, Memory, Reg};
 use transd_rt::{DbtEngine, EngineError};
+use crate::audio::AudioBridge;
 use crate::bionic::BionicBridge;
 use crate::gles::GlesBridge;
 use crate::jni::JniBridge;
@@ -14,7 +15,7 @@ pub fn invoke_guest<M: Memory>(
     func_addr: GuestAddr,
     args: &[u32],
 ) -> Result<u32, EngineError> {
-    invoke_guest_full(engine, bionic, jni, None, func_addr, args)
+    invoke_guest_extended(engine, bionic, jni, None, None, func_addr, args)
 }
 
 /// Invokes a 32-bit guest function with optional GLES passthrough support
@@ -22,12 +23,25 @@ pub fn invoke_guest_full<M: Memory>(
     engine: &mut DbtEngine<M>,
     bionic: &mut BionicBridge,
     jni: &mut JniBridge,
+    gles: Option<&mut GlesBridge>,
+    func_addr: GuestAddr,
+    args: &[u32],
+) -> Result<u32, EngineError> {
+    invoke_guest_extended(engine, bionic, jni, gles, None, func_addr, args)
+}
+
+/// Invokes a 32-bit guest function with optional GLES and Audio passthrough support
+pub fn invoke_guest_extended<M: Memory>(
+    engine: &mut DbtEngine<M>,
+    bionic: &mut BionicBridge,
+    jni: &mut JniBridge,
     mut gles: Option<&mut GlesBridge>,
+    mut audio: Option<&mut AudioBridge>,
     func_addr: GuestAddr,
     args: &[u32],
 ) -> Result<u32, EngineError> {
     // 1. Pass first 4 arguments in r0..r3
-    if args.len() > 0 {
+    if !args.is_empty() {
         engine.cpu.set_reg(Reg::R0, args[0]);
     }
     if args.len() > 1 {
@@ -62,13 +76,13 @@ pub fn invoke_guest_full<M: Memory>(
     engine.cpu.set_thumb(is_thumb);
     engine.cpu.set_pc(func_addr.instruction_addr());
 
-    // 5. Execution loop: handle Bionic, JNI & GLES SVC calls until returning to SENTINEL_RETURN_ADDR
+    // 5. Execution loop: handle Bionic, JNI, GLES & Audio SVC calls until returning to SENTINEL_RETURN_ADDR
     let mut steps = 0;
     while engine.cpu.pc() != GuestAddr::new(SENTINEL_RETURN_ADDR) {
         let pc = engine.cpu.pc();
         let thumb = engine.cpu.is_thumb();
 
-        // Check if current instruction is an SVC (Bionic, JNI, or GLES stub)
+        // Check if current instruction is an SVC (Bionic, JNI, GLES, or Audio stub)
         if let Ok((inst, _)) = transd_decoder::decode_next(&engine.mem, pc, thumb) {
             if let transd_decoder::Op::Svc { imm } = inst.op {
                 // Try Bionic SVC
@@ -86,6 +100,14 @@ pub fn invoke_guest_full<M: Memory>(
                 // Try GLES SVC
                 if let Some(ref mut g) = gles {
                     if g.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+                        let next_pc = pc.add(4);
+                        engine.cpu.set_pc(next_pc);
+                        continue;
+                    }
+                }
+                // Try Audio SVC
+                if let Some(ref mut a) = audio {
+                    if a.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
                         let next_pc = pc.add(4);
                         engine.cpu.set_pc(next_pc);
                         continue;
