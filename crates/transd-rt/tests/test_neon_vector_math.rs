@@ -342,3 +342,172 @@ fn test_neon_polynomial_multiply_pmull() {
     assert_eq!(engine.cpu.vfp[10], 0x0014_000C_0006_0002);
     assert_eq!(engine.cpu.vfp[11], 0x0048_0038_0012_001E);
 }
+
+#[test]
+fn test_neon_pairwise_reductions() {
+    let mut arena = ArenaMemory::new().expect("Failed to reserve 4GB virtual arena");
+    let code_base = GuestAddr::new(0xA000);
+    arena.commit_range(code_base, 0x10000).unwrap();
+
+    let mut engine = DbtEngine::new(arena);
+
+    // Setup D0 and D1 (F32):
+    // D0 = [10.0, 20.0], D1 = [30.0, 40.0]
+    let d0_f: [f32; 2] = [10.0, 20.0];
+    let d1_f: [f32; 2] = [30.0, 40.0];
+    engine.cpu.vfp[0] = (d0_f[0].to_bits() as u64) | ((d0_f[1].to_bits() as u64) << 32);
+    engine.cpu.vfp[1] = (d1_f[0].to_bits() as u64) | ((d1_f[1].to_bits() as u64) << 32);
+
+    // Setup D5 and D6 (I32):
+    // D5 = [100, -50], D6 = [200, 300]
+    engine.cpu.vfp[5] = (100u32 as u64) | (((-50i32 as u32) as u64) << 32);
+    engine.cpu.vfp[6] = (200u32 as u64) | ((300u32 as u64) << 32);
+
+    // Setup D12 and D13 (I16):
+    // D12 = [10, 20, 30, 40], D13 = [50, 60, 70, 80]
+    let d12_h = [10u16, 20, 30, 40];
+    let d13_h = [50u16, 60, 70, 80];
+    let mut d12_val = 0u64;
+    let mut d13_val = 0u64;
+    for (i, (&h12, &h13)) in d12_h.iter().zip(d13_h.iter()).enumerate() {
+        d12_val |= (h12 as u64) << (i * 16);
+        d13_val |= (h13 as u64) << (i * 16);
+    }
+    engine.cpu.vfp[12] = d12_val;
+    engine.cpu.vfp[13] = d13_val;
+
+    // Setup D15 and D16 (I8):
+    let d15_bytes: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let d16_bytes: [u8; 8] = [9, 10, 11, 12, 13, 14, 15, 16];
+    engine.cpu.vfp[15] = u64::from_le_bytes(d15_bytes);
+    engine.cpu.vfp[16] = u64::from_le_bytes(d16_bytes);
+
+    // Program at 0xA000:
+    // 0xA000: VPADD.F32 d2, d0, d1 -> 0xF3002D01
+    // 0xA004: VPMAX.F32 d3, d0, d1 -> 0xF3003F01
+    // 0xA008: VPMIN.F32 d4, d0, d1 -> 0xF3204F01
+    // 0xA00C: VPADD.I32 d7, d5, d6 -> 0xF2257B16
+    // 0xA010: VPMAX.S32 d8, d5, d6 -> 0xF2258A06
+    // 0xA014: VPMIN.S32 d9, d5, d6 -> 0xF2259A16
+    // 0xA018: VPADD.I16 d14, d12, d13 -> 0xF21CEB1D
+    // 0xA01C: VPADD.I8 d17, d15, d16  -> 0xF24F1B30
+    // 0xA020: MOV r7, #1          -> 0xE3A07001
+    // 0xA024: MOV r0, #0          -> 0xE3A00000
+    // 0xA028: SVC 0               -> 0xEF000000
+    engine.mem.write_u32(code_base, 0xF300_2D01).unwrap();
+    engine.mem.write_u32(code_base.add(4), 0xF300_3F01).unwrap();
+    engine.mem.write_u32(code_base.add(8), 0xF320_4F01).unwrap();
+    engine.mem.write_u32(code_base.add(12), 0xF225_7B16).unwrap();
+    engine.mem.write_u32(code_base.add(16), 0xF225_8A06).unwrap();
+    engine.mem.write_u32(code_base.add(20), 0xF225_9A16).unwrap();
+    engine.mem.write_u32(code_base.add(24), 0xF21C_EB1D).unwrap();
+    engine.mem.write_u32(code_base.add(28), 0xF24F_1B30).unwrap();
+    engine.mem.write_u32(code_base.add(32), 0xE3A0_7001).unwrap();
+    engine.mem.write_u32(code_base.add(36), 0xE3A0_0000).unwrap();
+    engine.mem.write_u32(code_base.add(40), 0xEF00_0000).unwrap();
+
+    engine.cpu.set_pc(code_base);
+    let exit_code = engine.run(30).unwrap();
+    assert_eq!(exit_code, 0);
+
+    // Verify VPADD.F32 d2: [30.0, 70.0]
+    let d2_0 = f32::from_bits((engine.cpu.vfp[2] & 0xFFFF_FFFF) as u32);
+    let d2_1 = f32::from_bits((engine.cpu.vfp[2] >> 32) as u32);
+    assert_eq!([d2_0, d2_1], [30.0, 70.0]);
+
+    // Verify VPMAX.F32 d3: [20.0, 40.0]
+    let d3_0 = f32::from_bits((engine.cpu.vfp[3] & 0xFFFF_FFFF) as u32);
+    let d3_1 = f32::from_bits((engine.cpu.vfp[3] >> 32) as u32);
+    assert_eq!([d3_0, d3_1], [20.0, 40.0]);
+
+    // Verify VPMIN.F32 d4: [10.0, 30.0]
+    let d4_0 = f32::from_bits((engine.cpu.vfp[4] & 0xFFFF_FFFF) as u32);
+    let d4_1 = f32::from_bits((engine.cpu.vfp[4] >> 32) as u32);
+    assert_eq!([d4_0, d4_1], [10.0, 30.0]);
+
+    // Verify VPADD.I32 d7: [50, 500]
+    let d7_0 = (engine.cpu.vfp[7] & 0xFFFF_FFFF) as u32 as i32;
+    let d7_1 = (engine.cpu.vfp[7] >> 32) as u32 as i32;
+    assert_eq!([d7_0, d7_1], [50, 500]);
+
+    // Verify VPMAX.S32 d8: [100, 300]
+    let d8_0 = (engine.cpu.vfp[8] & 0xFFFF_FFFF) as u32 as i32;
+    let d8_1 = (engine.cpu.vfp[8] >> 32) as u32 as i32;
+    assert_eq!([d8_0, d8_1], [100, 300]);
+
+    // Verify VPMIN.S32 d9: [-50, 200]
+    let d9_0 = (engine.cpu.vfp[9] & 0xFFFF_FFFF) as u32 as i32;
+    let d9_1 = (engine.cpu.vfp[9] >> 32) as u32 as i32;
+    assert_eq!([d9_0, d9_1], [-50, 200]);
+
+    // Verify VPADD.I16 d14: [30, 70, 110, 150]
+    let d14 = [
+        (engine.cpu.vfp[14] & 0xFFFF) as u16,
+        ((engine.cpu.vfp[14] >> 16) & 0xFFFF) as u16,
+        ((engine.cpu.vfp[14] >> 32) & 0xFFFF) as u16,
+        ((engine.cpu.vfp[14] >> 48) & 0xFFFF) as u16,
+    ];
+    assert_eq!(d14, [30, 70, 110, 150]);
+
+    // Verify VPADD.I8 d17: [3, 7, 11, 15, 19, 23, 27, 31]
+    let d17_bytes = engine.cpu.vfp[17].to_le_bytes();
+    assert_eq!(d17_bytes, [3, 7, 11, 15, 19, 23, 27, 31]);
+}
+
+#[test]
+fn test_neon_vext_extract() {
+    let mut arena = ArenaMemory::new().expect("Failed to reserve 4GB virtual arena");
+    let code_base = GuestAddr::new(0xB000);
+    arena.commit_range(code_base, 0x10000).unwrap();
+
+    let mut engine = DbtEngine::new(arena);
+
+    // Setup D0 and D1:
+    // D0 = [1, 2, 3, 4, 5, 6, 7, 8]
+    // D1 = [9, 10, 11, 12, 13, 14, 15, 16]
+    let d0_bytes: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let d1_bytes: [u8; 8] = [9, 10, 11, 12, 13, 14, 15, 16];
+    engine.cpu.vfp[0] = u64::from_le_bytes(d0_bytes);
+    engine.cpu.vfp[1] = u64::from_le_bytes(d1_bytes);
+
+    // Setup Q2 (D4, D5) = bytes 0..15:
+    let q2_lo: [u8; 8] = [10, 11, 12, 13, 14, 15, 16, 17];
+    let q2_hi: [u8; 8] = [18, 19, 20, 21, 22, 23, 24, 25];
+    engine.cpu.vfp[4] = u64::from_le_bytes(q2_lo);
+    engine.cpu.vfp[5] = u64::from_le_bytes(q2_hi);
+
+    // Setup Q3 (D6, D7) = bytes 16..31:
+    let q3_lo: [u8; 8] = [26, 27, 28, 29, 30, 31, 32, 33];
+    let q3_hi: [u8; 8] = [34, 35, 36, 37, 38, 39, 40, 41];
+    engine.cpu.vfp[6] = u64::from_le_bytes(q3_lo);
+    engine.cpu.vfp[7] = u64::from_le_bytes(q3_hi);
+
+    // Program at 0xB000:
+    // 0xB000: VEXT.8 d2, d0, d1, #3 -> 0xF2B02301
+    // 0xB004: VEXT.8 q4, q2, q3, #6 -> 0xF2B48646 (dest Q4 = D8, D9)
+    // 0xB008: MOV r7, #1          -> 0xE3A07001
+    // 0xB00C: MOV r0, #0          -> 0xE3A00000
+    // 0xB010: SVC 0               -> 0xEF000000
+    engine.mem.write_u32(code_base, 0xF2B0_2301).unwrap();
+    engine.mem.write_u32(code_base.add(4), 0xF2B4_8646).unwrap();
+    engine.mem.write_u32(code_base.add(8), 0xE3A0_7001).unwrap();
+    engine.mem.write_u32(code_base.add(12), 0xE3A0_0000).unwrap();
+    engine.mem.write_u32(code_base.add(16), 0xEF00_0000).unwrap();
+
+    engine.cpu.set_pc(code_base);
+    let exit_code = engine.run(20).unwrap();
+    assert_eq!(exit_code, 0);
+
+    // Verify VEXT.8 d2, d0, d1, #3:
+    // D0 = [1, 2, 3, 4, 5, 6, 7, 8], D1 = [9, 10, 11, 12, 13, 14, 15, 16]
+    // Extracting at offset 3 gives: [4, 5, 6, 7, 8, 9, 10, 11]
+    assert_eq!(engine.cpu.vfp[2].to_le_bytes(), [4, 5, 6, 7, 8, 9, 10, 11]);
+
+    // Verify VEXT.8 q4, q2, q3, #6:
+    // Q2 = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
+    // Q3 = [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41]
+    // Extracting at offset 6 gives 16 bytes:
+    // [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+    assert_eq!(engine.cpu.vfp[8].to_le_bytes(), [16, 17, 18, 19, 20, 21, 22, 23]);
+    assert_eq!(engine.cpu.vfp[9].to_le_bytes(), [24, 25, 26, 27, 28, 29, 30, 31]);
+}

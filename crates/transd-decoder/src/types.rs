@@ -163,6 +163,12 @@ pub enum NeonOp {
     Uqsub,
     Sqshl,
     Uqshl,
+    // Pairwise reductions (Stage 45)
+    Padd,
+    Pmax,
+    Pmin,
+    Upmax,
+    Upmin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,6 +366,13 @@ pub enum Op {
         vd: u8, // Q register base
         vn: u8, // D register
         vm: u8, // D register
+    },
+    NeonExtract {
+        is_quad: bool,
+        imm: u8,
+        vd: u8,
+        vn: u8,
+        vm: u8,
     },
     Nop,
     Unknown(u32),

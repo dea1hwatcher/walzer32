@@ -943,5 +943,34 @@ mod tests {
                 vm: 1,
             }
         );
+
+        // Thumb-2 VPADD.F32 d0, d1, d2 -> hi=0xFF01, lo=0x0D02
+        let (inst_vpadd, size) = ThumbDecoder::decode(0xFF01, Some(0x0D02));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vpadd.op,
+            Op::NeonAlu {
+                op: NeonOp::Padd,
+                size: NeonSize::F32,
+                is_quad: false,
+                dst: 0,
+                src1: 1,
+                src2: 2,
+            }
+        );
+
+        // Thumb-2 VEXT.8 d0, d1, d2, #3 -> hi=0xEFB1, lo=0x0302
+        let (inst_vext, size) = ThumbDecoder::decode(0xEFB1, Some(0x0302));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vext.op,
+            Op::NeonExtract {
+                is_quad: false,
+                imm: 3,
+                vd: 0,
+                vn: 1,
+                vm: 2,
+            }
+        );
     }
 }

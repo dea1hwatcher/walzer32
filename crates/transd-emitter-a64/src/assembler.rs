@@ -1090,6 +1090,79 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// ADDP Vd, Vn, Vm (Pairwise integer add)
+    pub fn neon_addp(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_BC00 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FADDP Vd, Vn, Vm (Pairwise floating-point add)
+    pub fn neon_faddp(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2E20_D400 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FMAXP Vd, Vn, Vm (Pairwise floating-point max)
+    pub fn neon_fmaxp(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2E20_F400 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FMINP Vd, Vn, Vm (Pairwise floating-point min)
+    pub fn neon_fminp(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2EA0_F400 | q | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SMAXP Vd, Vn, Vm (Pairwise signed integer max)
+    pub fn neon_smaxp(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_A400 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SMINP Vd, Vn, Vm (Pairwise signed integer min)
+    pub fn neon_sminp(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_AC00 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// UMAXP Vd, Vn, Vm (Pairwise unsigned integer max)
+    pub fn neon_umaxp(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2E20_A400 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// UMINP Vd, Vn, Vm (Pairwise unsigned integer min)
+    pub fn neon_uminp(&mut self, rd: u8, rn: u8, rm: u8, size: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && size < 4);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2E20_AC00 | q | ((size as u32) << 22) | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// EXT Vd, Vn, Vm, #imm (Vector extract)
+    pub fn neon_ext(&mut self, rd: u8, rn: u8, rm: u8, imm4: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let imm_mask = if is_quad { 15 } else { 7 };
+        let inst = 0x2E00_0000 | q | ((rm as u32) << 16) | (((imm4 & imm_mask) as u32) << 11) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
     /// LDXR Wt, [Xn] (Load exclusive 32-bit register)
     pub fn ldxr_w(&mut self, rt: A64Reg, rn: A64Reg) {
         let inst = 0x885F_7C00 | (rn.index() << 5) | rt.index();

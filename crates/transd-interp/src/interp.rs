@@ -1118,6 +1118,192 @@ impl Interpreter {
                                 }
                                 r
                             }
+                            // Pairwise reductions (Stage 45)
+                            (NeonOp::Padd, NeonSize::F32) => {
+                                let a0 = f32::from_bits((a & 0xFFFF_FFFF) as u32);
+                                let a1 = f32::from_bits((a >> 32) as u32);
+                                let b0 = f32::from_bits((b & 0xFFFF_FFFF) as u32);
+                                let b1 = f32::from_bits((b >> 32) as u32);
+                                let r0 = (a0 + a1).to_bits() as u64;
+                                let r1 = ((b0 + b1).to_bits() as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Pmax, NeonSize::F32) => {
+                                let a0 = f32::from_bits((a & 0xFFFF_FFFF) as u32);
+                                let a1 = f32::from_bits((a >> 32) as u32);
+                                let b0 = f32::from_bits((b & 0xFFFF_FFFF) as u32);
+                                let b1 = f32::from_bits((b >> 32) as u32);
+                                let r0 = a0.max(a1).to_bits() as u64;
+                                let r1 = (b0.max(b1).to_bits() as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Pmin, NeonSize::F32) => {
+                                let a0 = f32::from_bits((a & 0xFFFF_FFFF) as u32);
+                                let a1 = f32::from_bits((a >> 32) as u32);
+                                let b0 = f32::from_bits((b & 0xFFFF_FFFF) as u32);
+                                let b1 = f32::from_bits((b >> 32) as u32);
+                                let r0 = a0.min(a1).to_bits() as u64;
+                                let r1 = (b0.min(b1).to_bits() as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Padd, NeonSize::I32) => {
+                                let a0 = (a & 0xFFFF_FFFF) as u32;
+                                let a1 = (a >> 32) as u32;
+                                let b0 = (b & 0xFFFF_FFFF) as u32;
+                                let b1 = (b >> 32) as u32;
+                                let r0 = a0.wrapping_add(a1) as u64;
+                                let r1 = (b0.wrapping_add(b1) as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Padd, NeonSize::I16) => {
+                                let a0 = (a & 0xFFFF) as u16;
+                                let a1 = ((a >> 16) & 0xFFFF) as u16;
+                                let a2 = ((a >> 32) & 0xFFFF) as u16;
+                                let a3 = ((a >> 48) & 0xFFFF) as u16;
+                                let b0 = (b & 0xFFFF) as u16;
+                                let b1 = ((b >> 16) & 0xFFFF) as u16;
+                                let b2 = ((b >> 32) & 0xFFFF) as u16;
+                                let b3 = ((b >> 48) & 0xFFFF) as u16;
+                                let r0 = a0.wrapping_add(a1) as u64;
+                                let r1 = (a2.wrapping_add(a3) as u64) << 16;
+                                let r2 = (b0.wrapping_add(b1) as u64) << 32;
+                                let r3 = (b2.wrapping_add(b3) as u64) << 48;
+                                r0 | r1 | r2 | r3
+                            }
+                            (NeonOp::Padd, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak0 = ((a >> (2 * k * 8)) & 0xFF) as u8;
+                                    let ak1 = ((a >> ((2 * k + 1) * 8)) & 0xFF) as u8;
+                                    r |= (ak0.wrapping_add(ak1) as u64) << (k * 8);
+                                }
+                                for k in 0..4 {
+                                    let bk0 = ((b >> (2 * k * 8)) & 0xFF) as u8;
+                                    let bk1 = ((b >> ((2 * k + 1) * 8)) & 0xFF) as u8;
+                                    r |= (bk0.wrapping_add(bk1) as u64) << ((4 + k) * 8);
+                                }
+                                r
+                            }
+                            (NeonOp::Pmax, NeonSize::I32) => {
+                                let a0 = (a & 0xFFFF_FFFF) as u32 as i32;
+                                let a1 = (a >> 32) as u32 as i32;
+                                let b0 = (b & 0xFFFF_FFFF) as u32 as i32;
+                                let b1 = (b >> 32) as u32 as i32;
+                                let r0 = (a0.max(a1) as u32) as u64;
+                                let r1 = ((b0.max(b1) as u32) as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Pmax, NeonSize::I16) => {
+                                let a0 = (a as i16).max((a >> 16) as i16) as u16 as u64;
+                                let a1 = ((a >> 32) as i16).max((a >> 48) as i16) as u16 as u64;
+                                let b0 = (b as i16).max((b >> 16) as i16) as u16 as u64;
+                                let b1 = ((b >> 32) as i16).max((b >> 48) as i16) as u16 as u64;
+                                a0 | (a1 << 16) | (b0 << 32) | (b1 << 48)
+                            }
+                            (NeonOp::Pmax, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak0 = (a >> (2 * k * 8)) as i8;
+                                    let ak1 = (a >> ((2 * k + 1) * 8)) as i8;
+                                    r |= (ak0.max(ak1) as u8 as u64) << (k * 8);
+                                }
+                                for k in 0..4 {
+                                    let bk0 = (b >> (2 * k * 8)) as i8;
+                                    let bk1 = (b >> ((2 * k + 1) * 8)) as i8;
+                                    r |= (bk0.max(bk1) as u8 as u64) << ((4 + k) * 8);
+                                }
+                                r
+                            }
+                            (NeonOp::Pmin, NeonSize::I32) => {
+                                let a0 = (a & 0xFFFF_FFFF) as u32 as i32;
+                                let a1 = (a >> 32) as u32 as i32;
+                                let b0 = (b & 0xFFFF_FFFF) as u32 as i32;
+                                let b1 = (b >> 32) as u32 as i32;
+                                let r0 = (a0.min(a1) as u32) as u64;
+                                let r1 = ((b0.min(b1) as u32) as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Pmin, NeonSize::I16) => {
+                                let a0 = (a as i16).min((a >> 16) as i16) as u16 as u64;
+                                let a1 = ((a >> 32) as i16).min((a >> 48) as i16) as u16 as u64;
+                                let b0 = (b as i16).min((b >> 16) as i16) as u16 as u64;
+                                let b1 = ((b >> 32) as i16).min((b >> 48) as i16) as u16 as u64;
+                                a0 | (a1 << 16) | (b0 << 32) | (b1 << 48)
+                            }
+                            (NeonOp::Pmin, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak0 = (a >> (2 * k * 8)) as i8;
+                                    let ak1 = (a >> ((2 * k + 1) * 8)) as i8;
+                                    r |= (ak0.min(ak1) as u8 as u64) << (k * 8);
+                                }
+                                for k in 0..4 {
+                                    let bk0 = (b >> (2 * k * 8)) as i8;
+                                    let bk1 = (b >> ((2 * k + 1) * 8)) as i8;
+                                    r |= (bk0.min(bk1) as u8 as u64) << ((4 + k) * 8);
+                                }
+                                r
+                            }
+                            (NeonOp::Upmax, NeonSize::I32) => {
+                                let a0 = (a & 0xFFFF_FFFF) as u32;
+                                let a1 = (a >> 32) as u32;
+                                let b0 = (b & 0xFFFF_FFFF) as u32;
+                                let b1 = (b >> 32) as u32;
+                                let r0 = a0.max(a1) as u64;
+                                let r1 = (b0.max(b1) as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Upmax, NeonSize::I16) => {
+                                let a0 = (a as u16).max((a >> 16) as u16) as u64;
+                                let a1 = ((a >> 32) as u16).max((a >> 48) as u16) as u64;
+                                let b0 = (b as u16).max((b >> 16) as u16) as u64;
+                                let b1 = ((b >> 32) as u16).max((b >> 48) as u16) as u64;
+                                a0 | (a1 << 16) | (b0 << 32) | (b1 << 48)
+                            }
+                            (NeonOp::Upmax, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak0 = ((a >> (2 * k * 8)) & 0xFF) as u8;
+                                    let ak1 = ((a >> ((2 * k + 1) * 8)) & 0xFF) as u8;
+                                    r |= (ak0.max(ak1) as u64) << (k * 8);
+                                }
+                                for k in 0..4 {
+                                    let bk0 = ((b >> (2 * k * 8)) & 0xFF) as u8;
+                                    let bk1 = ((b >> ((2 * k + 1) * 8)) & 0xFF) as u8;
+                                    r |= (bk0.max(bk1) as u64) << ((4 + k) * 8);
+                                }
+                                r
+                            }
+                            (NeonOp::Upmin, NeonSize::I32) => {
+                                let a0 = (a & 0xFFFF_FFFF) as u32;
+                                let a1 = (a >> 32) as u32;
+                                let b0 = (b & 0xFFFF_FFFF) as u32;
+                                let b1 = (b >> 32) as u32;
+                                let r0 = a0.min(a1) as u64;
+                                let r1 = (b0.min(b1) as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Upmin, NeonSize::I16) => {
+                                let a0 = (a as u16).min((a >> 16) as u16) as u64;
+                                let a1 = ((a >> 32) as u16).min((a >> 48) as u16) as u64;
+                                let b0 = (b as u16).min((b >> 16) as u16) as u64;
+                                let b1 = ((b >> 32) as u16).min((b >> 48) as u16) as u64;
+                                a0 | (a1 << 16) | (b0 << 32) | (b1 << 48)
+                            }
+                            (NeonOp::Upmin, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak0 = ((a >> (2 * k * 8)) & 0xFF) as u8;
+                                    let ak1 = ((a >> ((2 * k + 1) * 8)) & 0xFF) as u8;
+                                    r |= (ak0.min(ak1) as u64) << (k * 8);
+                                }
+                                for k in 0..4 {
+                                    let bk0 = ((b >> (2 * k * 8)) & 0xFF) as u8;
+                                    let bk1 = ((b >> ((2 * k + 1) * 8)) & 0xFF) as u8;
+                                    r |= (bk0.min(bk1) as u64) << ((4 + k) * 8);
+                                }
+                                r
+                            }
                             _ => a,
                         };
                         cpu.vfp[d_idx] = res;
@@ -1534,6 +1720,51 @@ impl Interpreter {
 
                 cpu.vfp[d0_idx] = out_lo;
                 cpu.vfp[d1_idx] = out_hi;
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonExtract {
+                is_quad,
+                imm,
+                vd,
+                vn,
+                vm,
+            } => {
+                if is_quad {
+                    let n0 = (vn as usize) % 32;
+                    let n1 = (vn as usize + 1) % 32;
+                    let m0 = (vm as usize) % 32;
+                    let m1 = (vm as usize + 1) % 32;
+                    let d0 = (vd as usize) % 32;
+                    let d1 = (vd as usize + 1) % 32;
+
+                    let mut concat = [0u8; 32];
+                    concat[0..8].copy_from_slice(&cpu.vfp[n0].to_le_bytes());
+                    concat[8..16].copy_from_slice(&cpu.vfp[n1].to_le_bytes());
+                    concat[16..24].copy_from_slice(&cpu.vfp[m0].to_le_bytes());
+                    concat[24..32].copy_from_slice(&cpu.vfp[m1].to_le_bytes());
+
+                    let offset = (imm as usize).min(16);
+                    let r0 = u64::from_le_bytes(concat[offset..offset + 8].try_into().unwrap());
+                    let r1 = u64::from_le_bytes(concat[offset + 8..offset + 16].try_into().unwrap());
+
+                    cpu.vfp[d0] = r0;
+                    cpu.vfp[d1] = r1;
+                } else {
+                    let n = (vn as usize) % 32;
+                    let m = (vm as usize) % 32;
+                    let d = (vd as usize) % 32;
+
+                    let mut concat = [0u8; 16];
+                    concat[0..8].copy_from_slice(&cpu.vfp[n].to_le_bytes());
+                    concat[8..16].copy_from_slice(&cpu.vfp[m].to_le_bytes());
+
+                    let offset = (imm as usize).min(8);
+                    let r = u64::from_le_bytes(concat[offset..offset + 8].try_into().unwrap());
+
+                    cpu.vfp[d] = r;
+                }
+
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }

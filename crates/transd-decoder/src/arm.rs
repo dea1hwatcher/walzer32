@@ -242,6 +242,30 @@ impl ArmDecoder {
             ));
         }
 
+        // NEON Extract (VEXT: 1111 0010 1 D 11 Vn Vd imm4 N Q M 0 Vm)
+        if (raw & 0xFFB0_0010) == 0xF2B0_0000 {
+            let d_bit = (raw >> 22) & 1;
+            let n_bit = (raw >> 7) & 1;
+            let m_bit = (raw >> 5) & 1;
+            let q_bit = (raw >> 6) & 1;
+            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let vn = ((raw >> 16) & 0xF) | (n_bit << 4);
+            let vm = (raw & 0xF) | (m_bit << 4);
+            let imm4 = ((raw >> 8) & 0xF) as u8;
+            let is_quad = q_bit != 0;
+            return Some(ArmInst::new(
+                Cond::AL,
+                Op::NeonExtract {
+                    is_quad,
+                    imm: imm4,
+                    vd: vd as u8,
+                    vn: vn as u8,
+                    vm: vm as u8,
+                },
+                raw,
+            ));
+        }
+
         // NEON Data Processing (3-register same: 1111 001x ...)
         if (raw & 0xFE00_0000) == 0xF200_0000 {
             let d_bit = (raw >> 22) & 1;
@@ -269,6 +293,21 @@ impl ArmDecoder {
             // Vector Float 3-register same: op_code == 0b1101
             if op_code == 0b1101 {
                 if bit4 == 0 {
+                    // VPADD.F32 (bit24 == 1, Q == 0, bit 21 == 0)
+                    if bit24 != 0 && !is_quad && (raw & (1 << 21)) == 0 {
+                        return Some(ArmInst::new(
+                            Cond::AL,
+                            Op::NeonAlu {
+                                op: NeonOp::Padd,
+                                size: NeonSize::F32,
+                                is_quad: false,
+                                dst: vd as u8,
+                                src1: vn as u8,
+                                src2: vm as u8,
+                            },
+                            raw,
+                        ));
+                    }
                     // VADD.F32 (size_bits == 0b00) / VSUB.F32 (size_bits == 0b10)
                     let op = if (raw & (1 << 21)) != 0 { NeonOp::Sub } else { NeonOp::Add };
                     return Some(ArmInst::new(
@@ -309,7 +348,24 @@ impl ArmDecoder {
 
             // Vector Float Min/Max: op_code == 0b1111, bit4 == 0
             if op_code == 0b1111 && bit4 == 0 {
-                let op = if (raw & (1 << 21)) != 0 { NeonOp::Min } else { NeonOp::Max };
+                let is_min = (raw & (1 << 21)) != 0;
+                if bit24 != 0 && !is_quad {
+                    // Pairwise VPMAX.F32 / VPMIN.F32
+                    let op = if is_min { NeonOp::Pmin } else { NeonOp::Pmax };
+                    return Some(ArmInst::new(
+                        Cond::AL,
+                        Op::NeonAlu {
+                            op,
+                            size: NeonSize::F32,
+                            is_quad: false,
+                            dst: vd as u8,
+                            src1: vn as u8,
+                            src2: vm as u8,
+                        },
+                        raw,
+                    ));
+                }
+                let op = if is_min { NeonOp::Min } else { NeonOp::Max };
                 return Some(ArmInst::new(
                     Cond::AL,
                     Op::NeonAlu {
@@ -424,6 +480,44 @@ impl ArmDecoder {
                         op,
                         size,
                         is_quad,
+                        dst: vd as u8,
+                        src1: vn as u8,
+                        src2: vm as u8,
+                    },
+                    raw,
+                ));
+            }
+
+            // Pairwise integer VPADD: op_code == 0b1011, bit4 == 1, bit24 == 0, Q == 0
+            if op_code == 0b1011 && bit4 == 1 && bit24 == 0 && !is_quad && size_bits < 3 {
+                return Some(ArmInst::new(
+                    Cond::AL,
+                    Op::NeonAlu {
+                        op: NeonOp::Padd,
+                        size,
+                        is_quad: false,
+                        dst: vd as u8,
+                        src1: vn as u8,
+                        src2: vm as u8,
+                    },
+                    raw,
+                ));
+            }
+
+            // Pairwise integer VPMAX / VPMIN: op_code == 0b1010, Q == 0
+            if op_code == 0b1010 && !is_quad && size_bits < 3 {
+                let op = match (bit24 != 0, bit4 != 0) {
+                    (false, false) => NeonOp::Pmax,
+                    (true, false) => NeonOp::Upmax,
+                    (false, true) => NeonOp::Pmin,
+                    (true, true) => NeonOp::Upmin,
+                };
+                return Some(ArmInst::new(
+                    Cond::AL,
+                    Op::NeonAlu {
+                        op,
+                        size,
+                        is_quad: false,
                         dst: vd as u8,
                         src1: vn as u8,
                         src2: vm as u8,
@@ -1460,6 +1554,116 @@ mod tests {
                 vd: 0,
                 vn: 0,
                 vm: 1,
+            }
+        );
+
+        // VPADD.F32 d0, d1, d2
+        let inst = ArmDecoder::decode(0xF301_0D02);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Padd,
+                size: NeonSize::F32,
+                is_quad: false,
+                dst: 0,
+                src1: 1,
+                src2: 2,
+            }
+        );
+
+        // VPADD.I32 d0, d1, d2
+        let inst = ArmDecoder::decode(0xF221_0B12);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Padd,
+                size: NeonSize::I32,
+                is_quad: false,
+                dst: 0,
+                src1: 1,
+                src2: 2,
+            }
+        );
+
+        // VPMAX.F32 d0, d1, d2
+        let inst = ArmDecoder::decode(0xF301_0F02);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Pmax,
+                size: NeonSize::F32,
+                is_quad: false,
+                dst: 0,
+                src1: 1,
+                src2: 2,
+            }
+        );
+
+        // VPMIN.F32 d0, d1, d2
+        let inst = ArmDecoder::decode(0xF321_0F02);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Pmin,
+                size: NeonSize::F32,
+                is_quad: false,
+                dst: 0,
+                src1: 1,
+                src2: 2,
+            }
+        );
+
+        // VPMAX.S32 d0, d1, d2
+        let inst = ArmDecoder::decode(0xF221_0A02);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Pmax,
+                size: NeonSize::I32,
+                is_quad: false,
+                dst: 0,
+                src1: 1,
+                src2: 2,
+            }
+        );
+
+        // VPMIN.U16 d0, d1, d2
+        let inst = ArmDecoder::decode(0xF311_0A12);
+        assert_eq!(
+            inst.op,
+            Op::NeonAlu {
+                op: NeonOp::Upmin,
+                size: NeonSize::I16,
+                is_quad: false,
+                dst: 0,
+                src1: 1,
+                src2: 2,
+            }
+        );
+
+        // VEXT.8 d0, d1, d2, #3
+        let inst = ArmDecoder::decode(0xF2B1_0302);
+        assert_eq!(
+            inst.op,
+            Op::NeonExtract {
+                is_quad: false,
+                imm: 3,
+                vd: 0,
+                vn: 1,
+                vm: 2,
+            }
+        );
+
+        // VEXT.8 q0, q1, q2, #5
+        let inst = ArmDecoder::decode(0xF2B2_0544);
+        assert_eq!(
+            inst.op,
+            Op::NeonExtract {
+                is_quad: true,
+                imm: 5,
+                vd: 0,
+                vn: 2,
+                vm: 4,
             }
         );
     }

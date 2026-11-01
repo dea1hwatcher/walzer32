@@ -960,6 +960,51 @@ impl A64Compiler {
                         asm.neon_uqshl(2, 0, 1, sz, *is_quad);
                     }
 
+                    // Pairwise reductions (Stage 45)
+                    (NeonOp::Padd, NeonSize::F32) => asm.neon_faddp(2, 0, 1, *is_quad),
+                    (NeonOp::Pmax, NeonSize::F32) => asm.neon_fmaxp(2, 0, 1, *is_quad),
+                    (NeonOp::Pmin, NeonSize::F32) => asm.neon_fminp(2, 0, 1, *is_quad),
+                    (NeonOp::Padd, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_addp(2, 0, 1, sz, *is_quad);
+                    }
+                    (NeonOp::Pmax, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_smaxp(2, 0, 1, sz, *is_quad);
+                    }
+                    (NeonOp::Pmin, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_sminp(2, 0, 1, sz, *is_quad);
+                    }
+                    (NeonOp::Upmax, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_umaxp(2, 0, 1, sz, *is_quad);
+                    }
+                    (NeonOp::Upmin, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_uminp(2, 0, 1, sz, *is_quad);
+                    }
+
                     // Fallback
                     _ => asm.neon_and(2, 0, 1, *is_quad),
                 }
@@ -1064,6 +1109,32 @@ impl A64Compiler {
 
                 asm.add_x_imm(A64Reg::X9, A64Reg::X0, vd_off as u16);
                 asm.str_q_imm(2, A64Reg::X9, 0);
+            }
+            Op::NeonExtract {
+                is_quad,
+                imm,
+                vd,
+                vn,
+                vm,
+            } => {
+                let vn_off = (OFFSET_VFP + (*vn as usize) * 8) as u32;
+                let vm_off = (OFFSET_VFP + (*vm as usize) * 8) as u32;
+                let vd_off = (OFFSET_VFP + (*vd as usize) * 8) as u32;
+
+                if *is_quad {
+                    asm.add_x_imm(A64Reg::X9, A64Reg::X0, vn_off as u16);
+                    asm.ldr_q_imm(0, A64Reg::X9, 0);
+                    asm.add_x_imm(A64Reg::X10, A64Reg::X0, vm_off as u16);
+                    asm.ldr_q_imm(1, A64Reg::X10, 0);
+                    asm.neon_ext(2, 0, 1, *imm, true);
+                    asm.add_x_imm(A64Reg::X9, A64Reg::X0, vd_off as u16);
+                    asm.str_q_imm(2, A64Reg::X9, 0);
+                } else {
+                    asm.ldr_d_imm(0, A64Reg::X0, vn_off);
+                    asm.ldr_d_imm(1, A64Reg::X0, vm_off);
+                    asm.neon_ext(2, 0, 1, *imm, false);
+                    asm.str_d_imm(2, A64Reg::X0, vd_off);
+                }
             }
             _ => {
                 // Branches and exchanges are fully handled in compile_exit; avoid spurious NOPs
