@@ -164,6 +164,33 @@ pub enum BionicFuncId {
     // High-resolution timed sleep
     ClockNanosleep = 300,
 
+    // FD duplication
+    Dup = 310,
+    Dup2 = 311,
+
+    // File-descriptor control
+    Fcntl = 320,
+
+    // I/O multiplexing
+    Select = 330,
+    Poll = 331,
+
+    // Name/address resolution
+    Getaddrinfo = 340,
+    Freeaddrinfo = 341,
+    Getnameinfo = 342,
+    Gethostbyname = 343,
+    GethostbynameR = 344,
+
+    // Network interface enumeration
+    Getifaddrs = 350,
+    Freeifaddrs = 351,
+
+    // Process group / session
+    Setsid = 360,
+    Getpgrp = 361,
+    Setpgid = 362,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -390,6 +417,21 @@ impl BionicFuncId {
             291 => Some(Self::PthreadBarrierWait),
             292 => Some(Self::PthreadBarrierDestroy),
             300 => Some(Self::ClockNanosleep),
+            310 => Some(Self::Dup),
+            311 => Some(Self::Dup2),
+            320 => Some(Self::Fcntl),
+            330 => Some(Self::Select),
+            331 => Some(Self::Poll),
+            340 => Some(Self::Getaddrinfo),
+            341 => Some(Self::Freeaddrinfo),
+            342 => Some(Self::Getnameinfo),
+            343 => Some(Self::Gethostbyname),
+            344 => Some(Self::GethostbynameR),
+            350 => Some(Self::Getifaddrs),
+            351 => Some(Self::Freeifaddrs),
+            360 => Some(Self::Setsid),
+            361 => Some(Self::Getpgrp),
+            362 => Some(Self::Setpgid),
             _ => None,
         }
     }
@@ -704,6 +746,21 @@ impl BionicBridge {
             ("pthread_barrier_wait", BionicFuncId::PthreadBarrierWait),
             ("pthread_barrier_destroy", BionicFuncId::PthreadBarrierDestroy),
             ("clock_nanosleep", BionicFuncId::ClockNanosleep),
+            ("dup", BionicFuncId::Dup),
+            ("dup2", BionicFuncId::Dup2),
+            ("fcntl", BionicFuncId::Fcntl),
+            ("select", BionicFuncId::Select),
+            ("poll", BionicFuncId::Poll),
+            ("getaddrinfo", BionicFuncId::Getaddrinfo),
+            ("freeaddrinfo", BionicFuncId::Freeaddrinfo),
+            ("getnameinfo", BionicFuncId::Getnameinfo),
+            ("gethostbyname", BionicFuncId::Gethostbyname),
+            ("gethostbyname_r", BionicFuncId::GethostbynameR),
+            ("getifaddrs", BionicFuncId::Getifaddrs),
+            ("freeifaddrs", BionicFuncId::Freeifaddrs),
+            ("setsid", BionicFuncId::Setsid),
+            ("getpgrp", BionicFuncId::Getpgrp),
+            ("setpgid", BionicFuncId::Setpgid),
         ];
 
         for (name, id) in funcs {
@@ -882,6 +939,21 @@ impl BionicBridge {
             BionicFuncId::PthreadBarrierWait,
             BionicFuncId::PthreadBarrierDestroy,
             BionicFuncId::ClockNanosleep,
+            BionicFuncId::Dup,
+            BionicFuncId::Dup2,
+            BionicFuncId::Fcntl,
+            BionicFuncId::Select,
+            BionicFuncId::Poll,
+            BionicFuncId::Getaddrinfo,
+            BionicFuncId::Freeaddrinfo,
+            BionicFuncId::Getnameinfo,
+            BionicFuncId::Gethostbyname,
+            BionicFuncId::GethostbynameR,
+            BionicFuncId::Getifaddrs,
+            BionicFuncId::Freeifaddrs,
+            BionicFuncId::Setsid,
+            BionicFuncId::Getpgrp,
+            BionicFuncId::Setpgid,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -2601,6 +2673,144 @@ impl BionicBridge {
                 // Stub: immediately return success (no actual sleep in DBT context)
                 cpu.set_reg(Reg::R0, 0);
             }
+            // ── Stage 60: FD duplication ──────────────────────────────────
+            BionicFuncId::Dup => {
+                // dup(oldfd) -> newfd (clone of oldfd)
+                let old_fd = cpu.reg(Reg::R0);
+                // Check socket table
+                let is_socket = self.socket_fds.contains_key(&old_fd);
+                // Check pipe table (read or write side)
+                let is_pipe_read = self.pipe_fds.contains_key(&old_fd);
+                let is_pipe_write = self.pipe_fds.values().any(|(w, _)| *w == old_fd);
+                if is_socket {
+                    let info = self.socket_fds[&old_fd];
+                    let new_fd = self.next_socket_fd;
+                    self.next_socket_fd += 1;
+                    self.socket_fds.insert(new_fd, info);
+                    cpu.set_reg(Reg::R0, new_fd);
+                } else if is_pipe_read {
+                    // Duplicate read end: share the same buffer via new read FD
+                    let new_read = self.next_pipe_fd;
+                    let _new_write = self.next_pipe_fd + 1;
+                    self.next_pipe_fd += 2;
+                    let (_w, buf) = &self.pipe_fds[&old_fd];
+                    let buf_clone = buf.clone();
+                    let write_fd = *_w;
+                    self.pipe_fds.insert(new_read, (write_fd, buf_clone));
+                    cpu.set_reg(Reg::R0, new_read);
+                } else if is_pipe_write {
+                    // Duplicate write end: just alias (stub: return a new fd, same pipe semantics)
+                    cpu.set_reg(Reg::R0, self.next_socket_fd);
+                    self.next_socket_fd += 1;
+                } else {
+                    // Unknown fd: return new sequential fd (stub passthrough)
+                    let new_fd = self.next_socket_fd;
+                    self.next_socket_fd += 1;
+                    cpu.set_reg(Reg::R0, new_fd);
+                }
+            }
+
+            BionicFuncId::Dup2 => {
+                // dup2(oldfd, newfd) -> newfd
+                // Stub: close newfd if open (no-op for us), then alias it to oldfd.
+                let _old_fd = cpu.reg(Reg::R0);
+                let new_fd  = cpu.reg(Reg::R1);
+                cpu.set_reg(Reg::R0, new_fd);
+            }
+
+            // ── Stage 60: fcntl ───────────────────────────────────────────
+            BionicFuncId::Fcntl => {
+                // fcntl(fd, cmd, ...) stub
+                // F_GETFL = 3 -> return O_RDWR (2)
+                // F_SETFL = 4 -> return 0
+                // F_GETFD = 1 -> return 0 (no FD_CLOEXEC)
+                // F_SETFD = 2 -> return 0
+                // All others  -> return 0
+                let cmd = cpu.reg(Reg::R1);
+                let ret = match cmd {
+                    1 => 0,   // F_GETFD
+                    2 => 0,   // F_SETFD
+                    3 => 2,   // F_GETFL -> O_RDWR
+                    4 => 0,   // F_SETFL
+                    _ => 0,
+                };
+                cpu.set_reg(Reg::R0, ret);
+            }
+
+            // ── Stage 60: select / poll ────────────────────────────────────
+            BionicFuncId::Select => {
+                // select(nfds, readfds, writefds, exceptfds, timeout) -> 0 (nothing ready)
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            BionicFuncId::Poll => {
+                // poll(fds, nfds, timeout) -> 0 (timeout, nothing ready)
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            // ── Stage 60: name/address resolution ─────────────────────────
+            BionicFuncId::Getaddrinfo => {
+                // getaddrinfo(node, service, hints, res) -> EAI_AGAIN (11) stub
+                // We don't resolve names; return EAI_AGAIN so callers can retry or skip.
+                cpu.set_reg(Reg::R0, 11); // EAI_AGAIN
+            }
+
+            BionicFuncId::Freeaddrinfo => {
+                // freeaddrinfo(res) -> void (no-op stub)
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            BionicFuncId::Getnameinfo => {
+                // getnameinfo(sa, salen, host, hostlen, serv, servlen, flags) -> EAI_AGAIN
+                cpu.set_reg(Reg::R0, 11); // EAI_AGAIN
+            }
+
+            BionicFuncId::Gethostbyname => {
+                // gethostbyname(name) -> NULL (not found)
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            BionicFuncId::GethostbynameR => {
+                // gethostbyname_r(name, ret, buf, buflen, result, h_errnop) -> ENOENT (2)
+                // Write NULL into *result
+                let result_ptr = GuestAddr::new(cpu.reg(Reg::R3));
+                if result_ptr.as_u32() != 0 {
+                    mem.write_u32(result_ptr, 0)?;
+                }
+                cpu.set_reg(Reg::R0, 2); // ENOENT
+            }
+
+            // ── Stage 60: network interface enumeration ────────────────────
+            BionicFuncId::Getifaddrs => {
+                // getifaddrs(ifap) -> -1 (ENOTSUP stub — no interfaces in DBT context)
+                let ifap_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if ifap_ptr.as_u32() != 0 {
+                    mem.write_u32(ifap_ptr, 0)?; // *ifap = NULL
+                }
+                cpu.set_reg(Reg::R0, u32::MAX); // -1 ENOTSUP
+            }
+
+            BionicFuncId::Freeifaddrs => {
+                // freeifaddrs(ifa) -> void (no-op)
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            // ── Stage 60: process group / session ─────────────────────────
+            BionicFuncId::Setsid => {
+                // setsid() -> pid (stub: return guest pid)
+                cpu.set_reg(Reg::R0, self.pid);
+            }
+
+            BionicFuncId::Getpgrp => {
+                // getpgrp() -> pid
+                cpu.set_reg(Reg::R0, self.pid);
+            }
+
+            BionicFuncId::Setpgid => {
+                // setpgid(pid, pgid) -> 0
+                cpu.set_reg(Reg::R0, 0);
+            }
+
 
 
             _ => {}
