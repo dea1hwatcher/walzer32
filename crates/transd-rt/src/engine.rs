@@ -34,6 +34,10 @@ pub trait SyscallHandler: Send {
         mem: &mut dyn Memory,
     ) -> Result<Option<u32>, EngineError>;
 
+    fn vfs(&self) -> Option<&crate::vfs::VirtualFileSystem> {
+        None
+    }
+
     fn vfs_mut(&mut self) -> Option<&mut crate::vfs::VirtualFileSystem> {
         None
     }
@@ -360,6 +364,10 @@ impl SyscallHandler for DefaultSyscallHandler {
         }
     }
 
+    fn vfs(&self) -> Option<&crate::vfs::VirtualFileSystem> {
+        Some(&self.vfs)
+    }
+
     fn vfs_mut(&mut self) -> Option<&mut crate::vfs::VirtualFileSystem> {
         Some(&mut self.vfs)
     }
@@ -483,6 +491,11 @@ impl<M: Memory> DbtEngine<M> {
     }
 
     /// Access the Virtual File System (VFS) of the engine
+    pub fn vfs(&self) -> Option<&crate::vfs::VirtualFileSystem> {
+        self.syscall_handler.vfs()
+    }
+
+    /// Access the Virtual File System (VFS) of the engine mutably
     pub fn vfs_mut(&mut self) -> Option<&mut crate::vfs::VirtualFileSystem> {
         self.syscall_handler.vfs_mut()
     }

@@ -1,3 +1,4 @@
+pub mod asset;
 pub mod audio;
 pub mod audio_resample;
 pub mod audio_ring;
@@ -10,6 +11,7 @@ pub mod surface;
 pub mod trampoline;
 pub mod vulkan;
 
+pub use asset::{AssetBridge, AssetFuncId, OpenAsset, OpenAssetDir, ASSET_SVC_MAGIC};
 pub use audio::{
     AudioBridge, AudioBuffer, AudioFormat, AudioFuncId, AUDIO_SVC_MAGIC,
     SL_PLAYSTATE_PAUSED, SL_PLAYSTATE_PLAYING, SL_PLAYSTATE_STOPPED,

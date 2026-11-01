@@ -542,3 +542,112 @@ pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeFlushAsyncJit
         JNI_ERR_GENERIC
     }
 }
+
+/// JNI Export: Mount an OBB expansion pack into the guest VFS
+///
+/// Java Signature:
+///   public static native int nativeMountObb(String packageName, int version, byte[] obbBytes);
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeMountObb(
+    _env: JNIEnv,
+    _clazz: JClass,
+    pkg_str: *const u8,
+    pkg_len: usize,
+    version: JInt,
+    obb_ptr: *const u8,
+    obb_len: usize,
+) -> JInt {
+    if pkg_str.is_null() || obb_ptr.is_null() || obb_len == 0 {
+        return JNI_ERR_GENERIC;
+    }
+
+    let pkg = match std::str::from_utf8(unsafe { std::slice::from_raw_parts(pkg_str, pkg_len) }) {
+        Ok(s) => s,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    let obb_slice = unsafe { std::slice::from_raw_parts(obb_ptr, obb_len) };
+
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    if let Some(session) = guard.as_mut() {
+        session.mount_obb(pkg, version as u32, obb_slice.to_vec());
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Mount a patch OBB expansion pack into the guest VFS
+///
+/// Java Signature:
+///   public static native int nativeMountPatchObb(String packageName, int version, byte[] obbBytes);
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeMountPatchObb(
+    _env: JNIEnv,
+    _clazz: JClass,
+    pkg_str: *const u8,
+    pkg_len: usize,
+    version: JInt,
+    obb_ptr: *const u8,
+    obb_len: usize,
+) -> JInt {
+    if pkg_str.is_null() || obb_ptr.is_null() || obb_len == 0 {
+        return JNI_ERR_GENERIC;
+    }
+
+    let pkg = match std::str::from_utf8(unsafe { std::slice::from_raw_parts(pkg_str, pkg_len) }) {
+        Ok(s) => s,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    let obb_slice = unsafe { std::slice::from_raw_parts(obb_ptr, obb_len) };
+
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    if let Some(session) = guard.as_mut() {
+        session.mount_patch_obb(pkg, version as u32, obb_slice.to_vec());
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Mount an application's private data directory
+///
+/// Java Signature:
+///   public static native int nativeMountAppDataDir(String packageName);
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeMountAppDataDir(
+    _env: JNIEnv,
+    _clazz: JClass,
+    pkg_str: *const u8,
+    pkg_len: usize,
+) -> JInt {
+    if pkg_str.is_null() {
+        return JNI_ERR_GENERIC;
+    }
+
+    let pkg = match std::str::from_utf8(unsafe { std::slice::from_raw_parts(pkg_str, pkg_len) }) {
+        Ok(s) => s,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    if let Some(session) = guard.as_mut() {
+        session.mount_app_data_dir(pkg);
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}

@@ -1,5 +1,6 @@
 use transd_core::{GuestAddr, Memory, Reg};
 use transd_rt::{DbtEngine, EngineError};
+use crate::asset::AssetBridge;
 use crate::audio::AudioBridge;
 use crate::bionic::BionicBridge;
 use crate::gles::GlesBridge;
@@ -15,7 +16,7 @@ pub fn invoke_guest<M: Memory>(
     func_addr: GuestAddr,
     args: &[u32],
 ) -> Result<u32, EngineError> {
-    invoke_guest_extended(engine, bionic, jni, None, None, func_addr, args)
+    invoke_guest_extended(engine, bionic, jni, None, None, None, func_addr, args)
 }
 
 /// Invokes a 32-bit guest function with optional GLES passthrough support
@@ -27,16 +28,17 @@ pub fn invoke_guest_full<M: Memory>(
     func_addr: GuestAddr,
     args: &[u32],
 ) -> Result<u32, EngineError> {
-    invoke_guest_extended(engine, bionic, jni, gles, None, func_addr, args)
+    invoke_guest_extended(engine, bionic, jni, gles, None, None, func_addr, args)
 }
 
-/// Invokes a 32-bit guest function with optional GLES and Audio passthrough support
+/// Invokes a 32-bit guest function with optional GLES, Audio, and Asset passthrough support
 pub fn invoke_guest_extended<M: Memory>(
     engine: &mut DbtEngine<M>,
     bionic: &mut BionicBridge,
     jni: &mut JniBridge,
     mut gles: Option<&mut GlesBridge>,
     mut audio: Option<&mut AudioBridge>,
+    mut asset: Option<&mut AssetBridge>,
     func_addr: GuestAddr,
     args: &[u32],
 ) -> Result<u32, EngineError> {
@@ -108,6 +110,14 @@ pub fn invoke_guest_extended<M: Memory>(
                 // Try Audio SVC
                 if let Some(ref mut a) = audio {
                     if a.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+                        let next_pc = pc.add(4);
+                        engine.cpu.set_pc(next_pc);
+                        continue;
+                    }
+                }
+                // Try Asset SVC
+                if let Some(ref mut ast) = asset {
+                    if ast.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
                         let next_pc = pc.add(4);
                         engine.cpu.set_pc(next_pc);
                         continue;

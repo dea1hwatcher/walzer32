@@ -3,8 +3,8 @@ use std::sync::Mutex;
 use thiserror::Error;
 use transd_apk::{ApkError, ApkPackage};
 use transd_bridge::{
-    invoke_guest_extended, invoke_jni_onload, AudioBridge, BionicBridge, GlesBridge, JniBridge,
-    KeyEvent, RegisteredNativeMethod, SurfaceBridge, TouchEvent,
+    invoke_guest_extended, invoke_jni_onload, AssetBridge, AudioBridge, BionicBridge, GlesBridge,
+    JniBridge, KeyEvent, RegisteredNativeMethod, SurfaceBridge, TouchEvent,
 };
 use transd_core::{FlatMemory, GuestAddr};
 use transd_elf::{CompositeResolver, ElfLoader, LoadedLibrary, LoaderError, SymbolResolver};
@@ -36,6 +36,7 @@ pub struct TransdSession {
     pub jni: JniBridge,
     pub surface: SurfaceBridge,
     pub audio: AudioBridge,
+    pub asset: AssetBridge,
     pub aot_cache_dir: Option<std::path::PathBuf>,
     pub apk_bytes: Option<Vec<u8>>,
     pub loaded_libraries: HashMap<String, LoadedLibrary>,
@@ -53,7 +54,9 @@ impl TransdSession {
         // arena_base + 0x0010_0000: Bionic heap (0x400_000)
         // arena_base + 0x0050_0000: GLES stubs (0x100_000)
         // arena_base + 0x0060_0000: JNIEnv & JavaVM tables (0x100_000)
-        // arena_base + 0x0070_0000: Stack region (0x100_000) -> SP top at +0x0080_0000
+        // arena_base + 0x0070_0000: Audio stubs (0x100_000)
+        // arena_base + 0x0080_0000: AssetManager stubs & heap (0x100_000)
+        // arena_base + 0x0090_0000: Stack region (0x100_000) -> SP top at +0x00A0_0000
         // arena_base + 0x0100_0000: Dynamic library loading arena
         let bionic_stubs = arena_base;
         let bionic_heap = arena_base.add(0x100_000);
@@ -61,7 +64,8 @@ impl TransdSession {
         let gles_heap = arena_base.add(0x580_000);
         let jni_base = arena_base.add(0x600_000);
         let audio_stubs = arena_base.add(0x700_000);
-        let stack_top = arena_base.add(0x800_000);
+        let asset_stubs = arena_base.add(0x800_000);
+        let stack_top = arena_base.add(0xA00_000);
         let lib_load_base = arena_base.add(0x100_0000);
 
         let bionic = BionicBridge::new(bionic_stubs, bionic_heap, 0x400_000);
@@ -76,6 +80,9 @@ impl TransdSession {
         let audio = AudioBridge::with_stub_base(audio_stubs);
         audio.install_stubs(&mut mem)?;
 
+        let asset = AssetBridge::new(asset_stubs, asset_stubs.add(0x1000), 0xF_F000);
+        asset.install_stubs(&mut mem)?;
+
         let surface = SurfaceBridge::new();
 
         let mut engine = DbtEngine::new(mem);
@@ -88,6 +95,7 @@ impl TransdSession {
             jni,
             surface,
             audio,
+            asset,
             aot_cache_dir: None,
             apk_bytes: None,
             loaded_libraries: HashMap::new(),
@@ -98,6 +106,7 @@ impl TransdSession {
 
     /// Attach an APK package by raw bytes
     pub fn attach_apk(&mut self, apk_bytes: Vec<u8>) {
+        let _ = self.asset.load_apk(&apk_bytes);
         self.apk_bytes = Some(apk_bytes);
     }
 
@@ -127,11 +136,12 @@ impl TransdSession {
     pub fn load_library_bytes(&mut self, name: &str, elf_bytes: &[u8]) -> Result<LoadedLibrary, SessionError> {
         let load_addr = self.next_load_addr;
 
-        // Create composite resolver combining Bionic, GLES, Audio, and previously loaded libraries
+        // Create composite resolver combining Bionic, GLES, Audio, AssetManager, and previously loaded libraries
         let mut composite = CompositeResolver::new();
         composite.add(&self.bionic);
         composite.add(&self.gles);
         composite.add(&self.audio);
+        composite.add(&self.asset);
 
         struct LoadedMapResolver<'a>(&'a HashMap<String, LoadedLibrary>);
         impl<'a> SymbolResolver for LoadedMapResolver<'a> {
@@ -204,10 +214,32 @@ impl TransdSession {
             &mut self.jni,
             Some(&mut self.gles),
             Some(&mut self.audio),
+            Some(&mut self.asset),
             fn_addr,
             args,
         )?;
         Ok(res)
+    }
+
+    /// Mounts an Android main OBB expansion pack into the guest VFS
+    pub fn mount_obb(&mut self, package_name: &str, version: u32, obb_bytes: Vec<u8>) {
+        if let Some(vfs) = self.engine.vfs_mut() {
+            vfs.mount_obb(package_name, version, obb_bytes);
+        }
+    }
+
+    /// Mounts an Android patch OBB expansion pack into the guest VFS
+    pub fn mount_patch_obb(&mut self, package_name: &str, version: u32, obb_bytes: Vec<u8>) {
+        if let Some(vfs) = self.engine.vfs_mut() {
+            vfs.mount_patch_obb(package_name, version, obb_bytes);
+        }
+    }
+
+    /// Mounts a package's private app data directory in VFS (/data/data/{package_name}/)
+    pub fn mount_app_data_dir(&mut self, package_name: &str) {
+        if let Some(vfs) = self.engine.vfs_mut() {
+            vfs.mount_app_data_dir(package_name);
+        }
     }
 
     /// Reads host stereo PCM frames (48 kHz) from the lock-free audio ring buffer.

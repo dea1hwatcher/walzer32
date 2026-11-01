@@ -196,6 +196,41 @@ ro.product.manufacturer=Transd
         self.virtual_files.insert(path.to_string(), Arc::new(content));
     }
 
+    /// Mounts an Android OBB expansion file at the standard system paths:
+    /// - /sdcard/Android/obb/{package_name}/main.{version}.{package_name}.obb
+    /// - /storage/emulated/0/Android/obb/{package_name}/main.{version}.{package_name}.obb
+    /// - /data/media/0/Android/obb/{package_name}/main.{version}.{package_name}.obb
+    pub fn mount_obb(&mut self, package_name: &str, version: u32, content: Vec<u8>) {
+        let arc = Arc::new(content);
+        let path1 = format!("/sdcard/Android/obb/{package_name}/main.{version}.{package_name}.obb");
+        let path2 = format!("/storage/emulated/0/Android/obb/{package_name}/main.{version}.{package_name}.obb");
+        let path3 = format!("/data/media/0/Android/obb/{package_name}/main.{version}.{package_name}.obb");
+        self.virtual_files.insert(path1, Arc::clone(&arc));
+        self.virtual_files.insert(path2, Arc::clone(&arc));
+        self.virtual_files.insert(path3, arc);
+    }
+
+    /// Mounts an Android patch OBB expansion file at the standard system paths:
+    /// - /sdcard/Android/obb/{package_name}/patch.{version}.{package_name}.obb
+    /// - /storage/emulated/0/Android/obb/{package_name}/patch.{version}.{package_name}.obb
+    /// - /data/media/0/Android/obb/{package_name}/patch.{version}.{package_name}.obb
+    pub fn mount_patch_obb(&mut self, package_name: &str, version: u32, content: Vec<u8>) {
+        let arc = Arc::new(content);
+        let path1 = format!("/sdcard/Android/obb/{package_name}/patch.{version}.{package_name}.obb");
+        let path2 = format!("/storage/emulated/0/Android/obb/{package_name}/patch.{version}.{package_name}.obb");
+        let path3 = format!("/data/media/0/Android/obb/{package_name}/patch.{version}.{package_name}.obb");
+        self.virtual_files.insert(path1, Arc::clone(&arc));
+        self.virtual_files.insert(path2, Arc::clone(&arc));
+        self.virtual_files.insert(path3, arc);
+    }
+
+    /// Mounts a package's private app data directory in VFS (/data/data/{package_name}/)
+    pub fn mount_app_data_dir(&mut self, package_name: &str) {
+        let base_path = format!("/data/data/{package_name}");
+        let user_path = format!("/data/user/0/{package_name}");
+        self.add_redirect(&user_path, &base_path);
+    }
+
     /// Adds a prefix path redirection rule (e.g. from "/system/lib/" to "/data/transd/system/lib/")
     pub fn add_redirect(&mut self, from: &str, to: &str) {
         self.redirects.push((from.to_string(), to.to_string()));
@@ -209,6 +244,12 @@ ro.product.manufacturer=Transd
             }
         }
         path.to_string()
+    }
+
+    /// Looks up virtual file content by path after applying path redirections
+    pub fn get_file(&self, raw_path: &str) -> Option<Arc<Vec<u8>>> {
+        let resolved = self.resolve_path(raw_path);
+        self.virtual_files.get(&resolved).cloned()
     }
 
     /// Opens a virtual file by path, returning a guest file descriptor (>= 3) or -errno

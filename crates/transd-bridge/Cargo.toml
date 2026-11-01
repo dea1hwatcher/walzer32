@@ -11,6 +11,7 @@ transd-elf = { path = "../transd-elf" }
 transd-rt = { path = "../transd-rt" }
 transd-interp = { path = "../transd-interp" }
 transd-emitter-a64 = { path = "../transd-emitter-a64" }
+transd-apk = { path = "../transd-apk" }
 byteorder.workspace = true
 thiserror.workspace = true
 
