@@ -8,9 +8,12 @@ pub mod hardware_buffer;
 pub mod host;
 pub mod jni;
 pub mod jni_thunk;
+pub mod property;
 pub mod surface;
 pub mod trampoline;
 pub mod vulkan;
+
+pub use property::{PropertyStore, PROP_NAME_MAX, PROP_VALUE_MAX, PROP_INFO_SIZE};
 
 pub use asset::{AssetBridge, AssetFuncId, OpenAsset, OpenAssetDir, ASSET_SVC_MAGIC};
 pub use hardware_buffer::{

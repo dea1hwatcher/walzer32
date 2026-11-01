@@ -438,6 +438,20 @@ impl TransdSession {
     pub fn async_jit_stats(&self) -> Option<transd_rt::AsyncJitStats> {
         self.engine.async_jit_stats()
     }
+
+    /// Returns the value of an Android system property if present
+    pub fn get_system_property(&self, name: &str) -> Option<String> {
+        self.bionic.properties.get(name).map(|s| s.to_string())
+    }
+
+    /// Sets or overrides an Android system property and synchronizes /system/build.prop
+    pub fn set_system_property(&mut self, name: &str, value: &str) {
+        self.bionic.properties.set(name, value);
+        if let Some(vfs) = self.engine.syscall_handler.vfs_mut() {
+            let build_prop = self.bionic.properties.to_build_prop();
+            vfs.register_file("/system/build.prop", build_prop.into_bytes());
+        }
+    }
 }
 
 // Global static session protected by Mutex for JNI C ABI entry points

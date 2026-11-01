@@ -707,3 +707,43 @@ pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeMountAppDataD
         JNI_ERR_GENERIC
     }
 }
+
+/// JNI Export: Set or override an Android system property
+///
+/// Java Signature:
+///   public static native int nativeSetSystemProperty(String name, String value);
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeSetSystemProperty(
+    _env: JNIEnv,
+    _clazz: JClass,
+    name_str: *const u8,
+    name_len: usize,
+    val_str: *const u8,
+    val_len: usize,
+) -> JInt {
+    if name_str.is_null() || val_str.is_null() {
+        return JNI_ERR_GENERIC;
+    }
+
+    let name = match std::str::from_utf8(unsafe { std::slice::from_raw_parts(name_str, name_len) }) {
+        Ok(s) => s,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    let val = match std::str::from_utf8(unsafe { std::slice::from_raw_parts(val_str, val_len) }) {
+        Ok(s) => s,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    if let Some(session) = guard.as_mut() {
+        session.set_system_property(name, val);
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}

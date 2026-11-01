@@ -73,6 +73,11 @@ pub enum BionicFuncId {
     Sigaltstack = 82,
     Raise = 83,
     RtSigreturn = 84,
+
+    // System Properties
+    SystemPropertyGet = 90,
+    SystemPropertyFind = 91,
+    SystemPropertyRead = 92,
 }
 
 impl BionicFuncId {
@@ -132,6 +137,9 @@ impl BionicFuncId {
             82 => Some(Self::Sigaltstack),
             83 => Some(Self::Raise),
             84 => Some(Self::RtSigreturn),
+            90 => Some(Self::SystemPropertyGet),
+            91 => Some(Self::SystemPropertyFind),
+            92 => Some(Self::SystemPropertyRead),
             _ => None,
         }
     }
@@ -171,6 +179,7 @@ pub struct BionicBridge {
     pub last_dlerror: Option<String>,
     pub dlerror_addr: GuestAddr,
     pub signal_state: transd_rt::signals::SignalState,
+    pub properties: crate::property::PropertyStore,
 }
 
 impl BionicBridge {
@@ -188,6 +197,7 @@ impl BionicBridge {
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
             signal_state: transd_rt::signals::SignalState::new(),
+            properties: crate::property::PropertyStore::new(stub_base.add(0x1000), 0x4000),
         };
 
         bridge.register_known_symbols();
@@ -263,6 +273,11 @@ impl BionicBridge {
             ("sigaltstack", BionicFuncId::Sigaltstack),
             ("raise", BionicFuncId::Raise),
             ("__rt_sigreturn", BionicFuncId::RtSigreturn),
+
+            // System Properties
+            ("__system_property_get", BionicFuncId::SystemPropertyGet),
+            ("__system_property_find", BionicFuncId::SystemPropertyFind),
+            ("__system_property_read", BionicFuncId::SystemPropertyRead),
         ];
 
         for (name, id) in funcs {
@@ -328,6 +343,9 @@ impl BionicBridge {
             BionicFuncId::Sigaltstack,
             BionicFuncId::Raise,
             BionicFuncId::RtSigreturn,
+            BionicFuncId::SystemPropertyGet,
+            BionicFuncId::SystemPropertyFind,
+            BionicFuncId::SystemPropertyRead,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -950,13 +968,33 @@ impl BionicBridge {
                     }
                 }
             }
+            BionicFuncId::SystemPropertyGet => {
+                let name_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let value_out = GuestAddr::new(cpu.reg(Reg::R1));
+                let name = Self::read_c_string(mem, name_addr)?;
+                let len = self.properties.system_property_get(&name, value_out, mem)?;
+                cpu.set_reg(Reg::R0, len as u32);
+            }
+            BionicFuncId::SystemPropertyFind => {
+                let name_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let name = Self::read_c_string(mem, name_addr)?;
+                let pi_addr = self.properties.system_property_find(&name, mem)?;
+                cpu.set_reg(Reg::R0, pi_addr.as_u32());
+            }
+            BionicFuncId::SystemPropertyRead => {
+                let pi_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let name_out = GuestAddr::new(cpu.reg(Reg::R1));
+                let val_out = GuestAddr::new(cpu.reg(Reg::R2));
+                let len = self.properties.system_property_read(pi_addr, name_out, val_out, mem)?;
+                cpu.set_reg(Reg::R0, len as u32);
+            }
             _ => {}
         }
 
         Ok(true)
     }
 
-    fn read_c_string(mem: &impl Memory, addr: GuestAddr) -> Result<String, MemoryError> {
+    fn read_c_string(mem: &(impl Memory + ?Sized), addr: GuestAddr) -> Result<String, MemoryError> {
         let mut bytes = Vec::new();
         let mut cur = addr;
         loop {
