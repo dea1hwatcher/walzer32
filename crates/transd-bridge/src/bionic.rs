@@ -218,6 +218,42 @@ pub enum BionicFuncId {
     Ftruncate = 393,
     Ftruncate64 = 394,
 
+    // Extended libm (Single-precision f32)
+    Atanf = 400,
+    Asinf = 401,
+    Acosf = 402,
+    Sinhf = 403,
+    Coshf = 404,
+    Tanhf = 405,
+    Log10f = 406,
+    Log2f = 407,
+    Exp2f = 408,
+    Fmodf = 409,
+    Roundf = 410,
+    Truncf = 411,
+    Hypotf = 412,
+    Copysignf = 413,
+    Cbrtf = 414,
+    Ldexpf = 415,
+
+    // Extended libm (Double-precision f64)
+    Atan = 420,
+    Asin = 421,
+    Acos = 422,
+    Sinh = 423,
+    Cosh = 424,
+    Tanh = 425,
+    Log10 = 426,
+    Log2 = 427,
+    Exp2 = 428,
+    Fmod = 429,
+    Round = 430,
+    Trunc = 431,
+    Hypot = 432,
+    Copysign = 433,
+    Cbrt = 434,
+    Ldexp = 435,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -484,6 +520,38 @@ impl BionicFuncId {
             392 => Some(Self::Renameat),
             393 => Some(Self::Ftruncate),
             394 => Some(Self::Ftruncate64),
+            400 => Some(Self::Atanf),
+            401 => Some(Self::Asinf),
+            402 => Some(Self::Acosf),
+            403 => Some(Self::Sinhf),
+            404 => Some(Self::Coshf),
+            405 => Some(Self::Tanhf),
+            406 => Some(Self::Log10f),
+            407 => Some(Self::Log2f),
+            408 => Some(Self::Exp2f),
+            409 => Some(Self::Fmodf),
+            410 => Some(Self::Roundf),
+            411 => Some(Self::Truncf),
+            412 => Some(Self::Hypotf),
+            413 => Some(Self::Copysignf),
+            414 => Some(Self::Cbrtf),
+            415 => Some(Self::Ldexpf),
+            420 => Some(Self::Atan),
+            421 => Some(Self::Asin),
+            422 => Some(Self::Acos),
+            423 => Some(Self::Sinh),
+            424 => Some(Self::Cosh),
+            425 => Some(Self::Tanh),
+            426 => Some(Self::Log10),
+            427 => Some(Self::Log2),
+            428 => Some(Self::Exp2),
+            429 => Some(Self::Fmod),
+            430 => Some(Self::Round),
+            431 => Some(Self::Trunc),
+            432 => Some(Self::Hypot),
+            433 => Some(Self::Copysign),
+            434 => Some(Self::Cbrt),
+            435 => Some(Self::Ldexp),
             _ => None,
         }
     }
@@ -843,6 +911,38 @@ impl BionicBridge {
             ("renameat", BionicFuncId::Renameat),
             ("ftruncate", BionicFuncId::Ftruncate),
             ("ftruncate64", BionicFuncId::Ftruncate64),
+            ("atanf", BionicFuncId::Atanf),
+            ("asinf", BionicFuncId::Asinf),
+            ("acosf", BionicFuncId::Acosf),
+            ("sinhf", BionicFuncId::Sinhf),
+            ("coshf", BionicFuncId::Coshf),
+            ("tanhf", BionicFuncId::Tanhf),
+            ("log10f", BionicFuncId::Log10f),
+            ("log2f", BionicFuncId::Log2f),
+            ("exp2f", BionicFuncId::Exp2f),
+            ("fmodf", BionicFuncId::Fmodf),
+            ("roundf", BionicFuncId::Roundf),
+            ("truncf", BionicFuncId::Truncf),
+            ("hypotf", BionicFuncId::Hypotf),
+            ("copysignf", BionicFuncId::Copysignf),
+            ("cbrtf", BionicFuncId::Cbrtf),
+            ("ldexpf", BionicFuncId::Ldexpf),
+            ("atan", BionicFuncId::Atan),
+            ("asin", BionicFuncId::Asin),
+            ("acos", BionicFuncId::Acos),
+            ("sinh", BionicFuncId::Sinh),
+            ("cosh", BionicFuncId::Cosh),
+            ("tanh", BionicFuncId::Tanh),
+            ("log10", BionicFuncId::Log10),
+            ("log2", BionicFuncId::Log2),
+            ("exp2", BionicFuncId::Exp2),
+            ("fmod", BionicFuncId::Fmod),
+            ("round", BionicFuncId::Round),
+            ("trunc", BionicFuncId::Trunc),
+            ("hypot", BionicFuncId::Hypot),
+            ("copysign", BionicFuncId::Copysign),
+            ("cbrt", BionicFuncId::Cbrt),
+            ("ldexp", BionicFuncId::Ldexp),
         ];
 
         for (name, id) in funcs {
@@ -1061,6 +1161,38 @@ impl BionicBridge {
             BionicFuncId::Renameat,
             BionicFuncId::Ftruncate,
             BionicFuncId::Ftruncate64,
+            BionicFuncId::Atanf,
+            BionicFuncId::Asinf,
+            BionicFuncId::Acosf,
+            BionicFuncId::Sinhf,
+            BionicFuncId::Coshf,
+            BionicFuncId::Tanhf,
+            BionicFuncId::Log10f,
+            BionicFuncId::Log2f,
+            BionicFuncId::Exp2f,
+            BionicFuncId::Fmodf,
+            BionicFuncId::Roundf,
+            BionicFuncId::Truncf,
+            BionicFuncId::Hypotf,
+            BionicFuncId::Copysignf,
+            BionicFuncId::Cbrtf,
+            BionicFuncId::Ldexpf,
+            BionicFuncId::Atan,
+            BionicFuncId::Asin,
+            BionicFuncId::Acos,
+            BionicFuncId::Sinh,
+            BionicFuncId::Cosh,
+            BionicFuncId::Tanh,
+            BionicFuncId::Log10,
+            BionicFuncId::Log2,
+            BionicFuncId::Exp2,
+            BionicFuncId::Fmod,
+            BionicFuncId::Round,
+            BionicFuncId::Trunc,
+            BionicFuncId::Hypot,
+            BionicFuncId::Copysign,
+            BionicFuncId::Cbrt,
+            BionicFuncId::Ldexp,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -3174,6 +3306,261 @@ impl BionicBridge {
                 // ftruncate(fd, length) -> 0 (stub)
                 cpu.set_reg(Reg::R0, 0);
             }
+            // ── Stage 62: Extended libm (Single-precision f32) ───────────
+            BionicFuncId::Atanf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = cpu.sanitize_f32(x.atan(), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Asinf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = cpu.sanitize_f32(x.asin(), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Acosf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = cpu.sanitize_f32(x.acos(), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Sinhf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = cpu.sanitize_f32(x.sinh(), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Coshf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = cpu.sanitize_f32(x.cosh(), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Tanhf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = cpu.sanitize_f32(x.tanh(), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Log10f => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = cpu.sanitize_f32(x.log10(), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Log2f => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = cpu.sanitize_f32(x.log2(), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Exp2f => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = cpu.sanitize_f32(x.exp2(), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Fmodf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let y = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R1)), true);
+                let res = cpu.sanitize_f32(if y == 0.0 { f32::NAN } else { x % y }, false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Roundf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = cpu.sanitize_f32(x.round(), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Truncf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = cpu.sanitize_f32(x.trunc(), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Hypotf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let y = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R1)), true);
+                let res = cpu.sanitize_f32(x.hypot(y), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Copysignf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let y = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R1)), true);
+                let res = cpu.sanitize_f32(x.copysign(y), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Cbrtf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = cpu.sanitize_f32(x.cbrt(), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Ldexpf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let exp = cpu.reg(Reg::R1) as i32;
+                let res = cpu.sanitize_f32(x * 2.0_f32.powi(exp), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+
+            // ── Stage 62: Extended libm (Double-precision f64) ───────────
+            BionicFuncId::Atan => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x.atan(), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Asin => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x.asin(), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Acos => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x.acos(), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Sinh => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x.sinh(), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Cosh => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x.cosh(), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Tanh => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x.tanh(), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Log10 => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x.log10(), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Log2 => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x.log2(), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Exp2 => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x.exp2(), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Fmod => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let y_bits = (cpu.reg(Reg::R2) as u64) | ((cpu.reg(Reg::R3) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let y = cpu.sanitize_f64(f64::from_bits(y_bits), true);
+                let res = cpu.sanitize_f64(if y == 0.0 { f64::NAN } else { x % y }, false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Round => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x.round(), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Trunc => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x.trunc(), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Hypot => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let y_bits = (cpu.reg(Reg::R2) as u64) | ((cpu.reg(Reg::R3) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let y = cpu.sanitize_f64(f64::from_bits(y_bits), true);
+                let res = cpu.sanitize_f64(x.hypot(y), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Copysign => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let y_bits = (cpu.reg(Reg::R2) as u64) | ((cpu.reg(Reg::R3) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let y = cpu.sanitize_f64(f64::from_bits(y_bits), true);
+                let res = cpu.sanitize_f64(x.copysign(y), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Cbrt => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x.cbrt(), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Ldexp => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let exp = cpu.reg(Reg::R2) as i32;
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = cpu.sanitize_f64(x * 2.0_f64.powi(exp), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+
 
 
 
