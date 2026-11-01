@@ -296,7 +296,7 @@ impl<M: Memory> DbtEngine<M> {
                     };
                     if target == dst_addr {
                         let src_code = src_ptr.0 as usize + site.byte_offset;
-                        let dst_code = dst_ptr.0 as usize;
+                        let dst_code = dst_ptr.0 as usize + transd_emitter_a64::PROLOGUE_BYTE_SIZE;
                         let offset_bytes = (dst_code as isize) - (src_code as isize);
                         if offset_bytes % 4 == 0 {
                             let offset_words = (offset_bytes / 4) as i32;
@@ -304,13 +304,12 @@ impl<M: Memory> DbtEngine<M> {
                                 unsafe {
                                     let slice = std::slice::from_raw_parts_mut(src_code as *mut u8, 4);
                                     match site.target {
-                                        PatchTarget::Direct(_) => {
+                                        PatchTarget::Direct(_) | PatchTarget::BranchFallthrough(_) => {
                                             A64Compiler::patch_direct_branch(slice, 0, offset_words);
                                         }
                                         PatchTarget::BranchTaken { cond, .. } => {
                                             A64Compiler::patch_cond_branch(slice, 0, cond, offset_words);
                                         }
-                                        _ => {}
                                     }
                                     crate::jit_memory::flush_icache(slice.as_mut_ptr(), 4);
                                 }

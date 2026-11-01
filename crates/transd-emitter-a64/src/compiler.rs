@@ -1,5 +1,5 @@
 use transd_core::{
-    Cond, GuestAddr, OFFSET_EXCLUSIVE, OFFSET_PC, OFFSET_TLS, OFFSET_VFP,
+    Cond, GuestAddr, Reg, OFFSET_EXCLUSIVE, OFFSET_PC, OFFSET_TLS, OFFSET_VFP,
 };
 use transd_decoder::{
     AddrMode, AddrOffset, AluOp, ArmInst, BlockAddrMode, MemSize, MulOp, NeonOp, Op, Operand2,
@@ -15,6 +15,53 @@ pub const EXIT_REASON_INDIRECT: u64 = 1;
 pub const EXIT_REASON_SVC: u64 = 2;
 pub const EXIT_REASON_BKPT: u64 = 3;
 pub const EXIT_REASON_INVALID: u64 = 4;
+
+/// Size in bytes of the block entry prologue (8 AArch64 instructions = 32 bytes)
+pub const PROLOGUE_BYTE_SIZE: usize = 32;
+
+/// Maps guest ARMv7 general purpose registers R0-R7 to pinned AArch64 host registers X19-X26.
+/// Callee-saved in AAPCS64, preserved across block boundaries when chained directly.
+#[inline(always)]
+pub fn pinned_reg(reg: Reg) -> Option<A64Reg> {
+    match reg {
+        Reg::R0 => Some(A64Reg::X19),
+        Reg::R1 => Some(A64Reg::X20),
+        Reg::R2 => Some(A64Reg::X21),
+        Reg::R3 => Some(A64Reg::X22),
+        Reg::R4 => Some(A64Reg::X23),
+        Reg::R5 => Some(A64Reg::X24),
+        Reg::R6 => Some(A64Reg::X25),
+        Reg::R7 => Some(A64Reg::X26),
+        _ => None,
+    }
+}
+
+/// Loads a guest 32-bit register.
+/// If pinned (R0-R7), returns the pinned host register directly with 0 instructions emitted.
+/// Otherwise loads from CpuState at [X0 + offset] into scratch.
+pub fn load_guest_reg(asm: &mut A64Assembler, scratch: A64Reg, reg: Reg) -> A64Reg {
+    if let Some(pinned) = pinned_reg(reg) {
+        pinned
+    } else {
+        let offset = (reg.index() * 4) as u32;
+        asm.ldr_w_imm(scratch, A64Reg::X0, offset);
+        scratch
+    }
+}
+
+/// Stores a 32-bit register into a guest register.
+/// If pinned (R0-R7), moves into the pinned register (if not already there).
+/// Otherwise stores to CpuState at [X0 + offset].
+pub fn store_guest_reg(asm: &mut A64Assembler, src: A64Reg, reg: Reg) {
+    if let Some(pinned) = pinned_reg(reg) {
+        if src != pinned {
+            asm.mov_w_reg(pinned, src);
+        }
+    } else {
+        let offset = (reg.index() * 4) as u32;
+        asm.str_w_imm(src, A64Reg::X0, offset);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatchTarget {
@@ -46,23 +93,34 @@ pub struct CompiledBlock {
 pub struct A64Compiler;
 
 impl A64Compiler {
-    /// Compiles an IrBlock into AArch64 native machine code with patchable exit sites
+    pub const PROLOGUE_BYTE_SIZE: usize = PROLOGUE_BYTE_SIZE;
+
+    /// Compiles an IrBlock into AArch64 native machine code with register pinning and patchable exit sites
     pub fn compile(block: &IrBlock) -> CompiledBlock {
         let mut asm = A64Assembler::new();
         let mut patch_sites = Vec::new();
 
-        // Calling Convention:
-        // x0 = pointer to CpuState
-        // x1 = pointer to memory arena base (mem_base)
-        // x9  = scratch 1
-        // x10 = scratch 2
-        // x11 = scratch 3
-        // x12 = scratch 4
+        // 1. Emit 8-instruction entry prologue (saves host callee-saved X19-X26, loads pinned R0-R7)
+        Self::emit_prologue(&mut asm);
 
-        for inst in &block.insts {
-            Self::compile_inst(&mut asm, inst);
+        // 2. Pre-scan for dead flag elimination
+        let flags_needed = matches!(block.exit, BlockExit::BranchCond { cond, .. } if !cond.is_always());
+        let last_flag_idx = if flags_needed {
+            block.insts.iter().rposition(|inst| match &inst.op {
+                Op::Alu { op, set_flags, .. } => *set_flags || op.is_test(),
+                Op::Mul { set_flags, .. } => *set_flags,
+                _ => false,
+            })
+        } else {
+            None
+        };
+
+        // 3. Compile instructions with zero-spill register pinning and flag elimination
+        for (idx, inst) in block.insts.iter().enumerate() {
+            Self::compile_inst(&mut asm, inst, idx, flags_needed, last_flag_idx);
         }
 
+        // 4. Compile block exit (handles fallbacks, chaining sites, and epilogue restore)
         Self::compile_exit(&mut asm, &block.exit, &mut patch_sites);
 
         CompiledBlock {
@@ -76,6 +134,36 @@ impl A64Compiler {
         }
     }
 
+    /// Emits the 8-instruction (32-byte) block entry prologue:
+    /// 1. Saves host callee-saved registers X19-X26 on stack (SP -= 64)
+    /// 2. Loads guest registers R0-R7 into pinned registers W19-W26 from CpuState (at X0)
+    pub fn emit_prologue(asm: &mut A64Assembler) {
+        asm.stp_x_pre(A64Reg::X19, A64Reg::X20, A64Reg::SP, -64);
+        asm.stp_x_offset(A64Reg::X21, A64Reg::X22, A64Reg::SP, 16);
+        asm.stp_x_offset(A64Reg::X23, A64Reg::X24, A64Reg::SP, 32);
+        asm.stp_x_offset(A64Reg::X25, A64Reg::X26, A64Reg::SP, 48);
+
+        asm.ldp_w_offset(A64Reg::X19, A64Reg::X20, A64Reg::X0, 0);
+        asm.ldp_w_offset(A64Reg::X21, A64Reg::X22, A64Reg::X0, 8);
+        asm.ldp_w_offset(A64Reg::X23, A64Reg::X24, A64Reg::X0, 16);
+        asm.ldp_w_offset(A64Reg::X25, A64Reg::X26, A64Reg::X0, 24);
+    }
+
+    /// Emits the block exit epilogue:
+    /// 1. Stores pinned registers W19-W26 back into CpuState (at X0)
+    /// 2. Restores host callee-saved registers X19-X26 from stack (SP += 64)
+    pub fn emit_epilogue(asm: &mut A64Assembler) {
+        asm.stp_w_offset(A64Reg::X19, A64Reg::X20, A64Reg::X0, 0);
+        asm.stp_w_offset(A64Reg::X21, A64Reg::X22, A64Reg::X0, 8);
+        asm.stp_w_offset(A64Reg::X23, A64Reg::X24, A64Reg::X0, 16);
+        asm.stp_w_offset(A64Reg::X25, A64Reg::X26, A64Reg::X0, 24);
+
+        asm.ldp_x_offset(A64Reg::X21, A64Reg::X22, A64Reg::SP, 16);
+        asm.ldp_x_offset(A64Reg::X23, A64Reg::X24, A64Reg::SP, 32);
+        asm.ldp_x_offset(A64Reg::X25, A64Reg::X26, A64Reg::SP, 48);
+        asm.ldp_x_post(A64Reg::X19, A64Reg::X20, A64Reg::SP, 64);
+    }
+
     fn vfp_offset(reg: &VfpReg) -> u32 {
         match reg {
             VfpReg::S(idx) => (OFFSET_VFP + (*idx as usize) * 4) as u32,
@@ -83,7 +171,13 @@ impl A64Compiler {
         }
     }
 
-    fn compile_inst(asm: &mut A64Assembler, inst: &ArmInst) {
+    fn compile_inst(
+        asm: &mut A64Assembler,
+        inst: &ArmInst,
+        idx: usize,
+        flags_needed: bool,
+        last_flag_idx: Option<usize>,
+    ) {
         match &inst.op {
             Op::Nop => {
                 asm.nop();
@@ -95,108 +189,164 @@ impl A64Compiler {
                 rn,
                 op2,
             } => {
-                // 1. Load rn into w9 (from CpuState at x0)
-                let rn_offset = (rn.index() * 4) as u32;
-                asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, rn_offset);
+                let effective_set_flags = flags_needed && (Some(idx) == last_flag_idx) && (*set_flags || op.is_test());
+                if op.is_test() && !effective_set_flags {
+                    // Dead test instruction eliminated!
+                    return;
+                }
 
-                // 2. Load op2 into w10 (applying barrel shift if register operand)
-                match op2 {
+                // 1. Destination register: if pinned, compute directly into pinned register with zero spills!
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+
+                // 2. Load rn: if pinned, returns host pinned register directly with 0 instructions
+                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+
+                // 3. Fast-path for small immediate operands
+                if let Operand2::Imm(imm) = op2 {
+                    if *imm <= 0xFFF {
+                        match op {
+                            AluOp::Add => {
+                                if effective_set_flags {
+                                    asm.adds_w_imm(dst_reg, rn_reg, *imm as u16);
+                                } else {
+                                    asm.add_w_imm(dst_reg, rn_reg, *imm as u16);
+                                }
+                                if pinned_reg(*rd).is_none() {
+                                    asm.str_w_imm(dst_reg, A64Reg::X0, (rd.index() * 4) as u32);
+                                }
+                                return;
+                            }
+                            AluOp::Sub => {
+                                if effective_set_flags {
+                                    asm.subs_w_imm(dst_reg, rn_reg, *imm as u16);
+                                } else {
+                                    asm.sub_w_imm(dst_reg, rn_reg, *imm as u16);
+                                }
+                                if pinned_reg(*rd).is_none() {
+                                    asm.str_w_imm(dst_reg, A64Reg::X0, (rd.index() * 4) as u32);
+                                }
+                                return;
+                            }
+                            AluOp::Cmp => {
+                                asm.cmp_w_imm(rn_reg, *imm as u16);
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if matches!(op, AluOp::Mov) && *imm <= 0xFFFF {
+                        asm.movz_w(dst_reg, *imm as u16, 0);
+                        if pinned_reg(*rd).is_none() {
+                            asm.str_w_imm(dst_reg, A64Reg::X0, (rd.index() * 4) as u32);
+                        }
+                        return;
+                    }
+                }
+
+                // 4. Load op2
+                let op2_reg = match op2 {
                     Operand2::Imm(imm) => {
                         asm.mov_imm32(A64Reg::X10, *imm);
+                        A64Reg::X10
                     }
                     Operand2::Reg { rm, shift } => {
-                        let rm_offset = (rm.index() * 4) as u32;
-                        asm.ldr_w_imm(A64Reg::X10, A64Reg::X0, rm_offset);
-
+                        let rm_reg = load_guest_reg(asm, A64Reg::X10, *rm);
                         match shift.amount {
                             ShiftAmount::Imm(shift_imm) => {
                                 if shift_imm > 0 {
                                     match shift.shift_type {
-                                        ShiftType::Lsl => asm.lsl_w_imm(A64Reg::X10, A64Reg::X10, shift_imm),
-                                        ShiftType::Lsr => asm.lsr_w_imm(A64Reg::X10, A64Reg::X10, shift_imm),
-                                        ShiftType::Asr => asm.asr_w_imm(A64Reg::X10, A64Reg::X10, shift_imm),
+                                        ShiftType::Lsl => asm.lsl_w_imm(A64Reg::X10, rm_reg, shift_imm),
+                                        ShiftType::Lsr => asm.lsr_w_imm(A64Reg::X10, rm_reg, shift_imm),
+                                        ShiftType::Asr => asm.asr_w_imm(A64Reg::X10, rm_reg, shift_imm),
                                         ShiftType::Ror => {
                                             asm.mov_imm32(A64Reg::X12, shift_imm as u32);
-                                            asm.ror_w_reg(A64Reg::X10, A64Reg::X10, A64Reg::X12);
+                                            asm.ror_w_reg(A64Reg::X10, rm_reg, A64Reg::X12);
                                         }
                                         ShiftType::Rrx => {}
                                     }
+                                    A64Reg::X10
+                                } else {
+                                    rm_reg
                                 }
                             }
                             ShiftAmount::Reg(rs) => {
-                                let rs_offset = (rs.index() * 4) as u32;
-                                asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, rs_offset);
+                                let rs_reg = load_guest_reg(asm, A64Reg::X12, rs);
                                 match shift.shift_type {
-                                    ShiftType::Lsl => asm.lsl_w_reg(A64Reg::X10, A64Reg::X10, A64Reg::X12),
-                                    ShiftType::Lsr => asm.lsr_w_reg(A64Reg::X10, A64Reg::X10, A64Reg::X12),
-                                    ShiftType::Asr => asm.asr_w_reg(A64Reg::X10, A64Reg::X10, A64Reg::X12),
-                                    ShiftType::Ror => asm.ror_w_reg(A64Reg::X10, A64Reg::X10, A64Reg::X12),
+                                    ShiftType::Lsl => asm.lsl_w_reg(A64Reg::X10, rm_reg, rs_reg),
+                                    ShiftType::Lsr => asm.lsr_w_reg(A64Reg::X10, rm_reg, rs_reg),
+                                    ShiftType::Asr => asm.asr_w_reg(A64Reg::X10, rm_reg, rs_reg),
+                                    ShiftType::Ror => asm.ror_w_reg(A64Reg::X10, rm_reg, rs_reg),
                                     ShiftType::Rrx => {}
                                 }
+                                A64Reg::X10
                             }
                         }
                     }
-                }
+                };
 
-                // 3. Perform ALU operation: w11 = w9 (op) w10
+                // 5. Perform ALU operation
                 match op {
                     AluOp::Add => {
-                        if *set_flags {
-                            asm.adds_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10);
+                        if effective_set_flags {
+                            asm.adds_w_reg(dst_reg, rn_reg, op2_reg);
                         } else {
-                            asm.add_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10);
+                            asm.add_w_reg(dst_reg, rn_reg, op2_reg);
                         }
                     }
                     AluOp::Sub => {
-                        if *set_flags {
-                            asm.subs_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10);
+                        if effective_set_flags {
+                            asm.subs_w_reg(dst_reg, rn_reg, op2_reg);
                         } else {
-                            asm.sub_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10);
+                            asm.sub_w_reg(dst_reg, rn_reg, op2_reg);
                         }
                     }
                     AluOp::Rsb => {
-                        if *set_flags {
-                            asm.subs_w_reg(A64Reg::X11, A64Reg::X10, A64Reg::X9);
+                        if effective_set_flags {
+                            asm.subs_w_reg(dst_reg, op2_reg, rn_reg);
                         } else {
-                            asm.sub_w_reg(A64Reg::X11, A64Reg::X10, A64Reg::X9);
+                            asm.sub_w_reg(dst_reg, op2_reg, rn_reg);
                         }
                     }
                     AluOp::And => {
-                        asm.and_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10);
+                        asm.and_w_reg(dst_reg, rn_reg, op2_reg);
                     }
                     AluOp::Orr => {
-                        asm.orr_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10);
+                        asm.orr_w_reg(dst_reg, rn_reg, op2_reg);
                     }
                     AluOp::Eor => {
-                        asm.eor_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10);
+                        asm.eor_w_reg(dst_reg, rn_reg, op2_reg);
                     }
                     AluOp::Bic => {
-                        asm.bic_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10);
+                        asm.bic_w_reg(dst_reg, rn_reg, op2_reg);
                     }
                     AluOp::Mov => {
-                        asm.mov_w_reg(A64Reg::X11, A64Reg::X10);
+                        if dst_reg != op2_reg {
+                            asm.mov_w_reg(dst_reg, op2_reg);
+                        }
                     }
                     AluOp::Mvn => {
-                        asm.mvn_w_reg(A64Reg::X11, A64Reg::X10);
+                        asm.mvn_w_reg(dst_reg, op2_reg);
                     }
                     AluOp::Cmp => {
-                        asm.cmp_w_reg(A64Reg::X9, A64Reg::X10);
+                        asm.cmp_w_reg(rn_reg, op2_reg);
                     }
                     AluOp::Cmn => {
-                        asm.adds_w_reg(A64Reg::SP, A64Reg::X9, A64Reg::X10);
+                        asm.adds_w_reg(A64Reg::SP, rn_reg, op2_reg);
                     }
                     AluOp::Tst => {
-                        asm.tst_w_reg(A64Reg::X9, A64Reg::X10);
+                        asm.tst_w_reg(rn_reg, op2_reg);
                     }
                     _ => {
-                        asm.mov_w_reg(A64Reg::X11, A64Reg::X10);
+                        if dst_reg != op2_reg {
+                            asm.mov_w_reg(dst_reg, op2_reg);
+                        }
                     }
                 }
 
-                // 4. If not a test instruction, store w11 back into CpuState.regs[rd]
-                if !op.is_test() {
+                // 6. Store back to CpuState only if destination register was unpinned
+                if !op.is_test() && pinned_reg(*rd).is_none() {
                     let rd_offset = (rd.index() * 4) as u32;
-                    asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
+                    asm.str_w_imm(dst_reg, A64Reg::X0, rd_offset);
                 }
             }
             Op::Mul {
@@ -207,28 +357,27 @@ impl A64Compiler {
                 rm,
                 rs,
             } => {
-                let rm_offset = (rm.index() * 4) as u32;
-                let rs_offset = (rs.index() * 4) as u32;
-                asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, rm_offset);
-                asm.ldr_w_imm(A64Reg::X10, A64Reg::X0, rs_offset);
+                let rm_reg = load_guest_reg(asm, A64Reg::X9, *rm);
+                let rs_reg = load_guest_reg(asm, A64Reg::X10, *rs);
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
 
                 match op {
                     MulOp::Mul => {
-                        asm.mul_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10);
+                        asm.mul_w_reg(dst_reg, rm_reg, rs_reg);
                     }
                     MulOp::Mla => {
-                        let rn_offset = (rn.index() * 4) as u32;
-                        asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, rn_offset);
-                        asm.madd_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10, A64Reg::X12);
+                        let rn_reg = load_guest_reg(asm, A64Reg::X12, *rn);
+                        asm.madd_w_reg(dst_reg, rm_reg, rs_reg, rn_reg);
                     }
                     MulOp::Mls => {
-                        let rn_offset = (rn.index() * 4) as u32;
-                        asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, rn_offset);
-                        asm.msub_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10, A64Reg::X12);
+                        let rn_reg = load_guest_reg(asm, A64Reg::X12, *rn);
+                        asm.msub_w_reg(dst_reg, rm_reg, rs_reg, rn_reg);
                     }
                 }
-                let rd_offset = (rd.index() * 4) as u32;
-                asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
+                if pinned_reg(*rd).is_none() {
+                    let rd_offset = (rd.index() * 4) as u32;
+                    asm.str_w_imm(dst_reg, A64Reg::X0, rd_offset);
+                }
             }
             Op::Div {
                 signed,
@@ -236,24 +385,28 @@ impl A64Compiler {
                 rn,
                 rm,
             } => {
-                let rn_offset = (rn.index() * 4) as u32;
-                let rm_offset = (rm.index() * 4) as u32;
-                asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, rn_offset);
-                asm.ldr_w_imm(A64Reg::X10, A64Reg::X0, rm_offset);
+                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                let rm_reg = load_guest_reg(asm, A64Reg::X10, *rm);
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+
                 if *signed {
-                    asm.sdiv_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10);
+                    asm.sdiv_w_reg(dst_reg, rn_reg, rm_reg);
                 } else {
-                    asm.udiv_w_reg(A64Reg::X11, A64Reg::X9, A64Reg::X10);
+                    asm.udiv_w_reg(dst_reg, rn_reg, rm_reg);
                 }
-                let rd_offset = (rd.index() * 4) as u32;
-                asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
+                if pinned_reg(*rd).is_none() {
+                    let rd_offset = (rd.index() * 4) as u32;
+                    asm.str_w_imm(dst_reg, A64Reg::X0, rd_offset);
+                }
             }
             Op::Clz { rd, rm } => {
-                let rm_offset = (rm.index() * 4) as u32;
-                asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, rm_offset);
-                asm.clz_w_reg(A64Reg::X11, A64Reg::X9);
-                let rd_offset = (rd.index() * 4) as u32;
-                asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
+                let rm_reg = load_guest_reg(asm, A64Reg::X9, *rm);
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+                asm.clz_w_reg(dst_reg, rm_reg);
+                if pinned_reg(*rd).is_none() {
+                    let rd_offset = (rd.index() * 4) as u32;
+                    asm.str_w_imm(dst_reg, A64Reg::X0, rd_offset);
+                }
             }
             Op::LoadStore {
                 is_load,
@@ -263,113 +416,131 @@ impl A64Compiler {
                 rn,
                 addr_mode,
             } => {
-                // 1. Load rn into w9
-                let rn_offset = (rn.index() * 4) as u32;
-                asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, rn_offset);
+                // 1. Load rn
+                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
 
-                // 2. Compute offset into w10
+                // 2. Compute offset
                 let (offset_val, add, is_post) = match addr_mode {
                     AddrMode::Offset { offset, add } => (offset, *add, false),
                     AddrMode::PreIndex { offset, add } => (offset, *add, false),
                     AddrMode::PostIndex { offset, add } => (offset, *add, true),
                 };
 
-                match offset_val {
+                let offset_reg = match offset_val {
                     AddrOffset::Imm(imm) => {
-                        asm.mov_imm32(A64Reg::X10, *imm);
+                        if *imm == 0 {
+                            None
+                        } else {
+                            asm.mov_imm32(A64Reg::X10, *imm);
+                            Some(A64Reg::X10)
+                        }
                     }
                     AddrOffset::Reg {
                         rm,
                         shift_type,
                         shift_imm,
                     } => {
-                        let rm_offset = (rm.index() * 4) as u32;
-                        asm.ldr_w_imm(A64Reg::X10, A64Reg::X0, rm_offset);
+                        let rm_reg = load_guest_reg(asm, A64Reg::X10, *rm);
                         if *shift_imm > 0 {
                             match shift_type {
-                                ShiftType::Lsl => asm.lsl_w_imm(A64Reg::X10, A64Reg::X10, *shift_imm),
-                                ShiftType::Lsr => asm.lsr_w_imm(A64Reg::X10, A64Reg::X10, *shift_imm),
-                                ShiftType::Asr => asm.asr_w_imm(A64Reg::X10, A64Reg::X10, *shift_imm),
+                                ShiftType::Lsl => asm.lsl_w_imm(A64Reg::X10, rm_reg, *shift_imm),
+                                ShiftType::Lsr => asm.lsr_w_imm(A64Reg::X10, rm_reg, *shift_imm),
+                                ShiftType::Asr => asm.asr_w_imm(A64Reg::X10, rm_reg, *shift_imm),
                                 _ => {}
                             }
+                            Some(A64Reg::X10)
+                        } else {
+                            Some(rm_reg)
                         }
                     }
-                }
+                };
 
-                // 3. Effective address into w12
+                // 3. Effective address into W12
                 if is_post {
-                    asm.mov_w_reg(A64Reg::X12, A64Reg::X9);
-                    if add {
-                        asm.add_w_reg(A64Reg::X9, A64Reg::X9, A64Reg::X10);
+                    asm.mov_w_reg(A64Reg::X12, rn_reg);
+                    if let Some(off_r) = offset_reg {
+                        if add {
+                            asm.add_w_reg(A64Reg::X9, rn_reg, off_r);
+                        } else {
+                            asm.sub_w_reg(A64Reg::X9, rn_reg, off_r);
+                        }
                     } else {
-                        asm.sub_w_reg(A64Reg::X9, A64Reg::X9, A64Reg::X10);
+                        asm.mov_w_reg(A64Reg::X9, rn_reg);
                     }
-                    asm.str_w_imm(A64Reg::X9, A64Reg::X0, rn_offset);
+                    store_guest_reg(asm, A64Reg::X9, *rn);
                 } else {
-                    if add {
-                        asm.add_w_reg(A64Reg::X12, A64Reg::X9, A64Reg::X10);
+                    if let Some(off_r) = offset_reg {
+                        if add {
+                            asm.add_w_reg(A64Reg::X12, rn_reg, off_r);
+                        } else {
+                            asm.sub_w_reg(A64Reg::X12, rn_reg, off_r);
+                        }
                     } else {
-                        asm.sub_w_reg(A64Reg::X12, A64Reg::X9, A64Reg::X10);
+                        asm.mov_w_reg(A64Reg::X12, rn_reg);
                     }
                     if matches!(addr_mode, AddrMode::PreIndex { .. }) {
-                        asm.str_w_imm(A64Reg::X12, A64Reg::X0, rn_offset);
+                        store_guest_reg(asm, A64Reg::X12, *rn);
                     }
                 }
 
                 // 4. Single-Instruction Zero-Overhead Memory Access (UXTW Register Offset)
-                let rd_offset = (rd.index() * 4) as u32;
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
                 if *is_load {
                     match size {
                         MemSize::Byte => {
                             if *signed {
-                                asm.ldrsb_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+                                asm.ldrsb_w_uxtw(dst_reg, A64Reg::X1, A64Reg::X12);
                             } else {
-                                asm.ldrb_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+                                asm.ldrb_w_uxtw(dst_reg, A64Reg::X1, A64Reg::X12);
                             }
-                            asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
+                            if pinned_reg(*rd).is_none() {
+                                store_guest_reg(asm, dst_reg, *rd);
+                            }
                         }
                         MemSize::Halfword => {
                             if *signed {
-                                asm.ldrsh_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+                                asm.ldrsh_w_uxtw(dst_reg, A64Reg::X1, A64Reg::X12);
                             } else {
-                                asm.ldrh_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+                                asm.ldrh_w_uxtw(dst_reg, A64Reg::X1, A64Reg::X12);
                             }
-                            asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
+                            if pinned_reg(*rd).is_none() {
+                                store_guest_reg(asm, dst_reg, *rd);
+                            }
                         }
                         MemSize::Word => {
-                            asm.ldr_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
-                            asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
+                            asm.ldr_w_uxtw(dst_reg, A64Reg::X1, A64Reg::X12);
+                            if pinned_reg(*rd).is_none() {
+                                store_guest_reg(asm, dst_reg, *rd);
+                            }
                         }
                         MemSize::Doubleword => {
-                            // LDRD: compute base into X10 for 64-bit pair
                             asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
                             asm.ldr_w_imm(A64Reg::X11, A64Reg::X10, 0);
                             asm.ldr_w_imm(A64Reg::X12, A64Reg::X10, 4);
-                            asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
-                            asm.str_w_imm(A64Reg::X12, A64Reg::X0, rd_offset + 4);
+                            store_guest_reg(asm, A64Reg::X11, *rd);
+                            if let Some(next_rd) = Reg::from_u8((rd.index() + 1) as u8) {
+                                store_guest_reg(asm, A64Reg::X12, next_rd);
+                            }
                         }
                     }
                 } else {
+                    let src_reg = load_guest_reg(asm, A64Reg::X11, *rd);
                     match size {
                         MemSize::Byte => {
-                            asm.ldr_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
-                            asm.strb_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+                            asm.strb_w_uxtw(src_reg, A64Reg::X1, A64Reg::X12);
                         }
                         MemSize::Halfword => {
-                            asm.ldr_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
-                            asm.strh_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+                            asm.strh_w_uxtw(src_reg, A64Reg::X1, A64Reg::X12);
                         }
                         MemSize::Word => {
-                            asm.ldr_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
-                            asm.str_w_uxtw(A64Reg::X11, A64Reg::X1, A64Reg::X12);
+                            asm.str_w_uxtw(src_reg, A64Reg::X1, A64Reg::X12);
                         }
                         MemSize::Doubleword => {
-                            // STRD: compute base into X10 for 64-bit pair
                             asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
-                            asm.ldr_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
-                            asm.ldr_w_imm(A64Reg::X12, A64Reg::X0, rd_offset + 4);
-                            asm.str_w_imm(A64Reg::X11, A64Reg::X10, 0);
-                            asm.str_w_imm(A64Reg::X12, A64Reg::X10, 4);
+                            let next_rd = Reg::from_u8((rd.index() + 1) as u8);
+                            let src_next = next_rd.map(|r| load_guest_reg(asm, A64Reg::X12, r)).unwrap_or(A64Reg::X12);
+                            asm.str_w_imm(src_reg, A64Reg::X10, 0);
+                            asm.str_w_imm(src_next, A64Reg::X10, 4);
                         }
                     }
                 }
@@ -381,8 +552,8 @@ impl A64Compiler {
                 writeback,
                 reg_list,
             } => {
-                let rn_offset = (rn.index() * 4) as u32;
-                asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, rn_offset);
+                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                asm.mov_w_reg(A64Reg::X9, rn_reg);
 
                 let count = reg_list.count_ones() as u32;
                 if !is_load && matches!(mode, BlockAddrMode::Db) {
@@ -391,33 +562,33 @@ impl A64Compiler {
                     let mut cur_offset = 0u32;
                     for i in 0..16 {
                         if (reg_list & (1 << i)) != 0 {
+                            let r = Reg::from_u8(i as u8).unwrap();
+                            let src = load_guest_reg(asm, A64Reg::X11, r);
                             asm.add_w_imm(A64Reg::X12, A64Reg::X9, cur_offset as u16);
                             asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
-                            let r_offset = (i * 4) as u32;
-                            asm.ldr_w_imm(A64Reg::X11, A64Reg::X0, r_offset);
-                            asm.str_w_imm(A64Reg::X11, A64Reg::X10, 0);
+                            asm.str_w_imm(src, A64Reg::X10, 0);
                             cur_offset += 4;
                         }
                     }
                     if *writeback {
-                        asm.str_w_imm(A64Reg::X9, A64Reg::X0, rn_offset);
+                        store_guest_reg(asm, A64Reg::X9, *rn);
                     }
                 } else if *is_load && matches!(mode, BlockAddrMode::Ia) {
                     // POP / LDMIA: increment after
                     let mut cur_offset = 0u32;
                     for i in 0..16 {
                         if (reg_list & (1 << i)) != 0 {
+                            let r = Reg::from_u8(i as u8).unwrap();
                             asm.add_w_imm(A64Reg::X12, A64Reg::X9, cur_offset as u16);
                             asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
                             asm.ldr_w_imm(A64Reg::X11, A64Reg::X10, 0);
-                            let r_offset = (i * 4) as u32;
-                            asm.str_w_imm(A64Reg::X11, A64Reg::X0, r_offset);
+                            store_guest_reg(asm, A64Reg::X11, r);
                             cur_offset += 4;
                         }
                     }
                     if *writeback {
                         asm.add_w_imm(A64Reg::X9, A64Reg::X9, (count * 4) as u16);
-                        asm.str_w_imm(A64Reg::X9, A64Reg::X0, rn_offset);
+                        store_guest_reg(asm, A64Reg::X9, *rn);
                     }
                 }
             }
@@ -491,33 +662,27 @@ impl A64Compiler {
                 vfp_reg,
             } => {
                 let vfp_off = Self::vfp_offset(vfp_reg);
-                let core_off = (core_reg.index() * 4) as u32;
                 if *to_core {
                     asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, vfp_off);
-                    asm.str_w_imm(A64Reg::X9, A64Reg::X0, core_off);
+                    store_guest_reg(asm, A64Reg::X9, *core_reg);
                 } else {
-                    asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, core_off);
-                    asm.str_w_imm(A64Reg::X9, A64Reg::X0, vfp_off);
+                    let src = load_guest_reg(asm, A64Reg::X9, *core_reg);
+                    asm.str_w_imm(src, A64Reg::X0, vfp_off);
                 }
             }
             Op::AtomicLoadEx { rd, rn } => {
-                let rn_offset = (rn.index() * 4) as u32;
-                asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, rn_offset);
-                asm.str_w_imm(A64Reg::X9, A64Reg::X0, OFFSET_EXCLUSIVE as u32);
-                asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X9);
+                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                asm.str_w_imm(rn_reg, A64Reg::X0, OFFSET_EXCLUSIVE as u32);
+                asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, rn_reg);
                 asm.ldxr_w(A64Reg::X11, A64Reg::X10);
-                let rd_offset = (rd.index() * 4) as u32;
-                asm.str_w_imm(A64Reg::X11, A64Reg::X0, rd_offset);
+                store_guest_reg(asm, A64Reg::X11, *rd);
             }
             Op::AtomicStoreEx { rd, rm, rn } => {
-                let rn_offset = (rn.index() * 4) as u32;
-                asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, rn_offset);
-                asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X9);
-                let rm_offset = (rm.index() * 4) as u32;
-                asm.ldr_w_imm(A64Reg::X11, A64Reg::X0, rm_offset);
-                asm.stxr_w(A64Reg::X12, A64Reg::X11, A64Reg::X10);
-                let rd_offset = (rd.index() * 4) as u32;
-                asm.str_w_imm(A64Reg::X12, A64Reg::X0, rd_offset);
+                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, rn_reg);
+                let rm_reg = load_guest_reg(asm, A64Reg::X11, *rm);
+                asm.stxr_w(A64Reg::X12, rm_reg, A64Reg::X10);
+                store_guest_reg(asm, A64Reg::X12, *rd);
             }
             Op::Clrex => {
                 asm.clrex();
@@ -528,13 +693,12 @@ impl A64Compiler {
                 asm.dmb_ish();
             }
             Op::Cp15Move { is_mrc, rd, .. } => {
-                let rd_offset = (rd.index() * 4) as u32;
                 if *is_mrc {
                     asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, OFFSET_TLS as u32);
-                    asm.str_w_imm(A64Reg::X9, A64Reg::X0, rd_offset);
+                    store_guest_reg(asm, A64Reg::X9, *rd);
                 } else {
-                    asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, rd_offset);
-                    asm.str_w_imm(A64Reg::X9, A64Reg::X0, OFFSET_TLS as u32);
+                    let src = load_guest_reg(asm, A64Reg::X9, *rd);
+                    asm.str_w_imm(src, A64Reg::X0, OFFSET_TLS as u32);
                 }
             }
             Op::NeonAlu {
@@ -561,7 +725,7 @@ impl A64Compiler {
                 asm.str_d_imm(2, A64Reg::X0, dst_off);
             }
             _ => {
-                asm.nop();
+                // Branches and exchanges are fully handled in compile_exit; avoid spurious NOPs
             }
         }
     }
@@ -573,15 +737,16 @@ impl A64Compiler {
     ) {
         match exit {
             BlockExit::Direct(target) => {
-                // Patch site for direct branch chaining
                 let site_offset = asm.cursor() * 4;
                 patch_sites.push(PatchSite {
                     byte_offset: site_offset,
                     target: PatchTarget::Direct(*target),
                 });
 
-                // Default unchained fallback: return target in w0 with EXIT_REASON_DIRECT
-                asm.mov_imm32(A64Reg::X0, target.as_u32());
+                // Default unchained fallback: returns target in X0 with EXIT_REASON_DIRECT (0)
+                asm.mov_imm32(A64Reg::X9, target.as_u32());
+                Self::emit_epilogue(asm);
+                asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
                 asm.ret(None);
             }
             BlockExit::BranchCond {
@@ -589,7 +754,7 @@ impl A64Compiler {
                 target,
                 fallthrough,
             } => {
-                // 1. Conditional branch to taken path
+                // 1. Conditional branch patch site to taken path
                 let taken_site_offset = asm.cursor() * 4;
                 patch_sites.push(PatchSite {
                     byte_offset: taken_site_offset,
@@ -598,8 +763,8 @@ impl A64Compiler {
                         target: *target,
                     },
                 });
-                // B.cond to taken path (+3 instructions offset by default)
-                asm.b_cond(*cond, 3);
+                let b_cond_idx = asm.cursor();
+                asm.b_cond(*cond, 0); // Placeholder, will patch with offset to taken fallback below
 
                 // 2. Fallthrough path:
                 let ft_site_offset = asm.cursor() * 4;
@@ -607,39 +772,53 @@ impl A64Compiler {
                     byte_offset: ft_site_offset,
                     target: PatchTarget::BranchFallthrough(*fallthrough),
                 });
-                asm.mov_imm32(A64Reg::X0, fallthrough.as_u32());
+                asm.mov_imm32(A64Reg::X9, fallthrough.as_u32());
+                Self::emit_epilogue(asm);
+                asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
                 asm.ret(None);
 
-                // 3. Taken path:
-                asm.mov_imm32(A64Reg::X0, target.as_u32());
+                // 3. Taken path fallback:
+                let taken_target_idx = asm.cursor();
+                let offset_words = (taken_target_idx as i32) - (b_cond_idx as i32);
+                let imm19 = (offset_words as u32) & 0x7FFFF;
+                let cond_field = (*cond as u32) & 0xF;
+                asm.patch(b_cond_idx, 0x5400_0000 | (imm19 << 5) | cond_field);
+
+                asm.mov_imm32(A64Reg::X9, target.as_u32());
+                Self::emit_epilogue(asm);
+                asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
                 asm.ret(None);
             }
             BlockExit::Indirect(rm) => {
-                // Load target address from CpuState.regs[rm] into w0
-                let rm_offset = (rm.index() * 4) as u32;
-                asm.ldr_w_imm(A64Reg::X0, A64Reg::X0, rm_offset);
-                // Set upper 32-bits to EXIT_REASON_INDIRECT
-                asm.movz_w(A64Reg::X9, EXIT_REASON_INDIRECT as u16, 16);
-                asm.orr_w_reg(A64Reg::X0, A64Reg::X0, A64Reg::X9);
+                let rm_reg = load_guest_reg(asm, A64Reg::X9, *rm);
+                if rm_reg != A64Reg::X9 {
+                    asm.mov_w_reg(A64Reg::X9, rm_reg);
+                }
+                asm.movk_x(A64Reg::X9, EXIT_REASON_INDIRECT as u16, 32);
+                Self::emit_epilogue(asm);
+                asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
                 asm.ret(None);
             }
             BlockExit::Svc { imm, next_pc } => {
-                // Update CpuState.PC to next_pc
-                asm.mov_imm32(A64Reg::X9, next_pc.as_u32());
-                asm.str_w_imm(A64Reg::X9, A64Reg::X0, OFFSET_PC as u32);
-
-                // Return (EXIT_REASON_SVC << 32) | imm
-                asm.mov_imm32(A64Reg::X0, *imm);
+                asm.mov_imm32(A64Reg::X10, next_pc.as_u32());
+                asm.str_w_imm(A64Reg::X10, A64Reg::X0, OFFSET_PC as u32);
+                asm.mov_imm64(A64Reg::X9, (EXIT_REASON_SVC << 32) | (*imm as u64));
+                Self::emit_epilogue(asm);
+                asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
                 asm.ret(None);
             }
             BlockExit::Bkpt { imm, next_pc } => {
-                asm.mov_imm32(A64Reg::X9, next_pc.as_u32());
-                asm.str_w_imm(A64Reg::X9, A64Reg::X0, OFFSET_PC as u32);
-                asm.mov_imm32(A64Reg::X0, *imm as u32);
+                asm.mov_imm32(A64Reg::X10, next_pc.as_u32());
+                asm.str_w_imm(A64Reg::X10, A64Reg::X0, OFFSET_PC as u32);
+                asm.mov_imm64(A64Reg::X9, (EXIT_REASON_BKPT << 32) | (*imm as u64));
+                Self::emit_epilogue(asm);
+                asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
                 asm.ret(None);
             }
             BlockExit::Invalid(addr) => {
-                asm.mov_imm32(A64Reg::X0, addr.as_u32());
+                asm.mov_imm64(A64Reg::X9, (EXIT_REASON_INVALID << 32) | (addr.as_u32() as u64));
+                Self::emit_epilogue(asm);
+                asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
                 asm.ret(None);
             }
         }
@@ -675,6 +854,33 @@ mod tests {
     use transd_decoder::ArmInst;
 
     #[test]
+    fn test_prologue_epilogue_size() {
+        let mut asm = A64Assembler::new();
+        A64Compiler::emit_prologue(&mut asm);
+        assert_eq!(asm.to_bytes().len(), PROLOGUE_BYTE_SIZE);
+
+        let mut asm_epi = A64Assembler::new();
+        A64Compiler::emit_epilogue(&mut asm_epi);
+        assert_eq!(asm_epi.to_bytes().len(), 32);
+    }
+
+    #[test]
+    fn test_pinned_registers_mapping() {
+        assert_eq!(pinned_reg(Reg::R0), Some(A64Reg::X19));
+        assert_eq!(pinned_reg(Reg::R1), Some(A64Reg::X20));
+        assert_eq!(pinned_reg(Reg::R2), Some(A64Reg::X21));
+        assert_eq!(pinned_reg(Reg::R3), Some(A64Reg::X22));
+        assert_eq!(pinned_reg(Reg::R4), Some(A64Reg::X23));
+        assert_eq!(pinned_reg(Reg::R5), Some(A64Reg::X24));
+        assert_eq!(pinned_reg(Reg::R6), Some(A64Reg::X25));
+        assert_eq!(pinned_reg(Reg::R7), Some(A64Reg::X26));
+        assert_eq!(pinned_reg(Reg::R8), None);
+        assert_eq!(pinned_reg(Reg::SP), None);
+        assert_eq!(pinned_reg(Reg::LR), None);
+        assert_eq!(pinned_reg(Reg::PC), None);
+    }
+
+    #[test]
     fn test_compile_basic_block_patch_sites() {
         let mut block = IrBlock::new(GuestAddr::new(0x8000), false);
         // ADD r0, r1, #10
@@ -699,7 +905,43 @@ mod tests {
             compiled.patch_sites[0].target,
             PatchTarget::Direct(GuestAddr::new(0x8004))
         );
+        // Patch site is after prologue (32 bytes) + 1 instruction ADD (4 bytes) = byte 36
+        assert_eq!(compiled.patch_sites[0].byte_offset, 36);
         assert!(!compiled.code_bytes.is_empty());
+    }
+
+    #[test]
+    fn test_flag_elimination() {
+        let mut block = IrBlock::new(GuestAddr::new(0x7000), false);
+        // CMP r0, #0 -> dead because block.exit is Direct (unconditional)!
+        block.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::Alu {
+                op: AluOp::Cmp,
+                set_flags: true,
+                rd: Reg::R0,
+                rn: Reg::R0,
+                op2: Operand2::Imm(0),
+            },
+            0,
+        ));
+        // ADD r0, r0, #1 (unconditional)
+        block.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::Alu {
+                op: AluOp::Add,
+                set_flags: false,
+                rd: Reg::R0,
+                rn: Reg::R0,
+                op2: Operand2::Imm(1),
+            },
+            0,
+        ));
+        block.exit = BlockExit::Direct(GuestAddr::new(0x7008));
+
+        let compiled = A64Compiler::compile(&block);
+        // Byte size: prologue (32) + 1 inst ADD (4) [CMP was eliminated!] + exit fallback
+        assert_eq!(compiled.patch_sites[0].byte_offset, 36);
     }
 
     #[test]
@@ -737,7 +979,7 @@ mod tests {
 
         let compiled = A64Compiler::compile(&block);
         assert_eq!(compiled.inst_count, 2);
-        assert!(compiled.code_bytes.len() >= 32);
+        assert!(compiled.code_bytes.len() >= 48);
     }
 
     #[test]

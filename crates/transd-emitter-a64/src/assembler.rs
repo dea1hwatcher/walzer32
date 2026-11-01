@@ -64,6 +64,41 @@ impl A64Assembler {
         }
     }
 
+    /// MOVZ Xd, #imm16, LSL #hw (hw in 0, 16, 32, 48)
+    pub fn movz_x(&mut self, rd: A64Reg, imm16: u16, hw: u8) {
+        assert!(hw == 0 || hw == 16 || hw == 32 || hw == 48);
+        let hw_field = (hw / 16) as u32;
+        let inst = 0xD280_0000 | (hw_field << 21) | ((imm16 as u32) << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// MOVK Xd, #imm16, LSL #hw (hw in 0, 16, 32, 48)
+    pub fn movk_x(&mut self, rd: A64Reg, imm16: u16, hw: u8) {
+        assert!(hw == 0 || hw == 16 || hw == 32 || hw == 48);
+        let hw_field = (hw / 16) as u32;
+        let inst = 0xF280_0000 | (hw_field << 21) | ((imm16 as u32) << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// Loads arbitrary 64-bit immediate into Xd using MOVZ + up to 3 MOVK instructions
+    pub fn mov_imm64(&mut self, rd: A64Reg, val: u64) {
+        let c0 = (val & 0xFFFF) as u16;
+        let c1 = ((val >> 16) & 0xFFFF) as u16;
+        let c2 = ((val >> 32) & 0xFFFF) as u16;
+        let c3 = ((val >> 48) & 0xFFFF) as u16;
+
+        self.movz_x(rd, c0, 0);
+        if c1 != 0 {
+            self.movk_x(rd, c1, 16);
+        }
+        if c2 != 0 {
+            self.movk_x(rd, c2, 32);
+        }
+        if c3 != 0 {
+            self.movk_x(rd, c3, 48);
+        }
+    }
+
     /// ADD Wd, Wn, #imm12
     pub fn add_w_imm(&mut self, rd: A64Reg, rn: A64Reg, imm12: u16) {
         assert!(imm12 <= 0xFFF);
@@ -145,6 +180,12 @@ impl A64Assembler {
         self.orr_w_reg(rd, A64Reg::SP, rm);
     }
 
+    /// MOV Xd, Xm -> ORR Xd, XZR, Xm
+    pub fn mov_x_reg(&mut self, rd: A64Reg, rm: A64Reg) {
+        let inst = 0xAA00_03E0 | (rm.index() << 16) | rd.index();
+        self.emit(inst);
+    }
+
     /// EOR Wd, Wn, Wm
     pub fn eor_w_reg(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg) {
         let inst = 0x4A00_0000 | (rm.index() << 16) | (rn.index() << 5) | rd.index();
@@ -199,6 +240,56 @@ impl A64Assembler {
         let imm12 = offset / 8;
         assert!(imm12 <= 0xFFF);
         let inst = 0xF900_0000 | (imm12 << 10) | (rn.index() << 5) | rt.index();
+        self.emit(inst);
+    }
+
+    // --- Load / Store Pair (Stack & Context Spill / Fill) ---
+
+    /// STP Xt1, Xt2, [Xn, #imm]! (Pre-index 64-bit pair store with writeback)
+    pub fn stp_x_pre(&mut self, rt1: A64Reg, rt2: A64Reg, rn: A64Reg, imm_bytes: i32) {
+        assert_eq!(imm_bytes % 8, 0);
+        let imm7 = (imm_bytes / 8) as u32 & 0x7F;
+        let inst = 0xA980_0000 | (imm7 << 15) | (rt2.index() << 10) | (rn.index() << 5) | rt1.index();
+        self.emit(inst);
+    }
+
+    /// LDP Xt1, Xt2, [Xn], #imm (Post-index 64-bit pair load with writeback)
+    pub fn ldp_x_post(&mut self, rt1: A64Reg, rt2: A64Reg, rn: A64Reg, imm_bytes: i32) {
+        assert_eq!(imm_bytes % 8, 0);
+        let imm7 = (imm_bytes / 8) as u32 & 0x7F;
+        let inst = 0xA8C0_0000 | (imm7 << 15) | (rt2.index() << 10) | (rn.index() << 5) | rt1.index();
+        self.emit(inst);
+    }
+
+    /// STP Xt1, Xt2, [Xn, #imm] (Signed offset 64-bit pair store)
+    pub fn stp_x_offset(&mut self, rt1: A64Reg, rt2: A64Reg, rn: A64Reg, imm_bytes: i32) {
+        assert_eq!(imm_bytes % 8, 0);
+        let imm7 = (imm_bytes / 8) as u32 & 0x7F;
+        let inst = 0xA900_0000 | (imm7 << 15) | (rt2.index() << 10) | (rn.index() << 5) | rt1.index();
+        self.emit(inst);
+    }
+
+    /// LDP Xt1, Xt2, [Xn, #imm] (Signed offset 64-bit pair load)
+    pub fn ldp_x_offset(&mut self, rt1: A64Reg, rt2: A64Reg, rn: A64Reg, imm_bytes: i32) {
+        assert_eq!(imm_bytes % 8, 0);
+        let imm7 = (imm_bytes / 8) as u32 & 0x7F;
+        let inst = 0xA940_0000 | (imm7 << 15) | (rt2.index() << 10) | (rn.index() << 5) | rt1.index();
+        self.emit(inst);
+    }
+
+    /// STP Wt1, Wt2, [Xn, #imm] (Signed offset 32-bit pair store)
+    pub fn stp_w_offset(&mut self, rt1: A64Reg, rt2: A64Reg, rn: A64Reg, imm_bytes: i32) {
+        assert_eq!(imm_bytes % 4, 0);
+        let imm7 = (imm_bytes / 4) as u32 & 0x7F;
+        let inst = 0x2900_0000 | (imm7 << 15) | (rt2.index() << 10) | (rn.index() << 5) | rt1.index();
+        self.emit(inst);
+    }
+
+    /// LDP Wt1, Wt2, [Xn, #imm] (Signed offset 32-bit pair load)
+    pub fn ldp_w_offset(&mut self, rt1: A64Reg, rt2: A64Reg, rn: A64Reg, imm_bytes: i32) {
+        assert_eq!(imm_bytes % 4, 0);
+        let imm7 = (imm_bytes / 4) as u32 & 0x7F;
+        let inst = 0x2940_0000 | (imm7 << 15) | (rt2.index() << 10) | (rn.index() << 5) | rt1.index();
         self.emit(inst);
     }
 
@@ -926,5 +1017,29 @@ mod tests {
         assert_eq!(asm.code.len(), 9);
         assert_eq!(asm.code[0], 0x1E22_2820); // FADD S0, S1, S2
         assert_eq!(asm.code[1], 0x1E62_3820); // FSUB D0, D1, D2
+    }
+
+    #[test]
+    fn test_asm_pair_load_store_and_mov64() {
+        let mut asm = A64Assembler::new();
+        // STP X19, X20, [SP, #-64]!
+        asm.stp_x_pre(A64Reg::X19, A64Reg::X20, A64Reg::SP, -64);
+        // LDP X19, X20, [SP], #64
+        asm.ldp_x_post(A64Reg::X19, A64Reg::X20, A64Reg::SP, 64);
+        // STP W19, W20, [X0, #0]
+        asm.stp_w_offset(A64Reg::X19, A64Reg::X20, A64Reg::X0, 0);
+        // LDP W19, W20, [X0, #0]
+        asm.ldp_w_offset(A64Reg::X19, A64Reg::X20, A64Reg::X0, 0);
+        // MOV X0, X9
+        asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
+        // MOV_IMM64
+        asm.mov_imm64(A64Reg::X9, 0x1234_5678_9ABC_DEF0);
+
+        assert_eq!(asm.code[0] & 0xFFC0_0000, 0xA980_0000); // STP X pre
+        assert_eq!(asm.code[1] & 0xFFC0_0000, 0xA8C0_0000); // LDP X post
+        assert_eq!(asm.code[2] & 0xFFC0_0000, 0x2900_0000); // STP W
+        assert_eq!(asm.code[3] & 0xFFC0_0000, 0x2940_0000); // LDP W
+        assert_eq!(asm.code[4], 0xAA09_03E0);               // MOV X0, X9
+        assert_eq!(asm.code.len(), 9); // 5 + 4 for 64-bit mov
     }
 }
