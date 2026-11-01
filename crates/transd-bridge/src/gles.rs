@@ -127,6 +127,20 @@ pub struct DrawCallRecord {
     pub count: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EglSurfaceState {
+    pub surface_id: u32,
+    pub native_window: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EglContextState {
+    pub context_id: u32,
+    pub client_version: u32,
+}
+
 /// Provides EGL & OpenGL ES 2.0 / 3.0 Passthrough Stubs for 32-bit guest applications
 pub struct GlesBridge {
     pub stub_base: GuestAddr,
@@ -140,6 +154,14 @@ pub struct GlesBridge {
     pub next_resource_id: u32,
     pub active_program: u32,
     pub swap_count: u64,
+
+    // EGL Hardware Surface & Context Binding
+    pub egl_surfaces: HashMap<u32, EglSurfaceState>,
+    pub egl_contexts: HashMap<u32, EglContextState>,
+    pub active_draw_surface: u32,
+    pub active_read_surface: u32,
+    pub active_context: u32,
+    pub bound_native_window: u32,
 }
 
 impl GlesBridge {
@@ -154,6 +176,12 @@ impl GlesBridge {
             next_resource_id: 1,
             active_program: 0,
             swap_count: 0,
+            egl_surfaces: HashMap::new(),
+            egl_contexts: HashMap::new(),
+            active_draw_surface: 0,
+            active_read_surface: 0,
+            active_context: 0,
+            bound_native_window: 0,
         };
 
         bridge.register_known_symbols();
@@ -300,24 +328,67 @@ impl GlesBridge {
                 cpu.set_reg(Reg::R0, 1); // EGL_TRUE
             }
             GlesFuncId::EglChooseConfig => {
-                let num_config_ptr = GuestAddr::new(cpu.reg(Reg::R4)); // On stack or R4
+                let configs_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let num_config_ptr = GuestAddr::new(cpu.reg(Reg::R4));
+                if configs_ptr.as_u32() != 0 {
+                    mem.write_u32(configs_ptr, 0x2001)?; // Valid EGLConfig handle
+                }
                 if num_config_ptr.as_u32() != 0 {
                     mem.write_u32(num_config_ptr, 1)?;
                 }
                 cpu.set_reg(Reg::R0, 1);
             }
             GlesFuncId::EglCreateWindowSurface => {
-                cpu.set_reg(Reg::R0, 0x2000); // Non-zero EGLSurface handle
+                let native_window = cpu.reg(Reg::R2);
+                let surface_id = self.next_resource_id;
+                self.next_resource_id += 1;
+                self.bound_native_window = native_window;
+                self.egl_surfaces.insert(
+                    surface_id,
+                    EglSurfaceState {
+                        surface_id,
+                        native_window,
+                        width: 1920,
+                        height: 1080,
+                    },
+                );
+                cpu.set_reg(Reg::R0, surface_id);
             }
             GlesFuncId::EglCreateContext => {
-                cpu.set_reg(Reg::R0, 0x3000); // Non-zero EGLContext handle
+                let context_id = self.next_resource_id;
+                self.next_resource_id += 1;
+                self.egl_contexts.insert(
+                    context_id,
+                    EglContextState {
+                        context_id,
+                        client_version: 3,
+                    },
+                );
+                cpu.set_reg(Reg::R0, context_id);
             }
             GlesFuncId::EglMakeCurrent => {
+                self.active_draw_surface = cpu.reg(Reg::R1);
+                self.active_read_surface = cpu.reg(Reg::R2);
+                self.active_context = cpu.reg(Reg::R3);
                 cpu.set_reg(Reg::R0, 1);
             }
             GlesFuncId::EglSwapBuffers => {
                 self.swap_count += 1;
                 cpu.set_reg(Reg::R0, 1);
+            }
+            GlesFuncId::EglQueryString => {
+                let name = cpu.reg(Reg::R1);
+                let string_val = match name {
+                    0x308D => "OpenGL_ES\0", // EGL_CLIENT_APIS
+                    0x3053 => "Google DeepMind / Transd\0", // EGL_VENDOR
+                    0x3054 => "1.4 Transd Android\0", // EGL_VERSION
+                    0x3055 => "EGL_KHR_image_base EGL_KHR_gl_texture_2D_image EGL_ANDROID_native_fence_sync EGL_KHR_fence_sync\0",
+                    _ => "Transd EGL\0",
+                };
+                let addr = self.string_heap;
+                mem.write_bytes(addr, string_val.as_bytes())?;
+                self.string_heap = addr.add((string_val.len() as u32 + 3) & !3);
+                cpu.set_reg(Reg::R0, addr.as_u32());
             }
 
             // --- GLES State ---
