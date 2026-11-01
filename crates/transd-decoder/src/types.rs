@@ -186,6 +186,14 @@ pub enum NeonRevOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeonCvtOp {
+    F32FromS32,
+    F32FromU32,
+    S32FromF32,
+    U32FromF32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NeonSize {
     I8,
     I16,
@@ -400,6 +408,19 @@ pub enum Op {
         is_quad: bool,
         vd: u8,
         rt: Reg,
+    },
+    NeonShiftWiden {
+        signed: bool,
+        src_size: NeonSize,
+        shift: u8,
+        vd: u8,
+        vm: u8,
+    },
+    NeonCvt {
+        op: NeonCvtOp,
+        is_quad: bool,
+        vd: u8,
+        vm: u8,
     },
     Nop,
     Unknown(u32),

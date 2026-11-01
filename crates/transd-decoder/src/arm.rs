@@ -275,8 +275,12 @@ impl ArmDecoder {
             ));
         }
 
-        // NEON Shift Right Narrow Saturating by immediate (VQSHRN / VQSHRUN)
-        if (raw & 0xFE80_0F90) == 0xF280_0910 || (raw & 0xFF80_0F90) == 0xF380_0810 {
+        // NEON Shift Right Narrow by immediate (VSHRN / VQSHRN / VQSHRUN)
+        if (raw & 0xFF80_0F90) == 0xF280_0810
+            || (raw & 0xFE80_0F90) == 0xF280_0910
+            || (raw & 0xFF80_0F90) == 0xF380_0810
+        {
+            let is_vshrn = (raw & 0xFF80_0F90) == 0xF280_0810;
             let is_vqshrun = (raw & 0xFF80_0F90) == 0xF380_0810;
             let u = (raw >> 24) & 1;
             let d_bit = (raw >> 22) & 1;
@@ -293,21 +297,144 @@ impl ArmDecoder {
             } else {
                 (NeonSize::I16, 0)
             };
-            let (signed, dest_unsigned) = if is_vqshrun {
-                (true, true)
+            let (saturate, signed, dest_unsigned) = if is_vshrn {
+                (false, false, false)
+            } else if is_vqshrun {
+                (true, true, true)
             } else if u != 0 {
-                (false, true)
+                (true, false, true)
             } else {
-                (true, false)
+                (true, true, false)
             };
             return Some(ArmInst::new(
                 Cond::AL,
                 Op::NeonShiftNarrow {
                     signed,
                     dest_unsigned,
-                    saturate: true,
+                    saturate,
                     src_size,
                     shift,
+                    vd: vd as u8,
+                    vm: vm as u8,
+                },
+                raw,
+            ));
+        }
+
+        // NEON Move Narrowing (VMOVN, VQMOVUN, VQMOVN: 2-register misc)
+        // 1111 0011 1 D 11 size 10 Vd 0010 op:2 0 M 0 Vm
+        if (raw & 0xFFB3_0F10) == 0xF3B2_0200 {
+            let size_bits = (raw >> 18) & 0x3;
+            let src_size = match size_bits {
+                0 => NeonSize::I16,
+                1 => NeonSize::I32,
+                _ => NeonSize::F32,
+            };
+            let op_bits = (raw >> 6) & 0x3;
+            let (saturate, signed, dest_unsigned) = match op_bits {
+                0 => (false, false, false), // VMOVN
+                1 => (true, true, true),    // VQMOVUN
+                2 => (true, true, false),   // VQMOVN.S
+                _ => (true, false, true),   // VQMOVN.U
+            };
+            let d_bit = (raw >> 22) & 1;
+            let m_bit = (raw >> 5) & 1;
+            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let vm = (raw & 0xF) | (m_bit << 4);
+            return Some(ArmInst::new(
+                Cond::AL,
+                Op::NeonShiftNarrow {
+                    signed,
+                    dest_unsigned,
+                    saturate,
+                    src_size,
+                    shift: 0,
+                    vd: vd as u8,
+                    vm: vm as u8,
+                },
+                raw,
+            ));
+        }
+
+        // NEON Shift Left Widening / Move Long (VMOVL, VSHLL)
+        // 1111 001U 1 D imm6 Vd 1010 0 0 M 1 Vm
+        if (raw & 0xFE80_0F90) == 0xF280_0A10 {
+            let u = (raw >> 24) & 1;
+            let signed = u == 0;
+            let d_bit = (raw >> 22) & 1;
+            let m_bit = (raw >> 5) & 1;
+            let imm6 = (raw >> 16) & 0x3F;
+            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let vm = (raw & 0xF) | (m_bit << 4);
+            let (src_size, shift) = if (imm6 & 0b100000) != 0 {
+                (NeonSize::I32, (imm6 - 32) as u8)
+            } else if (imm6 & 0b010000) != 0 {
+                (NeonSize::I16, (imm6 - 16) as u8)
+            } else if (imm6 & 0b001000) != 0 {
+                (NeonSize::I8, (imm6 - 8) as u8)
+            } else {
+                (NeonSize::I8, 0)
+            };
+            return Some(ArmInst::new(
+                Cond::AL,
+                Op::NeonShiftWiden {
+                    signed,
+                    src_size,
+                    shift,
+                    vd: vd as u8,
+                    vm: vm as u8,
+                },
+                raw,
+            ));
+        }
+
+        // NEON VSHLL with shift = size (2-register misc: 1111 0011 1 D 11 size 10 Vd 0011 00 0 M 0 Vm)
+        if (raw & 0xFFB3_0F10) == 0xF3B2_0300 {
+            let size_bits = (raw >> 18) & 0x3;
+            let (src_size, shift) = match size_bits {
+                0 => (NeonSize::I8, 8),
+                1 => (NeonSize::I16, 16),
+                _ => (NeonSize::I32, 32),
+            };
+            let d_bit = (raw >> 22) & 1;
+            let m_bit = (raw >> 5) & 1;
+            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let vm = (raw & 0xF) | (m_bit << 4);
+            return Some(ArmInst::new(
+                Cond::AL,
+                Op::NeonShiftWiden {
+                    signed: false,
+                    src_size,
+                    shift,
+                    vd: vd as u8,
+                    vm: vm as u8,
+                },
+                raw,
+            ));
+        }
+
+        // NEON Vector Convert between Floating-Point and Integer (VCVT)
+        // 1111 0011 1 D 11 10 11 Vd 011 op:3 Q M 0 Vm (0xF3BB_0600)
+        if (raw & 0xFFBF_0610) == 0xF3BB_0600 {
+            let d_bit = (raw >> 22) & 1;
+            let m_bit = (raw >> 5) & 1;
+            let q_bit = (raw >> 6) & 1;
+            let vd = ((raw >> 12) & 0xF) | (d_bit << 4);
+            let vm = (raw & 0xF) | (m_bit << 4);
+            let is_quad = q_bit != 0;
+            let to_int = (raw & 0x100) != 0;
+            let unsigned = (raw & 0x80) != 0;
+            let op = match (to_int, unsigned) {
+                (false, false) => NeonCvtOp::F32FromS32,
+                (false, true) => NeonCvtOp::F32FromU32,
+                (true, false) => NeonCvtOp::S32FromF32,
+                (true, true) => NeonCvtOp::U32FromF32,
+            };
+            return Some(ArmInst::new(
+                Cond::AL,
+                Op::NeonCvt {
+                    op,
+                    is_quad,
                     vd: vd as u8,
                     vm: vm as u8,
                 },
@@ -1825,6 +1952,111 @@ mod tests {
                 is_quad: true,
                 vd: 0,
                 rt: Reg::R3,
+            }
+        );
+
+        // VMOVN.I16 d0, q1 (0xF3B2_0202)
+        let inst = ArmDecoder::decode(0xF3B2_0202);
+        assert_eq!(
+            inst.op,
+            Op::NeonShiftNarrow {
+                signed: false,
+                dest_unsigned: false,
+                saturate: false,
+                src_size: NeonSize::I16,
+                shift: 0,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // VMOVN.I32 d0, q1 (0xF3B6_0202)
+        let inst = ArmDecoder::decode(0xF3B6_0202);
+        assert_eq!(
+            inst.op,
+            Op::NeonShiftNarrow {
+                signed: false,
+                dest_unsigned: false,
+                saturate: false,
+                src_size: NeonSize::I32,
+                shift: 0,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // VMOVL.S8 q0, d2 (0xF288_0A12)
+        let inst = ArmDecoder::decode(0xF288_0A12);
+        assert_eq!(
+            inst.op,
+            Op::NeonShiftWiden {
+                signed: true,
+                src_size: NeonSize::I8,
+                shift: 0,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // VMOVL.U8 q0, d2 (0xF388_0A12)
+        let inst = ArmDecoder::decode(0xF388_0A12);
+        assert_eq!(
+            inst.op,
+            Op::NeonShiftWiden {
+                signed: false,
+                src_size: NeonSize::I8,
+                shift: 0,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // VSHLL.S16 q0, d2, #4 (0xF294_0A12)
+        let inst = ArmDecoder::decode(0xF294_0A12);
+        assert_eq!(
+            inst.op,
+            Op::NeonShiftWiden {
+                signed: true,
+                src_size: NeonSize::I16,
+                shift: 4,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // VCVT.F32.S32 q0, q1 (0xF3BB_0642)
+        let inst = ArmDecoder::decode(0xF3BB_0642);
+        assert_eq!(
+            inst.op,
+            Op::NeonCvt {
+                op: NeonCvtOp::F32FromS32,
+                is_quad: true,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // VCVT.S32.F32 d0, d2 (0xF3BB_0702)
+        let inst = ArmDecoder::decode(0xF3BB_0702);
+        assert_eq!(
+            inst.op,
+            Op::NeonCvt {
+                op: NeonCvtOp::S32FromF32,
+                is_quad: false,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // VCVT.U32.F32 q0, q1 (0xF3BB_07C2)
+        let inst = ArmDecoder::decode(0xF3BB_07C2);
+        assert_eq!(
+            inst.op,
+            Op::NeonCvt {
+                op: NeonCvtOp::U32FromF32,
+                is_quad: true,
+                vd: 0,
+                vm: 2,
             }
         );
     }

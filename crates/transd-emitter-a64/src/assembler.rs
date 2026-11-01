@@ -1239,6 +1239,122 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// XTN Vd, Vn (Extract narrow: 16b->8b, 32b->16b, 64b->32b)
+    pub fn neon_xtn(&mut self, rd: u8, rn: u8, size: u8) {
+        assert!(rd < 32 && rn < 32 && size < 3);
+        let inst = 0x0E21_2800 | ((size as u32) << 22) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SQXTN Vd, Vn (Signed saturating extract narrow)
+    pub fn neon_sqxtn(&mut self, rd: u8, rn: u8, size: u8) {
+        assert!(rd < 32 && rn < 32 && size < 3);
+        let inst = 0x0E21_4800 | ((size as u32) << 22) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SQXTUN Vd, Vn (Signed saturating extract unsigned narrow)
+    pub fn neon_sqxtun(&mut self, rd: u8, rn: u8, size: u8) {
+        assert!(rd < 32 && rn < 32 && size < 3);
+        let inst = 0x2E21_2800 | ((size as u32) << 22) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// UQXTN Vd, Vn (Unsigned saturating extract narrow)
+    pub fn neon_uqxtn(&mut self, rd: u8, rn: u8, size: u8) {
+        assert!(rd < 32 && rn < 32 && size < 3);
+        let inst = 0x2E21_4800 | ((size as u32) << 22) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SHRN Vd, Vn, #shift (Shift right narrow by immediate)
+    pub fn neon_shrn(&mut self, rd: u8, rn: u8, size: u8, shift: u8) {
+        assert!(rd < 32 && rn < 32 && size < 3);
+        let bits = match size { 0 => 16, 1 => 32, _ => 64 };
+        assert!(shift > 0 && shift <= bits);
+        let immb = (1 << (size + 3)) | (bits - shift);
+        let inst = 0x0F00_8400 | ((immb as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SQSHRUN Vd, Vn, #shift (Signed saturating shift right unsigned narrow)
+    pub fn neon_sqshrun(&mut self, rd: u8, rn: u8, size: u8, shift: u8) {
+        assert!(rd < 32 && rn < 32 && size < 3);
+        let bits = match size { 0 => 16, 1 => 32, _ => 64 };
+        assert!(shift > 0 && shift <= bits);
+        let immb = (1 << (size + 3)) | (bits - shift);
+        let inst = 0x2F00_8400 | ((immb as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SQSHRN Vd, Vn, #shift (Signed saturating shift right narrow)
+    pub fn neon_sqshrn(&mut self, rd: u8, rn: u8, size: u8, shift: u8) {
+        assert!(rd < 32 && rn < 32 && size < 3);
+        let bits = match size { 0 => 16, 1 => 32, _ => 64 };
+        assert!(shift > 0 && shift <= bits);
+        let immb = (1 << (size + 3)) | (bits - shift);
+        let inst = 0x0F00_9400 | ((immb as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// UQSHRN Vd, Vn, #shift (Unsigned saturating shift right narrow)
+    pub fn neon_uqshrn(&mut self, rd: u8, rn: u8, size: u8, shift: u8) {
+        assert!(rd < 32 && rn < 32 && size < 3);
+        let bits = match size { 0 => 16, 1 => 32, _ => 64 };
+        assert!(shift > 0 && shift <= bits);
+        let immb = (1 << (size + 3)) | (bits - shift);
+        let inst = 0x2F00_9400 | ((immb as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SSHLL Vd, Vn, #shift (Signed shift left long / widen: 8b->8h, 16b->4s, 32b->2d)
+    pub fn neon_sshll(&mut self, rd: u8, rn: u8, size_shift: u8, shift: u8) {
+        assert!(rd < 32 && rn < 32 && (3..=5).contains(&size_shift));
+        let imm = (1 << size_shift) | (shift & ((1 << size_shift) - 1));
+        let inst = 0x0F00_A400 | ((imm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// USHLL Vd, Vn, #shift (Unsigned shift left long / widen: 8b->8h, 16b->4s, 32b->2d)
+    pub fn neon_ushll(&mut self, rd: u8, rn: u8, size_shift: u8, shift: u8) {
+        assert!(rd < 32 && rn < 32 && (3..=5).contains(&size_shift));
+        let imm = (1 << size_shift) | (shift & ((1 << size_shift) - 1));
+        let inst = 0x2F00_A400 | ((imm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SCVTF Vd, Vn (Signed 32-bit int to float vector conversion: 2S or 4S)
+    pub fn neon_scvtf(&mut self, rd: u8, rn: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32);
+        let q = if is_quad { 0x4E21_D800 } else { 0x0E21_D800 };
+        let inst = q | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// UCVTF Vd, Vn (Unsigned 32-bit int to float vector conversion: 2S or 4S)
+    pub fn neon_ucvtf(&mut self, rd: u8, rn: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32);
+        let q = if is_quad { 0x6E21_D800 } else { 0x2E21_D800 };
+        let inst = q | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FCVTZS Vd, Vn (Float to signed 32-bit int vector conversion round-to-zero: 2S or 4S)
+    pub fn neon_fcvtzs(&mut self, rd: u8, rn: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32);
+        let q = if is_quad { 0x4EA1_B800 } else { 0x0EA1_B800 };
+        let inst = q | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FCVTZU Vd, Vn (Float to unsigned 32-bit int vector conversion round-to-zero: 2S or 4S)
+    pub fn neon_fcvtzu(&mut self, rd: u8, rn: u8, is_quad: bool) {
+        assert!(rd < 32 && rn < 32);
+        let q = if is_quad { 0x6EA1_B800 } else { 0x2EA1_B800 };
+        let inst = q | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
     /// LDXR Wt, [Xn] (Load exclusive 32-bit register)
     pub fn ldxr_w(&mut self, rt: A64Reg, rn: A64Reg) {
         let inst = 0x885F_7C00 | (rn.index() << 5) | rt.index();
@@ -1497,5 +1613,37 @@ mod tests {
         assert_eq!(asm.code[8], 0x6EA0_F800 | (1 << 5) | 0);
         assert_eq!(asm.code[9], 0x3DC0_0000 | (10 << 10) | (0 << 5) | 1);
         assert_eq!(asm.code[10], 0x3D80_0000 | (10 << 10) | (0 << 5) | 1);
+    }
+
+    #[test]
+    fn test_asm_neon_narrow_widen_cvt() {
+        let mut asm = A64Assembler::new();
+        asm.neon_xtn(0, 1, 0);
+        asm.neon_sqxtn(0, 1, 1);
+        asm.neon_sqxtun(0, 1, 2);
+        asm.neon_uqxtn(0, 1, 0);
+        asm.neon_shrn(0, 1, 0, 3);
+        asm.neon_sshll(0, 1, 3, 0);
+        asm.neon_ushll(0, 1, 4, 5);
+        asm.neon_scvtf(0, 1, false);
+        asm.neon_scvtf(0, 1, true);
+        asm.neon_ucvtf(0, 1, false);
+        asm.neon_fcvtzs(0, 1, false);
+        asm.neon_fcvtzs(0, 1, true);
+        asm.neon_fcvtzu(0, 1, true);
+
+        assert_eq!(asm.code[0], 0x0E21_2820);
+        assert_eq!(asm.code[1], 0x0E61_4820);
+        assert_eq!(asm.code[2], 0x2EA1_2820);
+        assert_eq!(asm.code[3], 0x2E21_4820);
+        assert_eq!(asm.code[4], 0x0F0D_8420);
+        assert_eq!(asm.code[5], 0x0F08_A420);
+        assert_eq!(asm.code[6], 0x2F15_A420);
+        assert_eq!(asm.code[7], 0x0E21_D820);
+        assert_eq!(asm.code[8], 0x4E21_D820);
+        assert_eq!(asm.code[9], 0x2E21_D820);
+        assert_eq!(asm.code[10], 0x0EA1_B820);
+        assert_eq!(asm.code[11], 0x4EA1_B820);
+        assert_eq!(asm.code[12], 0x6EA1_B820);
     }
 }

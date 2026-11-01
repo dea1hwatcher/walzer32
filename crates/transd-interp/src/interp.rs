@@ -1878,6 +1878,127 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
+            Op::NeonShiftWiden {
+                signed,
+                src_size,
+                shift,
+                vd,
+                vm,
+            } => {
+                let m = (vm as usize) % 32;
+                let d0 = (vd as usize) % 32;
+                let d1 = (vd as usize + 1) % 32;
+                let src_val = cpu.vfp[m];
+
+                match src_size {
+                    NeonSize::I8 => {
+                        let mut lo64 = 0u64;
+                        let mut hi64 = 0u64;
+                        for k in 0..8 {
+                            let b = (src_val >> (k * 8)) as u8;
+                            let widened = if signed {
+                                ((b as i8 as i16) << shift) as u16
+                            } else {
+                                (b as u16) << shift
+                            };
+                            if k < 4 {
+                                lo64 |= (widened as u64) << (k * 16);
+                            } else {
+                                hi64 |= (widened as u64) << ((k - 4) * 16);
+                            }
+                        }
+                        cpu.vfp[d0] = lo64;
+                        cpu.vfp[d1] = hi64;
+                    }
+                    NeonSize::I16 => {
+                        let mut lo64 = 0u64;
+                        let mut hi64 = 0u64;
+                        for k in 0..4 {
+                            let h = (src_val >> (k * 16)) as u16;
+                            let widened = if signed {
+                                ((h as i16 as i32) << shift) as u32
+                            } else {
+                                (h as u32) << shift
+                            };
+                            if k < 2 {
+                                lo64 |= (widened as u64) << (k * 32);
+                            } else {
+                                hi64 |= (widened as u64) << ((k - 2) * 32);
+                            }
+                        }
+                        cpu.vfp[d0] = lo64;
+                        cpu.vfp[d1] = hi64;
+                    }
+                    _ => {
+                        let w0 = src_val as u32;
+                        let w1 = (src_val >> 32) as u32;
+                        let res0 = if signed {
+                            ((w0 as i32 as i64) << shift) as u64
+                        } else {
+                            (w0 as u64) << shift
+                        };
+                        let res1 = if signed {
+                            ((w1 as i32 as i64) << shift) as u64
+                        } else {
+                            (w1 as u64) << shift
+                        };
+                        cpu.vfp[d0] = res0;
+                        cpu.vfp[d1] = res1;
+                    }
+                }
+
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonCvt {
+                op,
+                is_quad,
+                vd,
+                vm,
+            } => {
+                let regs = if is_quad { 2 } else { 1 };
+                for r in 0..regs {
+                    let m = (vm as usize + r) % 32;
+                    let d = (vd as usize + r) % 32;
+                    let src_val = cpu.vfp[m];
+
+                    let mut out = 0u64;
+                    for lane in 0..2 {
+                        let word = (src_val >> (lane * 32)) as u32;
+                        let res_u32 = match op {
+                            NeonCvtOp::F32FromS32 => (word as i32 as f32).to_bits(),
+                            NeonCvtOp::F32FromU32 => (word as f32).to_bits(),
+                            NeonCvtOp::S32FromF32 => {
+                                let f = f32::from_bits(word);
+                                if f.is_nan() {
+                                    0
+                                } else if f >= i32::MAX as f32 {
+                                    i32::MAX as u32
+                                } else if f <= i32::MIN as f32 {
+                                    i32::MIN as u32
+                                } else {
+                                    (f as i32) as u32
+                                }
+                            }
+                            NeonCvtOp::U32FromF32 => {
+                                let f = f32::from_bits(word);
+                                if f.is_nan() || f <= 0.0 {
+                                    0
+                                } else if f >= u32::MAX as f32 {
+                                    u32::MAX
+                                } else {
+                                    f as u32
+                                }
+                            }
+                        };
+                        out |= (res_u32 as u64) << (lane * 32);
+                    }
+                    cpu.vfp[d] = out;
+                }
+
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
             Op::Unknown(raw) => Err(InterpError::UnknownInstruction(raw)),
             _ => {
                 cpu.set_pc(next_pc);

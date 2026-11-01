@@ -3,7 +3,7 @@ use transd_core::{
     OFFSET_VFP,
 };
 use transd_decoder::{
-    AddrMode, AddrOffset, AluOp, ArmInst, BlockAddrMode, MemSize, MulOp, NeonOp, NeonPermuteOp,
+    AddrMode, AddrOffset, AluOp, ArmInst, BlockAddrMode, MemSize, MulOp, NeonCvtOp, NeonOp, NeonPermuteOp,
     NeonRevOp, NeonSize, Op, Operand2, ShiftAmount, ShiftType, VfpOp, VfpReg, VfpSize,
 };
 use transd_ir::{BlockExit, IrBlock, Superblock};
@@ -1216,6 +1216,108 @@ impl A64Compiler {
                 };
 
                 asm.neon_dup_core(2, src_reg, imm5, *is_quad);
+
+                if *is_quad {
+                    asm.add_x_imm(A64Reg::X9, A64Reg::X0, vd_off as u16);
+                    asm.str_q_imm(2, A64Reg::X9, 0);
+                } else {
+                    asm.str_d_imm(2, A64Reg::X0, vd_off);
+                }
+            }
+            Op::NeonShiftNarrow {
+                signed,
+                dest_unsigned,
+                saturate,
+                src_size,
+                shift,
+                vd,
+                vm,
+            } => {
+                let vm_off = (OFFSET_VFP + (*vm as usize) * 8) as u32;
+                let vd_off = (OFFSET_VFP + (*vd as usize) * 8) as u32;
+
+                asm.add_x_imm(A64Reg::X9, A64Reg::X0, vm_off as u16);
+                asm.ldr_q_imm(0, A64Reg::X9, 0);
+
+                let sz = match src_size {
+                    NeonSize::I16 => 0,
+                    NeonSize::I32 => 1,
+                    _ => 2,
+                };
+
+                if *shift == 0 {
+                    if !*saturate {
+                        asm.neon_xtn(2, 0, sz);
+                    } else if *dest_unsigned && *signed {
+                        asm.neon_sqxtun(2, 0, sz);
+                    } else if *signed {
+                        asm.neon_sqxtn(2, 0, sz);
+                    } else {
+                        asm.neon_uqxtn(2, 0, sz);
+                    }
+                } else {
+                    if !*saturate {
+                        asm.neon_shrn(2, 0, sz, *shift);
+                    } else if *dest_unsigned && *signed {
+                        asm.neon_sqshrun(2, 0, sz, *shift);
+                    } else if *signed {
+                        asm.neon_sqshrn(2, 0, sz, *shift);
+                    } else {
+                        asm.neon_uqshrn(2, 0, sz, *shift);
+                    }
+                }
+
+                asm.str_d_imm(2, A64Reg::X0, vd_off);
+            }
+            Op::NeonShiftWiden {
+                signed,
+                src_size,
+                shift,
+                vd,
+                vm,
+            } => {
+                let vm_off = (OFFSET_VFP + (*vm as usize) * 8) as u32;
+                let vd_off = (OFFSET_VFP + (*vd as usize) * 8) as u32;
+
+                asm.ldr_d_imm(0, A64Reg::X0, vm_off);
+
+                let size_shift = match src_size {
+                    NeonSize::I8 => 3,
+                    NeonSize::I16 => 4,
+                    _ => 5,
+                };
+
+                if *signed {
+                    asm.neon_sshll(2, 0, size_shift, *shift);
+                } else {
+                    asm.neon_ushll(2, 0, size_shift, *shift);
+                }
+
+                asm.add_x_imm(A64Reg::X9, A64Reg::X0, vd_off as u16);
+                asm.str_q_imm(2, A64Reg::X9, 0);
+            }
+            Op::NeonCvt {
+                op,
+                is_quad,
+                vd,
+                vm,
+            } => {
+                let vm_off = (OFFSET_VFP + (*vm as usize) * 8) as u32;
+                let vd_off = (OFFSET_VFP + (*vd as usize) * 8) as u32;
+
+                if *is_quad {
+                    asm.add_x_imm(A64Reg::X9, A64Reg::X0, vm_off as u16);
+                    asm.ldr_q_imm(0, A64Reg::X9, 0);
+                } else {
+                    asm.ldr_d_imm(0, A64Reg::X0, vm_off);
+                }
+
+                match op {
+                    NeonCvtOp::F32FromS32 => asm.neon_scvtf(2, 0, *is_quad),
+                    NeonCvtOp::F32FromU32 => asm.neon_ucvtf(2, 0, *is_quad),
+                    NeonCvtOp::S32FromF32 => asm.neon_fcvtzs(2, 0, *is_quad),
+                    NeonCvtOp::U32FromF32 => asm.neon_fcvtzu(2, 0, *is_quad),
+                }
 
                 if *is_quad {
                     asm.add_x_imm(A64Reg::X9, A64Reg::X0, vd_off as u16);

@@ -1020,5 +1020,61 @@ mod tests {
                 rt: Reg::R3,
             }
         );
+
+        // Thumb-2 VMOVN.I16 d0, q1 -> hi=0xFFB2, lo=0x0202
+        let (inst_vmovn, size) = ThumbDecoder::decode(0xFFB2, Some(0x0202));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vmovn.op,
+            Op::NeonShiftNarrow {
+                signed: false,
+                dest_unsigned: false,
+                saturate: false,
+                src_size: NeonSize::I16,
+                shift: 0,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // Thumb-2 VMOVL.S8 q0, d2 -> hi=0xEF88, lo=0x0A12
+        let (inst_vmovl, size) = ThumbDecoder::decode(0xEF88, Some(0x0A12));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vmovl.op,
+            Op::NeonShiftWiden {
+                signed: true,
+                src_size: NeonSize::I8,
+                shift: 0,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // Thumb-2 VCVT.F32.S32 q0, q1 -> hi=0xFFBB, lo=0x0642
+        let (inst_vcvt1, size) = ThumbDecoder::decode(0xFFBB, Some(0x0642));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vcvt1.op,
+            Op::NeonCvt {
+                op: NeonCvtOp::F32FromS32,
+                is_quad: true,
+                vd: 0,
+                vm: 2,
+            }
+        );
+
+        // Thumb-2 VCVT.S32.F32 d0, d2 -> hi=0xFFBB, lo=0x0702
+        let (inst_vcvt2, size) = ThumbDecoder::decode(0xFFBB, Some(0x0702));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vcvt2.op,
+            Op::NeonCvt {
+                op: NeonCvtOp::S32FromF32,
+                is_quad: false,
+                vd: 0,
+                vm: 2,
+            }
+        );
     }
 }
