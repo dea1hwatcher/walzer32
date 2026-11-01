@@ -37,6 +37,7 @@ fn test_dso_registry_weak_preemption() {
         symbols: syms_lib1,
         symbol_details: details_lib1,
         tls_template: None,
+        ..Default::default()
     };
     let h1 = registry.register(lib1);
 
@@ -75,6 +76,7 @@ fn test_dso_registry_weak_preemption() {
         symbols: syms_lib2,
         symbol_details: details_lib2,
         tls_template: None,
+        ..Default::default()
     };
     let h2 = registry.register(lib2);
 
@@ -110,6 +112,7 @@ fn test_dso_registry_rtld_next() {
         symbols: syms1,
         symbol_details: HashMap::new(),
         tls_template: None,
+        ..Default::default()
     };
     let h1 = registry.register(lib1);
 
@@ -128,6 +131,7 @@ fn test_dso_registry_rtld_next() {
         symbols: syms2,
         symbol_details: HashMap::new(),
         tls_template: None,
+        ..Default::default()
     };
     let _h2 = registry.register(lib2);
 
@@ -181,6 +185,7 @@ fn test_gnu_symbol_version_resolution() {
         symbols: HashMap::new(),
         symbol_details: details,
         tls_template: None,
+        ..Default::default()
     };
 
     // Unversioned query defaults to default version (LIBC_PRIVATE -> 0x3020)

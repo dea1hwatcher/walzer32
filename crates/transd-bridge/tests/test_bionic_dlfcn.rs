@@ -50,6 +50,7 @@ fn test_bionic_dlopen_and_dlsym() {
         symbols: syms,
         symbol_details: details,
         tls_template: None,
+        ..Default::default()
     };
     let lib_handle = bridge.register_library(lib);
 

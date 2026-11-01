@@ -144,9 +144,42 @@ pub struct LoadedLibrary {
     pub symbol_details: HashMap<String, Vec<SymbolInfo>>,
     /// Thread-Local Storage (TLS) template, if this library contains a PT_TLS segment
     pub tls_template: Option<TlsTemplateInfo>,
+    /// Address of ARM exception index table (.ARM.exidx) if present
+    pub exidx_addr: Option<GuestAddr>,
+    /// Number of 8-byte entries in .ARM.exidx table
+    pub exidx_count: usize,
+    /// Program header table address in guest memory
+    pub phdr_addr: GuestAddr,
+    /// Number of program headers
+    pub phnum: u16,
+}
+
+impl Default for LoadedLibrary {
+    fn default() -> Self {
+        Self {
+            load_base: GuestAddr::new(0),
+            total_size: 0,
+            soname: None,
+            needed: Vec::new(),
+            entry_point: GuestAddr::new(0),
+            init_func: None,
+            init_array: Vec::new(),
+            fini_array: Vec::new(),
+            symbols: HashMap::new(),
+            symbol_details: HashMap::new(),
+            tls_template: None,
+            exidx_addr: None,
+            exidx_count: 0,
+            phdr_addr: GuestAddr::new(0),
+            phnum: 0,
+        }
+    }
 }
 
 impl LoadedLibrary {
+    pub fn contains_pc(&self, pc: GuestAddr) -> bool {
+        pc >= self.load_base && pc < self.load_base.add(self.total_size as u32)
+    }
     /// Instantiates a thread's TLS block from this library's TLS template.
     /// Writes initialized template data and zeroes the remainder up to `memsz`.
     pub fn instantiate_tls(
@@ -249,6 +282,11 @@ impl DsoRegistry {
     /// Retrieves a reference to a loaded library by its handle
     pub fn get(&self, handle: u32) -> Option<&LoadedLibrary> {
         self.handle_map.get(&handle).and_then(|&idx| self.libraries.get(idx))
+    }
+
+    /// Finds a loaded library by a guest PC address falling within its mapped range
+    pub fn find_by_pc(&self, pc: GuestAddr) -> Option<&LoadedLibrary> {
+        self.libraries.iter().find(|lib| lib.contains_pc(pc))
     }
 
     /// Finds a loaded library by its soname
@@ -387,6 +425,19 @@ impl ElfLoader {
                 break;
             }
         }
+
+        // 2c. Check for PT_ARM_EXIDX segment
+        let mut exidx_addr = None;
+        let mut exidx_count = 0usize;
+        for ph in &parser.program_headers {
+            if ph.p_type == PT_ARM_EXIDX {
+                exidx_addr = Some(load_base.add(ph.p_vaddr));
+                exidx_count = (ph.p_memsz / 8) as usize;
+                break;
+            }
+        }
+        let phdr_addr = load_base.add(parser.header.e_phoff);
+        let phnum = parser.header.e_phnum;
 
         // 3. Process Dynamic Table
         let dyn_entries = parser.parse_dynamic_table()?;
@@ -776,6 +827,10 @@ impl ElfLoader {
             symbols,
             symbol_details,
             tls_template,
+            exidx_addr,
+            exidx_count,
+            phdr_addr,
+            phnum,
         })
     }
 }

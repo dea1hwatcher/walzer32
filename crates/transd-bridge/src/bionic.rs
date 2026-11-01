@@ -79,6 +79,30 @@ pub enum BionicFuncId {
     Nanosleep = 183,
     Usleep = 184,
 
+    // POSIX Semaphores (semaphore.h)
+    SemInit = 190,
+    SemWait = 191,
+    SemTrywait = 192,
+    SemPost = 193,
+    SemGetvalue = 194,
+    SemDestroy = 195,
+
+    // Thread & Mutex Attributes & Detach (pthread.h)
+    PthreadAttrInit = 200,
+    PthreadAttrDestroy = 201,
+    PthreadAttrSetstacksize = 202,
+    PthreadAttrGetstacksize = 203,
+    PthreadAttrSetdetachstate = 204,
+    PthreadDetach = 205,
+    PthreadMutexattrInit = 206,
+    PthreadMutexattrDestroy = 207,
+    PthreadMutexattrSettype = 208,
+
+    // Exception Unwinding & Error Strings
+    GnuUnwindFindExidx = 210,
+    Strerror = 211,
+    StrerrorR = 212,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -242,6 +266,24 @@ impl BionicFuncId {
             182 => Some(Self::SchedYield),
             183 => Some(Self::Nanosleep),
             184 => Some(Self::Usleep),
+            190 => Some(Self::SemInit),
+            191 => Some(Self::SemWait),
+            192 => Some(Self::SemTrywait),
+            193 => Some(Self::SemPost),
+            194 => Some(Self::SemGetvalue),
+            195 => Some(Self::SemDestroy),
+            200 => Some(Self::PthreadAttrInit),
+            201 => Some(Self::PthreadAttrDestroy),
+            202 => Some(Self::PthreadAttrSetstacksize),
+            203 => Some(Self::PthreadAttrGetstacksize),
+            204 => Some(Self::PthreadAttrSetdetachstate),
+            205 => Some(Self::PthreadDetach),
+            206 => Some(Self::PthreadMutexattrInit),
+            207 => Some(Self::PthreadMutexattrDestroy),
+            208 => Some(Self::PthreadMutexattrSettype),
+            210 => Some(Self::GnuUnwindFindExidx),
+            211 => Some(Self::Strerror),
+            212 => Some(Self::StrerrorR),
             _ => None,
         }
     }
@@ -280,6 +322,7 @@ pub struct BionicBridge {
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
     pub dlerror_addr: GuestAddr,
+    pub strerror_addr: GuestAddr,
     pub signal_state: transd_rt::signals::SignalState,
     pub properties: crate::property::PropertyStore,
     pub stack_chk_guard_addr: GuestAddr,
@@ -307,6 +350,7 @@ impl BionicBridge {
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
+            strerror_addr: stub_base.add(0x900),
             signal_state: transd_rt::signals::SignalState::new(),
             properties: crate::property::PropertyStore::new(stub_base.add(0x1000), 0x4000),
             stack_chk_guard_addr: stub_base.add(0x700),
@@ -466,6 +510,30 @@ impl BionicBridge {
             ("sched_yield", BionicFuncId::SchedYield),
             ("nanosleep", BionicFuncId::Nanosleep),
             ("usleep", BionicFuncId::Usleep),
+
+            // POSIX Semaphores
+            ("sem_init", BionicFuncId::SemInit),
+            ("sem_wait", BionicFuncId::SemWait),
+            ("sem_trywait", BionicFuncId::SemTrywait),
+            ("sem_post", BionicFuncId::SemPost),
+            ("sem_getvalue", BionicFuncId::SemGetvalue),
+            ("sem_destroy", BionicFuncId::SemDestroy),
+
+            // Thread & Mutex Attributes & Detach
+            ("pthread_attr_init", BionicFuncId::PthreadAttrInit),
+            ("pthread_attr_destroy", BionicFuncId::PthreadAttrDestroy),
+            ("pthread_attr_setstacksize", BionicFuncId::PthreadAttrSetstacksize),
+            ("pthread_attr_getstacksize", BionicFuncId::PthreadAttrGetstacksize),
+            ("pthread_attr_setdetachstate", BionicFuncId::PthreadAttrSetdetachstate),
+            ("pthread_detach", BionicFuncId::PthreadDetach),
+            ("pthread_mutexattr_init", BionicFuncId::PthreadMutexattrInit),
+            ("pthread_mutexattr_destroy", BionicFuncId::PthreadMutexattrDestroy),
+            ("pthread_mutexattr_settype", BionicFuncId::PthreadMutexattrSettype),
+
+            // Exception Unwinding & Error Strings
+            ("__gnu_Unwind_Find_exidx", BionicFuncId::GnuUnwindFindExidx),
+            ("strerror", BionicFuncId::Strerror),
+            ("strerror_r", BionicFuncId::StrerrorR),
         ];
 
         for (name, id) in funcs {
@@ -581,6 +649,24 @@ impl BionicBridge {
             BionicFuncId::SchedYield,
             BionicFuncId::Nanosleep,
             BionicFuncId::Usleep,
+            BionicFuncId::SemInit,
+            BionicFuncId::SemWait,
+            BionicFuncId::SemTrywait,
+            BionicFuncId::SemPost,
+            BionicFuncId::SemGetvalue,
+            BionicFuncId::SemDestroy,
+            BionicFuncId::PthreadAttrInit,
+            BionicFuncId::PthreadAttrDestroy,
+            BionicFuncId::PthreadAttrSetstacksize,
+            BionicFuncId::PthreadAttrGetstacksize,
+            BionicFuncId::PthreadAttrSetdetachstate,
+            BionicFuncId::PthreadDetach,
+            BionicFuncId::PthreadMutexattrInit,
+            BionicFuncId::PthreadMutexattrDestroy,
+            BionicFuncId::PthreadMutexattrSettype,
+            BionicFuncId::GnuUnwindFindExidx,
+            BionicFuncId::Strerror,
+            BionicFuncId::StrerrorR,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -1610,10 +1696,204 @@ impl BionicBridge {
                 }
                 cpu.set_reg(Reg::R0, 0);
             }
+            BionicFuncId::SemInit => {
+                let sem_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let value = cpu.reg(Reg::R2);
+                if sem_ptr.as_u32() != 0 {
+                    mem.write_u32(sem_ptr, value)?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SemWait => {
+                let sem_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if sem_ptr.as_u32() != 0 {
+                    let val = mem.read_u32(sem_ptr)?;
+                    if val > 0 {
+                        mem.write_u32(sem_ptr, val - 1)?;
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SemTrywait => {
+                let sem_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if sem_ptr.as_u32() != 0 {
+                    let val = mem.read_u32(sem_ptr)?;
+                    if val > 0 {
+                        mem.write_u32(sem_ptr, val - 1)?;
+                        cpu.set_reg(Reg::R0, 0);
+                    } else {
+                        cpu.set_reg(Reg::R0, 0xFFFF_FFFF); // -1 (EAGAIN)
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SemPost => {
+                let sem_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if sem_ptr.as_u32() != 0 {
+                    let val = mem.read_u32(sem_ptr)?;
+                    mem.write_u32(sem_ptr, val.saturating_add(1))?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SemGetvalue => {
+                let sem_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let sval_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if sem_ptr.as_u32() != 0 && sval_ptr.as_u32() != 0 {
+                    let val = mem.read_u32(sem_ptr)?;
+                    mem.write_u32(sval_ptr, val)?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SemDestroy => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadAttrInit => {
+                let attr_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if attr_ptr.as_u32() != 0 {
+                    mem.write_u32(attr_ptr, 0)?; // flags / detachstate = 0 (JOINABLE)
+                    mem.write_u32(attr_ptr.add(4), 0)?; // stackbase
+                    mem.write_u32(attr_ptr.add(8), 1024 * 1024)?; // default stacksize = 1MB
+                    mem.write_u32(attr_ptr.add(12), 4096)?; // guardsize = 4KB
+                    mem.write_u32(attr_ptr.add(16), 0)?; // sched_policy
+                    mem.write_u32(attr_ptr.add(20), 0)?; // sched_priority
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 22); // EINVAL
+                }
+            }
+            BionicFuncId::PthreadAttrDestroy => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadAttrSetstacksize => {
+                let attr_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let stacksize = cpu.reg(Reg::R1);
+                if attr_ptr.as_u32() != 0 {
+                    mem.write_u32(attr_ptr.add(8), stacksize)?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 22); // EINVAL
+                }
+            }
+            BionicFuncId::PthreadAttrGetstacksize => {
+                let attr_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let stacksize_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if attr_ptr.as_u32() != 0 && stacksize_ptr.as_u32() != 0 {
+                    let sz = mem.read_u32(attr_ptr.add(8))?;
+                    mem.write_u32(stacksize_ptr, sz)?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 22); // EINVAL
+                }
+            }
+            BionicFuncId::PthreadAttrSetdetachstate => {
+                let attr_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let detachstate = cpu.reg(Reg::R1);
+                if attr_ptr.as_u32() != 0 {
+                    mem.write_u32(attr_ptr, detachstate)?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 22); // EINVAL
+                }
+            }
+            BionicFuncId::PthreadDetach => {
+                let thread_id = cpu.reg(Reg::R0);
+                if let Some(desc) = self.threads.get_mut(&thread_id) {
+                    desc.joined = true;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadMutexattrInit => {
+                let attr_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if attr_ptr.as_u32() != 0 {
+                    mem.write_u32(attr_ptr, 0)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadMutexattrDestroy => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadMutexattrSettype => {
+                let attr_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let mtype = cpu.reg(Reg::R1);
+                if attr_ptr.as_u32() != 0 {
+                    mem.write_u32(attr_ptr, mtype)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::GnuUnwindFindExidx => {
+                let pc = GuestAddr::new(cpu.reg(Reg::R0));
+                let pcount_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if let Some(lib) = self.dso_registry.find_by_pc(pc) {
+                    if let Some(exidx_addr) = lib.exidx_addr {
+                        if pcount_ptr.as_u32() != 0 {
+                            mem.write_u32(pcount_ptr, lib.exidx_count as u32)?;
+                        }
+                        cpu.set_reg(Reg::R0, exidx_addr.as_u32());
+                    } else {
+                        if pcount_ptr.as_u32() != 0 {
+                            mem.write_u32(pcount_ptr, 0)?;
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                } else {
+                    if pcount_ptr.as_u32() != 0 {
+                        mem.write_u32(pcount_ptr, 0)?;
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::Strerror => {
+                let errnum = cpu.reg(Reg::R0);
+                let err_str = Self::errnum_to_str(errnum);
+                let bytes = err_str.as_bytes();
+                mem.write_bytes(self.strerror_addr, bytes)?;
+                mem.write_u8(self.strerror_addr.add(bytes.len() as u32), 0)?;
+                cpu.set_reg(Reg::R0, self.strerror_addr.as_u32());
+            }
+            BionicFuncId::StrerrorR => {
+                let errnum = cpu.reg(Reg::R0);
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let buflen = cpu.reg(Reg::R2);
+                if buf_ptr.as_u32() == 0 || buflen == 0 {
+                    cpu.set_reg(Reg::R0, 22); // EINVAL
+                } else {
+                    let err_str = Self::errnum_to_str(errnum);
+                    let bytes = err_str.as_bytes();
+                    let copy_len = (buflen - 1).min(bytes.len() as u32) as usize;
+                    mem.write_bytes(buf_ptr, &bytes[..copy_len])?;
+                    mem.write_u8(buf_ptr.add(copy_len as u32), 0)?;
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
             _ => {}
         }
 
         Ok(true)
+    }
+
+    fn errnum_to_str(errnum: u32) -> &'static str {
+        match errnum {
+            0 => "Success",
+            1 => "Operation not permitted",
+            2 => "No such file or directory",
+            9 => "Bad file descriptor",
+            11 => "Resource temporarily unavailable",
+            12 => "Cannot allocate memory",
+            13 => "Permission denied",
+            14 => "Bad address",
+            16 => "Device or resource busy",
+            22 => "Invalid argument",
+            _ => "Unknown error",
+        }
     }
 
     fn read_c_string(mem: &(impl Memory + ?Sized), addr: GuestAddr) -> Result<String, MemoryError> {

@@ -175,6 +175,7 @@ impl TransdSession {
         self.next_load_addr = load_addr.add(size_aligned as u32);
 
         self.loaded_libraries.insert(name.to_string(), loaded.clone());
+        let _ = self.bionic.register_library(loaded.clone());
 
         // Automatic AOT translation cache loading & pre-compilation
         if let Some(ref dir) = self.aot_cache_dir {
