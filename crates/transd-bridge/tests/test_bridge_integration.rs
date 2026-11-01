@@ -132,7 +132,7 @@ fn test_jni_get_version_and_new_string() {
         0xE52DE004, // STR lr, [sp, #-4]!
         0xE59F1010, // LDR r1, [pc, #16] -> text_addr (0x34 + 8 + 16 = 0x4C)
         0xE5902000, // LDR r2, [r0]
-        0xE5922298, // LDR r2, [r2, #664]
+        0xE592229C, // LDR r2, [r2, #668] -> (*env)->NewStringUTF (index 167)
         0xE12FFF32, // BLX r2
         0xE49DE004, // LDR lr, [sp], #4
         0xE12FFF1E, // BX lr

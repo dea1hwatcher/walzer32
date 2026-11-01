@@ -45,7 +45,8 @@ pub use gles::{
 };
 pub use host::{ArgMarshaller, HostBridge, RawFnPtr};
 pub use jni::{
-    jni_idx, vm_idx, JniBridge, RegisteredNativeMethod, JNI_ERR, JNI_OK, JNI_SVC_MAGIC,
+    jni_idx, vm_idx, DirectBufferInfo, FieldDescriptor, JniBridge, JniValue, MethodDescriptor,
+    RegisteredNativeMethod, JNI_ERR, JNI_FALSE, JNI_OK, JNI_SVC_MAGIC, JNI_TRUE,
     JNI_VERSION_1_1, JNI_VERSION_1_2, JNI_VERSION_1_4, JNI_VERSION_1_6,
 };
 pub use jni_thunk::{JniThunk, JniThunkGenerator};
