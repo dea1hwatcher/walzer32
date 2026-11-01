@@ -916,6 +916,108 @@ impl ThumbDecoder {
             }
         }
 
+        // Thumb-2 VMOV 2 core registers <-> 1 double or 2 singles
+        if (hw1 & 0xFFE0) == 0xEC40 && ((hw2 & 0x0FD0) == 0x0B10 || (hw2 & 0x0FD0) == 0x0A10) {
+            let to_core = ((hw1 >> 4) & 1) != 0;
+            let is_double = ((hw2 >> 8) & 0xF) == 0xB;
+            let rt2 = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rt = Reg::from_u8(((hw2 >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let m_bit = ((hw2 >> 5) & 1) as u8;
+            let vm = (hw2 & 0xF) as u8;
+            let vfp_reg = if is_double {
+                let d_idx = (m_bit << 4) | vm;
+                VfpReg::D(d_idx)
+            } else {
+                let s_idx = (vm << 1) | m_bit;
+                VfpReg::S(s_idx)
+            };
+            return ArmInst::new(
+                Cond::AL,
+                Op::VfpMovTwoCore {
+                    to_core,
+                    is_double,
+                    rt,
+                    rt2,
+                    vfp_reg,
+                },
+                raw,
+            );
+        }
+
+        // Thumb-32 UMAAL: 0xFBE0
+        if (hw1 & 0xFFF0) == 0xFBE0 && (hw2 & 0x00F0) == 0x0060 {
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd_lo = Reg::from_u8(((hw2 >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd_hi = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+            return ArmInst::new(Cond::AL, Op::Umaal { rd_lo, rd_hi, rn, rm }, raw);
+        }
+
+        // Thumb-32 SMULxy / SMLAxy: 0xFB10
+        if (hw1 & 0xFFF0) == 0xFB10 {
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let ra_raw = ((hw2 >> 12) & 0xF) as u8;
+            let ra = Reg::from_u8(ra_raw).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+            let y_top = ((hw2 >> 5) & 1) != 0;
+            let x_top = ((hw2 >> 4) & 1) != 0;
+            let op = if ra_raw == 15 {
+                DspMulOp::Smul { x_top, y_top }
+            } else {
+                DspMulOp::Smla { x_top, y_top }
+            };
+            return ArmInst::new(Cond::AL, Op::DspMul { op, rd, rn: ra, rm, rs: rn }, raw);
+        }
+
+        // Thumb-32 SMUAD / SMLAD: 0xFB20
+        if (hw1 & 0xFFF0) == 0xFB20 {
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let ra_raw = ((hw2 >> 12) & 0xF) as u8;
+            let ra = Reg::from_u8(ra_raw).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+            let swap = ((hw2 >> 4) & 1) != 0;
+            let op = if ra_raw == 15 {
+                DspMulOp::Smuad { swap }
+            } else {
+                DspMulOp::Smlad { swap }
+            };
+            return ArmInst::new(Cond::AL, Op::DspMul { op, rd, rn: ra, rm, rs: rn }, raw);
+        }
+
+        // Thumb-32 SMULWy / SMLAWy: 0xFB30
+        if (hw1 & 0xFFF0) == 0xFB30 {
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let ra_raw = ((hw2 >> 12) & 0xF) as u8;
+            let ra = Reg::from_u8(ra_raw).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+            let y_top = ((hw2 >> 4) & 1) != 0;
+            let op = if ra_raw == 15 {
+                DspMulOp::Smulw { y_top }
+            } else {
+                DspMulOp::Smlaw { y_top }
+            };
+            return ArmInst::new(Cond::AL, Op::DspMul { op, rd, rn: ra, rm, rs: rn }, raw);
+        }
+
+        // Thumb-32 SMUSD / SMLSD: 0xFB40
+        if (hw1 & 0xFFF0) == 0xFB40 {
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let ra_raw = ((hw2 >> 12) & 0xF) as u8;
+            let ra = Reg::from_u8(ra_raw).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+            let swap = ((hw2 >> 4) & 1) != 0;
+            let op = if ra_raw == 15 {
+                DspMulOp::Smusd { swap }
+            } else {
+                DspMulOp::Smlsd { swap }
+            };
+            return ArmInst::new(Cond::AL, Op::DspMul { op, rd, rn: ra, rm, rs: rn }, raw);
+        }
+
         // Thumb-2 VMRS <Rt>, FPSCR (0xEEF1, 0x<Rt>A10)
         if hw1 == 0xEEF1 && (hw2 & 0x0FFF) == 0x0A10 {
             let rt_raw = ((hw2 >> 12) & 0xF) as u8;

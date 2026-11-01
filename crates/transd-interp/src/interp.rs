@@ -958,6 +958,86 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
+            Op::DspMul { op, rd, rn, rm, rs } => {
+                let m = cpu.reg(rm);
+                let s = cpu.reg(rs);
+                let acc = cpu.reg(rn);
+
+                let res = match op {
+                    DspMulOp::Smul { x_top, y_top } => {
+                        let m_half = if x_top { (m >> 16) as i16 } else { (m & 0xFFFF) as i16 };
+                        let s_half = if y_top { (s >> 16) as i16 } else { (s & 0xFFFF) as i16 };
+                        (m_half as i32).wrapping_mul(s_half as i32) as u32
+                    }
+                    DspMulOp::Smla { x_top, y_top } => {
+                        let m_half = if x_top { (m >> 16) as i16 } else { (m & 0xFFFF) as i16 };
+                        let s_half = if y_top { (s >> 16) as i16 } else { (s & 0xFFFF) as i16 };
+                        let prod = (m_half as i32).wrapping_mul(s_half as i32);
+                        prod.wrapping_add(acc as i32) as u32
+                    }
+                    DspMulOp::Smulw { y_top } => {
+                        let s_half = if y_top { (s >> 16) as i16 } else { (s & 0xFFFF) as i16 };
+                        let prod = (m as i32 as i64).wrapping_mul(s_half as i32 as i64);
+                        (prod >> 16) as i32 as u32
+                    }
+                    DspMulOp::Smlaw { y_top } => {
+                        let s_half = if y_top { (s >> 16) as i16 } else { (s & 0xFFFF) as i16 };
+                        let prod = (m as i32 as i64).wrapping_mul(s_half as i32 as i64);
+                        ((prod >> 16) as i32).wrapping_add(acc as i32) as u32
+                    }
+                    DspMulOp::Smuad { swap } => {
+                        let s_lo = if swap { (s >> 16) as i16 } else { (s & 0xFFFF) as i16 };
+                        let s_hi = if swap { (s & 0xFFFF) as i16 } else { (s >> 16) as i16 };
+                        let m_lo = (m & 0xFFFF) as i16;
+                        let m_hi = (m >> 16) as i16;
+                        let p1 = (m_lo as i32).wrapping_mul(s_lo as i32);
+                        let p2 = (m_hi as i32).wrapping_mul(s_hi as i32);
+                        p1.wrapping_add(p2) as u32
+                    }
+                    DspMulOp::Smusd { swap } => {
+                        let s_lo = if swap { (s >> 16) as i16 } else { (s & 0xFFFF) as i16 };
+                        let s_hi = if swap { (s & 0xFFFF) as i16 } else { (s >> 16) as i16 };
+                        let m_lo = (m & 0xFFFF) as i16;
+                        let m_hi = (m >> 16) as i16;
+                        let p1 = (m_lo as i32).wrapping_mul(s_lo as i32);
+                        let p2 = (m_hi as i32).wrapping_mul(s_hi as i32);
+                        p1.wrapping_sub(p2) as u32
+                    }
+                    DspMulOp::Smlad { swap } => {
+                        let s_lo = if swap { (s >> 16) as i16 } else { (s & 0xFFFF) as i16 };
+                        let s_hi = if swap { (s & 0xFFFF) as i16 } else { (s >> 16) as i16 };
+                        let m_lo = (m & 0xFFFF) as i16;
+                        let m_hi = (m >> 16) as i16;
+                        let p1 = (m_lo as i32).wrapping_mul(s_lo as i32);
+                        let p2 = (m_hi as i32).wrapping_mul(s_hi as i32);
+                        p1.wrapping_add(p2).wrapping_add(acc as i32) as u32
+                    }
+                    DspMulOp::Smlsd { swap } => {
+                        let s_lo = if swap { (s >> 16) as i16 } else { (s & 0xFFFF) as i16 };
+                        let s_hi = if swap { (s & 0xFFFF) as i16 } else { (s >> 16) as i16 };
+                        let m_lo = (m & 0xFFFF) as i16;
+                        let m_hi = (m >> 16) as i16;
+                        let p1 = (m_lo as i32).wrapping_mul(s_lo as i32);
+                        let p2 = (m_hi as i32).wrapping_mul(s_hi as i32);
+                        p1.wrapping_sub(p2).wrapping_add(acc as i32) as u32
+                    }
+                };
+
+                cpu.set_reg(rd, res);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::Umaal { rd_lo, rd_hi, rn, rm } => {
+                let n = cpu.reg(rn) as u64;
+                let m = cpu.reg(rm) as u64;
+                let lo_orig = cpu.reg(rd_lo) as u64;
+                let hi_orig = cpu.reg(rd_hi) as u64;
+                let res = (n * m).wrapping_add(lo_orig).wrapping_add(hi_orig);
+                cpu.set_reg(rd_lo, (res & 0xFFFF_FFFF) as u32);
+                cpu.set_reg(rd_hi, (res >> 32) as u32);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
             Op::VfpAlu {
                 op,
                 size,
@@ -1139,6 +1219,51 @@ impl Interpreter {
                     let val = cpu.reg(core_reg);
                     if let VfpReg::S(idx) = vfp_reg {
                         cpu.set_s_reg(idx, f32::from_bits(val));
+                    }
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::VfpMovTwoCore {
+                to_core,
+                is_double,
+                rt,
+                rt2,
+                vfp_reg,
+            } => {
+                if to_core {
+                    if is_double {
+                        let d_idx = match vfp_reg {
+                            VfpReg::D(idx) => idx,
+                            _ => 0,
+                        };
+                        let bits = cpu.d_reg_u64(d_idx);
+                        cpu.set_reg(rt, (bits & 0xFFFF_FFFF) as u32);
+                        cpu.set_reg(rt2, (bits >> 32) as u32);
+                    } else {
+                        let s_idx = match vfp_reg {
+                            VfpReg::S(idx) => idx,
+                            _ => 0,
+                        };
+                        cpu.set_reg(rt, cpu.s_reg_u32(s_idx));
+                        cpu.set_reg(rt2, cpu.s_reg_u32(s_idx + 1));
+                    }
+                } else {
+                    if is_double {
+                        let d_idx = match vfp_reg {
+                            VfpReg::D(idx) => idx,
+                            _ => 0,
+                        };
+                        let lo = cpu.reg(rt) as u64;
+                        let hi = (cpu.reg(rt2) as u64) << 32;
+                        cpu.set_d_reg_u64(d_idx, hi | lo);
+                    } else {
+                        let s_idx = match vfp_reg {
+                            VfpReg::S(idx) => idx,
+                            _ => 0,
+                        };
+                        cpu.set_s_reg_u32(s_idx, cpu.reg(rt));
+                        cpu.set_s_reg_u32(s_idx + 1, cpu.reg(rt2));
                     }
                 }
                 cpu.set_pc(next_pc);

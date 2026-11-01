@@ -184,6 +184,20 @@ pub enum PkhOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DspMulOp {
+    // 16x16 -> 32
+    Smul { x_top: bool, y_top: bool },
+    Smla { x_top: bool, y_top: bool },
+    Smulw { y_top: bool },
+    Smlaw { y_top: bool },
+    // Dual 16x16 -> 32
+    Smuad { swap: bool },
+    Smusd { swap: bool },
+    Smlad { swap: bool },
+    Smlsd { swap: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsrValue {
     Reg(Reg),
     Imm(u32),
@@ -425,6 +439,26 @@ pub enum Op {
         to_core: bool,
         core_reg: Reg,
         vfp_reg: VfpReg,
+    },
+    VfpMovTwoCore {
+        to_core: bool,
+        is_double: bool,
+        rt: Reg,
+        rt2: Reg,
+        vfp_reg: VfpReg,
+    },
+    DspMul {
+        op: DspMulOp,
+        rd: Reg,
+        rn: Reg,
+        rm: Reg,
+        rs: Reg,
+    },
+    Umaal {
+        rd_lo: Reg,
+        rd_hi: Reg,
+        rn: Reg,
+        rm: Reg,
     },
     VfpMrsFpscr {
         rt: Option<Reg>, // None = APSR_nzcv (CPSR), Some(r) = general purpose register

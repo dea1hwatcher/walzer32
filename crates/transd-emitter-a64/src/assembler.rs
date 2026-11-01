@@ -494,6 +494,30 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// SMULL Xd, Wn, Wm (Signed 32x32 -> 64-bit multiply: SMADDL Xd, Wn, Wm, XZR)
+    pub fn smull_x(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0x9B20_7C00 | (rm.index() << 16) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// UMULL Xd, Wn, Wm (Unsigned 32x32 -> 64-bit multiply: UMADDL Xd, Wn, Wm, XZR)
+    pub fn umull_x(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0x9BA0_7C00 | (rm.index() << 16) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// SMADDL Xd, Wn, Wm, Xa (Signed 32x32 -> 64-bit multiply-accumulate: Xd = Xa + Wn * Wm)
+    pub fn smaddl_x(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg, ra: A64Reg) {
+        let inst = 0x9B20_0000 | (rm.index() << 16) | (ra.index() << 10) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// UMADDL Xd, Wn, Wm, Xa (Unsigned 32x32 -> 64-bit multiply-accumulate: Xd = Xa + Wn * Wm)
+    pub fn umaddl_x(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg, ra: A64Reg) {
+        let inst = 0x9BA0_0000 | (rm.index() << 16) | (ra.index() << 10) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
     /// SDIV Wd, Wn, Wm (Signed 32-bit division)
     pub fn sdiv_w_reg(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg) {
         let inst = 0x1AC0_0C00 | (rm.index() << 16) | (rn.index() << 5) | rd.index();
@@ -609,6 +633,38 @@ impl A64Assembler {
         let immr = ((-(lsb as i32)) & 31) as u32;
         let imms = ((width as u32) - 1) & 31;
         let inst = 0x3300_0000 | (immr << 16) | (imms << 10) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// BFI Xd, Xn, #lsb, #width (64-bit Bitfield insert)
+    pub fn bfi_x(&mut self, rd: A64Reg, rn: A64Reg, lsb: u8, width: u8) {
+        assert!(width >= 1 && width <= 64 && lsb < 64 && (lsb + width) <= 64);
+        let immr = ((-(lsb as i32)) & 63) as u32;
+        let imms = ((width as u32) - 1) & 63;
+        let inst = 0xB340_0000 | (immr << 16) | (imms << 10) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// LSR Xd, Xn, #shift (0..63)
+    pub fn lsr_x_imm(&mut self, rd: A64Reg, rn: A64Reg, shift: u8) {
+        assert!(shift < 64);
+        let inst = 0xD340_0000 | ((shift as u32) << 16) | (0x3F << 10) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// LSL Xd, Xn, #shift (0..63)
+    pub fn lsl_x_imm(&mut self, rd: A64Reg, rn: A64Reg, shift: u8) {
+        assert!(shift < 64);
+        let immr = (64 - (shift as u32)) & 63;
+        let imms = 63 - (shift as u32);
+        let inst = 0xD340_0000 | (immr << 16) | (imms << 10) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// ASR Xd, Xn, #shift (0..63)
+    pub fn asr_x_imm(&mut self, rd: A64Reg, rn: A64Reg, shift: u8) {
+        assert!(shift < 64);
+        let inst = 0x9340_0000 | ((shift as u32) << 16) | (0x3F << 10) | (rn.index() << 5) | rd.index();
         self.emit(inst);
     }
 
@@ -854,6 +910,20 @@ impl A64Assembler {
     pub fn fmov_s_from_w(&mut self, rd_s: u8, rn: A64Reg) {
         assert!(rd_s < 32);
         let inst = 0x1E27_0000 | (rn.index() << 5) | (rd_s as u32);
+        self.emit(inst);
+    }
+
+    /// FMOV Xd, Dn (Move double-precision float register to 64-bit core register)
+    pub fn fmov_x_from_d(&mut self, rd: A64Reg, rn_d: u8) {
+        assert!(rn_d < 32);
+        let inst = 0x9E66_0000 | ((rn_d as u32) << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// FMOV Dd, Xn (Move 64-bit core register to double-precision float register)
+    pub fn fmov_d_from_x(&mut self, rd_d: u8, rn: A64Reg) {
+        assert!(rd_d < 32);
+        let inst = 0x9E67_0000 | (rn.index() << 5) | (rd_d as u32);
         self.emit(inst);
     }
 
@@ -2016,5 +2086,31 @@ mod tests {
         assert_eq!(asm.code[9], 0x1E63_0020);
         assert_eq!(asm.code[10], 0x1E78_0020);
         assert_eq!(asm.code[11], 0x1E79_0020);
+    }
+
+    #[test]
+    fn test_asm_stage52_multiplies_and_fmov_d() {
+        let mut asm = A64Assembler::new();
+        asm.smull_x(A64Reg::X0, A64Reg::X1, A64Reg::X2);
+        asm.umull_x(A64Reg::X0, A64Reg::X1, A64Reg::X2);
+        asm.smaddl_x(A64Reg::X0, A64Reg::X1, A64Reg::X2, A64Reg::X3);
+        asm.umaddl_x(A64Reg::X0, A64Reg::X1, A64Reg::X2, A64Reg::X3);
+        asm.bfi_x(A64Reg::X0, A64Reg::X1, 32, 32);
+        asm.lsr_x_imm(A64Reg::X0, A64Reg::X1, 32);
+        asm.lsl_x_imm(A64Reg::X0, A64Reg::X1, 32);
+        asm.asr_x_imm(A64Reg::X0, A64Reg::X1, 16);
+        asm.fmov_x_from_d(A64Reg::X0, 1);
+        asm.fmov_d_from_x(0, A64Reg::X1);
+
+        assert_eq!(asm.code[0], 0x9B22_7C20);
+        assert_eq!(asm.code[1], 0x9BA2_7C20);
+        assert_eq!(asm.code[2], 0x9B22_0C20);
+        assert_eq!(asm.code[3], 0x9BA2_0C20);
+        assert_eq!(asm.code[4], 0xB360_7C20);
+        assert_eq!(asm.code[5], 0xD360_FC20);
+        assert_eq!(asm.code[6], 0xD360_7C20);
+        assert_eq!(asm.code[7], 0x9350_FC20);
+        assert_eq!(asm.code[8], 0x9E66_0020);
+        assert_eq!(asm.code[9], 0x9E67_0020);
     }
 }

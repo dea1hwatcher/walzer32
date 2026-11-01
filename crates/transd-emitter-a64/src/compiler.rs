@@ -3,7 +3,7 @@ use transd_core::{
     OFFSET_VFP,
 };
 use transd_decoder::{
-    AddrMode, AddrOffset, AluOp, ArmInst, BitFieldOp, BlockAddrMode, ByteRevOp, ExtendOp, MemSize, MulOp,
+    AddrMode, AddrOffset, AluOp, ArmInst, BitFieldOp, BlockAddrMode, ByteRevOp, DspMulOp, ExtendOp, MemSize, MulOp,
     NeonCvtOp, NeonOp, NeonPermuteOp, NeonRevOp, NeonSize, NeonWriteback, Op, Operand2, PkhOp, ShiftAmount,
     ShiftType, VfpCvtOp, VfpOp, VfpReg, VfpSize,
 };
@@ -490,6 +490,160 @@ impl A64Compiler {
                     asm.str_w_imm(dst_reg, A64Reg::X0, rd_offset);
                 }
             }
+            Op::Umaal {
+                rd_lo,
+                rd_hi,
+                rn,
+                rm,
+            } => {
+                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                let rm_reg = load_guest_reg(asm, A64Reg::X10, *rm);
+                // X11 = Rn * Rm (unsigned 64-bit)
+                asm.umull_x(A64Reg::X11, rn_reg, rm_reg);
+                // Accumulate RdLo (zero-extended)
+                let lo_reg = load_guest_reg(asm, A64Reg::X12, *rd_lo);
+                asm.add_x_uxtw(A64Reg::X11, A64Reg::X11, lo_reg);
+                // Accumulate RdHi (zero-extended)
+                let hi_reg = load_guest_reg(asm, A64Reg::X12, *rd_hi);
+                asm.add_x_uxtw(A64Reg::X11, A64Reg::X11, hi_reg);
+
+                // Store lower 32 bits into RdLo
+                store_guest_reg(asm, A64Reg::X11, *rd_lo);
+                // Store upper 32 bits into RdHi
+                asm.lsr_x_imm(A64Reg::X12, A64Reg::X11, 32);
+                store_guest_reg(asm, A64Reg::X12, *rd_hi);
+            }
+            Op::DspMul {
+                op,
+                rd,
+                rn,
+                rm,
+                rs,
+            } => {
+                let rm_reg = load_guest_reg(asm, A64Reg::X9, *rm);
+                let rs_reg = load_guest_reg(asm, A64Reg::X10, *rs);
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+
+                match op {
+                    DspMulOp::Smul { x_top, y_top } => {
+                        if *x_top {
+                            asm.sbfx_w(A64Reg::X12, rm_reg, 16, 16);
+                        } else {
+                            asm.sxth_w(A64Reg::X12, rm_reg);
+                        }
+                        if *y_top {
+                            asm.sbfx_w(A64Reg::X13, rs_reg, 16, 16);
+                        } else {
+                            asm.sxth_w(A64Reg::X13, rs_reg);
+                        }
+                        asm.mul_w_reg(dst_reg, A64Reg::X12, A64Reg::X13);
+                    }
+                    DspMulOp::Smla { x_top, y_top } => {
+                        if *x_top {
+                            asm.sbfx_w(A64Reg::X12, rm_reg, 16, 16);
+                        } else {
+                            asm.sxth_w(A64Reg::X12, rm_reg);
+                        }
+                        if *y_top {
+                            asm.sbfx_w(A64Reg::X13, rs_reg, 16, 16);
+                        } else {
+                            asm.sxth_w(A64Reg::X13, rs_reg);
+                        }
+                        let rn_reg = load_guest_reg(asm, A64Reg::X14, *rn);
+                        asm.madd_w_reg(dst_reg, A64Reg::X12, A64Reg::X13, rn_reg);
+                    }
+                    DspMulOp::Smulw { y_top } => {
+                        if *y_top {
+                            asm.sbfx_w(A64Reg::X13, rs_reg, 16, 16);
+                        } else {
+                            asm.sxth_w(A64Reg::X13, rs_reg);
+                        }
+                        asm.smull_x(A64Reg::X12, rm_reg, A64Reg::X13);
+                        asm.asr_x_imm(A64Reg::X12, A64Reg::X12, 16);
+                        asm.mov_w_reg(dst_reg, A64Reg::X12);
+                    }
+                    DspMulOp::Smlaw { y_top } => {
+                        if *y_top {
+                            asm.sbfx_w(A64Reg::X13, rs_reg, 16, 16);
+                        } else {
+                            asm.sxth_w(A64Reg::X13, rs_reg);
+                        }
+                        asm.smull_x(A64Reg::X12, rm_reg, A64Reg::X13);
+                        asm.asr_x_imm(A64Reg::X12, A64Reg::X12, 16);
+                        let rn_reg = load_guest_reg(asm, A64Reg::X14, *rn);
+                        asm.add_w_reg(dst_reg, A64Reg::X12, rn_reg);
+                    }
+                    DspMulOp::Smuad { swap } => {
+                        let rs_eff = if *swap {
+                            asm.ror_w(A64Reg::X15, rs_reg, 16);
+                            A64Reg::X15
+                        } else {
+                            rs_reg
+                        };
+                        asm.sxth_w(A64Reg::X12, rm_reg);
+                        asm.sbfx_w(A64Reg::X13, rm_reg, 16, 16);
+                        asm.sxth_w(A64Reg::X14, rs_eff);
+                        asm.mul_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X14);
+                        asm.sbfx_w(A64Reg::X14, rs_eff, 16, 16);
+                        asm.mul_w_reg(A64Reg::X13, A64Reg::X13, A64Reg::X14);
+                        asm.add_w_reg(dst_reg, A64Reg::X12, A64Reg::X13);
+                    }
+                    DspMulOp::Smlad { swap } => {
+                        let rs_eff = if *swap {
+                            asm.ror_w(A64Reg::X15, rs_reg, 16);
+                            A64Reg::X15
+                        } else {
+                            rs_reg
+                        };
+                        asm.sxth_w(A64Reg::X12, rm_reg);
+                        asm.sbfx_w(A64Reg::X13, rm_reg, 16, 16);
+                        asm.sxth_w(A64Reg::X14, rs_eff);
+                        asm.mul_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X14);
+                        asm.sbfx_w(A64Reg::X14, rs_eff, 16, 16);
+                        asm.mul_w_reg(A64Reg::X13, A64Reg::X13, A64Reg::X14);
+                        asm.add_w_reg(dst_reg, A64Reg::X12, A64Reg::X13);
+                        let rn_reg = load_guest_reg(asm, A64Reg::X14, *rn);
+                        asm.add_w_reg(dst_reg, dst_reg, rn_reg);
+                    }
+                    DspMulOp::Smusd { swap } => {
+                        let rs_eff = if *swap {
+                            asm.ror_w(A64Reg::X15, rs_reg, 16);
+                            A64Reg::X15
+                        } else {
+                            rs_reg
+                        };
+                        asm.sxth_w(A64Reg::X12, rm_reg);
+                        asm.sbfx_w(A64Reg::X13, rm_reg, 16, 16);
+                        asm.sxth_w(A64Reg::X14, rs_eff);
+                        asm.mul_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X14);
+                        asm.sbfx_w(A64Reg::X14, rs_eff, 16, 16);
+                        asm.mul_w_reg(A64Reg::X13, A64Reg::X13, A64Reg::X14);
+                        asm.sub_w_reg(dst_reg, A64Reg::X12, A64Reg::X13);
+                    }
+                    DspMulOp::Smlsd { swap } => {
+                        let rs_eff = if *swap {
+                            asm.ror_w(A64Reg::X15, rs_reg, 16);
+                            A64Reg::X15
+                        } else {
+                            rs_reg
+                        };
+                        asm.sxth_w(A64Reg::X12, rm_reg);
+                        asm.sbfx_w(A64Reg::X13, rm_reg, 16, 16);
+                        asm.sxth_w(A64Reg::X14, rs_eff);
+                        asm.mul_w_reg(A64Reg::X12, A64Reg::X12, A64Reg::X14);
+                        asm.sbfx_w(A64Reg::X14, rs_eff, 16, 16);
+                        asm.mul_w_reg(A64Reg::X13, A64Reg::X13, A64Reg::X14);
+                        asm.sub_w_reg(dst_reg, A64Reg::X12, A64Reg::X13);
+                        let rn_reg = load_guest_reg(asm, A64Reg::X14, *rn);
+                        asm.add_w_reg(dst_reg, dst_reg, rn_reg);
+                    }
+                }
+
+                if pinned_reg(*rd).is_none() {
+                    let rd_offset = (rd.index() * 4) as u32;
+                    asm.str_w_imm(dst_reg, A64Reg::X0, rd_offset);
+                }
+            }
             Op::Div {
                 signed,
                 rd,
@@ -921,6 +1075,26 @@ impl A64Compiler {
                 } else {
                     let src = load_guest_reg(asm, A64Reg::X9, *core_reg);
                     asm.str_w_imm(src, A64Reg::X0, vfp_off);
+                }
+            }
+            Op::VfpMovTwoCore {
+                to_core,
+                is_double: _,
+                rt,
+                rt2,
+                vfp_reg,
+            } => {
+                let vfp_off = Self::vfp_offset(vfp_reg);
+                if *to_core {
+                    asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, vfp_off);
+                    asm.ldr_w_imm(A64Reg::X10, A64Reg::X0, vfp_off + 4);
+                    store_guest_reg(asm, A64Reg::X9, *rt);
+                    store_guest_reg(asm, A64Reg::X10, *rt2);
+                } else {
+                    let src1 = load_guest_reg(asm, A64Reg::X9, *rt);
+                    let src2 = load_guest_reg(asm, A64Reg::X10, *rt2);
+                    asm.str_w_imm(src1, A64Reg::X0, vfp_off);
+                    asm.str_w_imm(src2, A64Reg::X0, vfp_off + 4);
                 }
             }
             Op::VfpMrsFpscr { rt } => {

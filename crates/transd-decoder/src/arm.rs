@@ -936,6 +936,34 @@ impl ArmDecoder {
                     return Op::Mrs { rd, spsr };
                 }
             }
+
+            // 16-bit DSP Multiplies (SMULxy, SMLAxy, SMULWy, SMLAWy)
+            // cond 0001 0xx0 Rd Rn Rs 1xx0 Rm
+            if (raw & 0x0F90_0090) == 0x0100_0080 {
+                let op_bits = (raw >> 21) & 0x3;
+                let rd = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+                let rn = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+                let rs = Reg::from_u8(((raw >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+                let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+                let x_top = ((raw >> 5) & 1) != 0;
+                let y_top = ((raw >> 6) & 1) != 0;
+
+                let op = match op_bits {
+                    0b00 => Some(DspMulOp::Smla { x_top, y_top }),
+                    0b01 => {
+                        if x_top {
+                            Some(DspMulOp::Smulw { y_top })
+                        } else {
+                            Some(DspMulOp::Smlaw { y_top })
+                        }
+                    }
+                    0b11 => Some(DspMulOp::Smul { x_top, y_top }),
+                    _ => None,
+                };
+                if let Some(op) = op {
+                    return Op::DspMul { op, rd, rn, rm, rs };
+                }
+            }
         }
 
         // Standard Data Processing (ALU)
@@ -1031,6 +1059,15 @@ impl ArmDecoder {
 
     /// Decodes Multiply and Multiply Long
     fn decode_multiply(raw: u32) -> Op {
+        // UMAAL: cond 0000 0100 RdHi RdLo Rs 1001 Rm
+        if (raw & 0x0FF0_00F0) == 0x0040_0090 {
+            let rd_hi = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd_lo = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rs = Reg::from_u8(((raw >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            return Op::Umaal { rd_lo, rd_hi, rn: rs, rm };
+        }
+
         let is_long = ((raw >> 23) & 1) != 0;
         let is_accumulate = ((raw >> 21) & 1) != 0;
         let set_flags = ((raw >> 20) & 1) != 0;
@@ -1281,6 +1318,26 @@ impl ArmDecoder {
             }
         }
 
+        // Dual 16-bit Multiplies (SMUAD, SMUSD, SMLAD, SMLSD)
+        // cond 0111 0000 Rd Rn Rs 0xx1 Rm
+        if (raw & 0x0FF0_0090) == 0x0700_0010 {
+            let rd = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rn = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rs = Reg::from_u8(((raw >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            let swap = ((raw >> 5) & 1) != 0;
+            let is_sub = ((raw >> 6) & 1) != 0;
+            let is_accumulate = ((raw >> 12) & 0xF) != 15;
+
+            let op = match (is_accumulate, is_sub) {
+                (false, false) => DspMulOp::Smuad { swap },
+                (false, true) => DspMulOp::Smusd { swap },
+                (true, false) => DspMulOp::Smlad { swap },
+                (true, true) => DspMulOp::Smlsd { swap },
+            };
+            return Op::DspMul { op, rd, rn, rm, rs };
+        }
+
         let is_reg_offset = ((raw >> 25) & 1) != 0;
         let p = ((raw >> 24) & 1) != 0;
         let u = ((raw >> 23) & 1) != 0;
@@ -1470,6 +1527,32 @@ impl ArmDecoder {
                 to_core,
                 core_reg: rt,
                 vfp_reg: VfpReg::S(s_idx),
+            };
+        }
+
+        // VMOV 2 core registers <-> 1 double or 2 singles
+        // VMOV <Rt>, <Rt2>, <Dm> (0x_C50_0B10) / VMOV <Dm>, <Rt>, <Rt2> (0x_C40_0B10)
+        // VMOV <Rt>, <Rt2>, <Sm>, <Sm1> (0x_C50_0A10) / VMOV <Sm>, <Sm1>, <Rt>, <Rt2> (0x_C40_0A10)
+        if (raw & 0x0FE0_0FD0) == 0x0C40_0B10 || (raw & 0x0FE0_0FD0) == 0x0C40_0A10 {
+            let to_core = ((raw >> 20) & 1) != 0;
+            let is_double = ((raw >> 8) & 0xF) == 0xB;
+            let rt2 = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rt = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let m_bit = ((raw >> 5) & 1) as u8;
+            let vm = (raw & 0xF) as u8;
+            let vfp_reg = if is_double {
+                let d_idx = (m_bit << 4) | vm;
+                VfpReg::D(d_idx)
+            } else {
+                let s_idx = (vm << 1) | m_bit;
+                VfpReg::S(s_idx)
+            };
+            return Op::VfpMovTwoCore {
+                to_core,
+                is_double,
+                rt,
+                rt2,
+                vfp_reg,
             };
         }
 

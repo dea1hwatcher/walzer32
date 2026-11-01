@@ -176,10 +176,24 @@ impl CpuState {
         f64::from_bits(self.vfp[idx as usize])
     }
 
+    /// Reads raw 64-bit bits of double-precision register d0 - d31
+    #[inline(always)]
+    pub fn d_reg_u64(&self, idx: u8) -> u64 {
+        assert!(idx < 32);
+        self.vfp[idx as usize]
+    }
+
     /// Writes double-precision float register d0 - d31
     pub fn set_d_reg(&mut self, idx: u8, val: f64) {
         assert!(idx < 32);
         self.vfp[idx as usize] = val.to_bits();
+    }
+
+    /// Writes raw 64-bit bits of double-precision register d0 - d31
+    #[inline(always)]
+    pub fn set_d_reg_u64(&mut self, idx: u8, bits: u64) {
+        assert!(idx < 32);
+        self.vfp[idx as usize] = bits;
     }
 
     /// Reads 128-bit quadword register Q0 - Q15 (composed of d[2*idx], d[2*idx+1])
