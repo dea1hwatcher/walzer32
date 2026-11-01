@@ -12,5 +12,7 @@ pub use cpu::{
     CpuState, OFFSET_CPSR, OFFSET_EXCLUSIVE, OFFSET_FPSCR, OFFSET_LR, OFFSET_PC, OFFSET_R0,
     OFFSET_SP, OFFSET_TLS, OFFSET_VFP,
 };
-pub use memory::{FlatMemory, Memory, MemoryError, SharedMemory};
+pub use memory::{
+    FlatMemory, Memory, MemoryError, SharedMemory, PROT_EXEC, PROT_NONE, PROT_READ, PROT_WRITE,
+};
 pub use reg::Reg;

@@ -30,6 +30,9 @@ pub enum BionicFuncId {
     PthreadMutexUnlock = 25,
     PthreadMutexDestroy = 26,
     PthreadOnce = 27,
+
+    // Memory protection
+    Mprotect = 30,
 }
 
 impl BionicFuncId {
@@ -56,6 +59,7 @@ impl BionicFuncId {
             25 => Some(Self::PthreadMutexUnlock),
             26 => Some(Self::PthreadMutexDestroy),
             27 => Some(Self::PthreadOnce),
+            30 => Some(Self::Mprotect),
             _ => None,
         }
     }
@@ -132,6 +136,7 @@ impl BionicBridge {
             ("pthread_mutex_unlock", BionicFuncId::PthreadMutexUnlock),
             ("pthread_mutex_destroy", BionicFuncId::PthreadMutexDestroy),
             ("pthread_once", BionicFuncId::PthreadOnce),
+            ("mprotect", BionicFuncId::Mprotect),
         ];
 
         for (name, id) in funcs {
@@ -164,6 +169,7 @@ impl BionicBridge {
             BionicFuncId::PthreadMutexUnlock,
             BionicFuncId::PthreadMutexDestroy,
             BionicFuncId::PthreadOnce,
+            BionicFuncId::Mprotect,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -381,6 +387,18 @@ impl BionicBridge {
                     mem.write_u32(once_ptr, 1)?;
                 }
                 cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Mprotect => {
+                let addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let len = cpu.reg(Reg::R1) as usize;
+                let prot = cpu.reg(Reg::R2);
+                let page_addr = GuestAddr::new(addr.as_u32() & !0xFFF);
+                let page_offset = (addr.as_u32() & 0xFFF) as usize;
+                let aligned_len = (len + page_offset + 0xFFF) & !0xFFF;
+                match mem.mprotect(page_addr, aligned_len, prot) {
+                    Ok(()) => cpu.set_reg(Reg::R0, 0),
+                    Err(_) => cpu.set_reg(Reg::R0, (-12i32) as u32), // -ENOMEM
+                }
             }
             _ => {}
         }

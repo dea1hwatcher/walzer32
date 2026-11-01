@@ -339,6 +339,19 @@ impl SyscallHandler for DefaultSyscallHandler {
                 }
                 Ok(None)
             }
+            nr::MPROTECT => {
+                let addr = GuestAddr::new(args.arg0);
+                let len = args.arg1 as usize;
+                let prot = args.arg2;
+                let page_addr = GuestAddr::new(addr.as_u32() & !0xFFF);
+                let page_offset = (addr.as_u32() & 0xFFF) as usize;
+                let aligned_len = (len + page_offset + 0xFFF) & !0xFFF;
+                match mem.mprotect(page_addr, aligned_len, prot) {
+                    Ok(()) => cpu.set_reg(Reg::R0, 0),
+                    Err(_) => cpu.set_reg(Reg::R0, (-12i32) as u32), // -ENOMEM
+                }
+                Ok(None)
+            }
             _ => {
                 // Return -ENOSYS (-38) for unhandled syscalls
                 cpu.set_reg(Reg::R0, (-38i32) as u32);
@@ -361,6 +374,7 @@ pub struct DbtEngine<M: Memory> {
     pub total_insts_executed: u64,
     pub telemetry: crate::telemetry::TelemetryManager,
     pub async_jit: Option<crate::async_jit::AsyncJit>,
+    pub smc_guard_pages: bool,
 }
 
 impl<M: Memory> DbtEngine<M> {
@@ -374,7 +388,45 @@ impl<M: Memory> DbtEngine<M> {
             total_insts_executed: 0,
             telemetry: crate::telemetry::TelemetryManager::new(),
             async_jit: None,
+            smc_guard_pages: false,
         }
+    }
+
+    /// Enables or disables hardware/memory SMC guard page write-protection
+    pub fn enable_smc_guard_pages(&mut self, enable: bool) {
+        self.smc_guard_pages = enable;
+    }
+
+    /// Protects the code pages containing the basic block from write access
+    pub fn protect_code_pages_for(&mut self, addr: GuestAddr, size: usize) {
+        if self.smc_guard_pages {
+            let start_page = addr.as_u32() >> 12;
+            let end_addr = addr.as_u32().saturating_add(size.max(1) as u32 - 1);
+            let end_page = end_addr >> 12;
+            for pfn in start_page..=end_page {
+                let page_addr = GuestAddr::new(pfn << 12);
+                let _ = self.mem.mprotect(page_addr, 4096, transd_core::PROT_READ | transd_core::PROT_EXEC);
+            }
+        }
+    }
+
+    /// Handles an SMC write trap when a store attempts to write to a write-protected code page.
+    /// Invalidates all JIT blocks residing on that page, restores write permissions, and flushes icache.
+    /// Returns true if the fault was an SMC trap successfully handled; false otherwise.
+    pub fn handle_write_fault(&mut self, fault_addr: GuestAddr) -> bool {
+        let pfn = fault_addr.as_u32() >> 12;
+        if self.cache.is_code_page(pfn) {
+            let invalidated = self.cache.invalidate_page(pfn);
+            let page_start = GuestAddr::new(pfn << 12);
+            let _ = self.mem.mprotect(
+                page_start,
+                4096,
+                transd_core::PROT_READ | transd_core::PROT_WRITE | transd_core::PROT_EXEC,
+            );
+            self.telemetry.record_smc_trap();
+            return invalidated > 0;
+        }
+        false
     }
 
     /// Initializes a new DBT engine with asynchronous background JIT compilation enabled
@@ -526,11 +578,13 @@ impl<M: Memory> DbtEngine<M> {
                 let compiled = A64Compiler::compile(&block);
                 let compile_us = start_t.elapsed().as_micros() as u64;
                 self.telemetry.record_compilation(compile_us.max(1));
+                let guest_size = compiled.guest_byte_size;
                 if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
                     self.cache.insert_committed(pc, compiled, committed.code_ptr);
                 } else {
                     self.cache.insert(pc, compiled);
                 }
+                self.protect_code_pages_for(pc, guest_size);
             }
         } else {
             self.telemetry.record_cache_hit();
@@ -606,7 +660,16 @@ impl<M: Memory> DbtEngine<M> {
         }
 
         // 3. Fallback: Step execution using the verified interpreter engine
-        let step_res = Interpreter::step(&mut self.cpu, &mut self.mem)?;
+        let step_res = match Interpreter::step(&mut self.cpu, &mut self.mem) {
+            Err(InterpError::Memory(MemoryError::PermissionDenied { addr, write: true })) => {
+                if self.handle_write_fault(addr) {
+                    Interpreter::step(&mut self.cpu, &mut self.mem)?
+                } else {
+                    return Err(EngineError::Memory(MemoryError::PermissionDenied { addr, write: true }));
+                }
+            }
+            res => res?,
+        };
         self.total_insts_executed += 1;
         self.telemetry.record_instructions(1);
 
@@ -647,16 +710,42 @@ impl<M: Memory> DbtEngine<M> {
 
     /// Writes u32 to guest memory with automatic Self-Modifying Code (SMC) cache invalidation
     pub fn write_guest_u32(&mut self, addr: GuestAddr, val: u32) -> Result<(), transd_core::MemoryError> {
-        self.mem.write_u32(addr, val)?;
-        self.cache.invalidate_range(addr, 4);
-        Ok(())
+        match self.mem.write_u32(addr, val) {
+            Ok(()) => {
+                self.cache.invalidate_range(addr, 4);
+                Ok(())
+            }
+            Err(MemoryError::PermissionDenied { addr: fault_addr, write: true }) => {
+                if self.handle_write_fault(fault_addr) {
+                    self.mem.write_u32(addr, val)?;
+                    self.cache.invalidate_range(addr, 4);
+                    Ok(())
+                } else {
+                    Err(MemoryError::PermissionDenied { addr: fault_addr, write: true })
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Writes a slice of bytes to guest memory with automatic Self-Modifying Code (SMC) cache invalidation
     pub fn write_guest_bytes(&mut self, addr: GuestAddr, buf: &[u8]) -> Result<(), transd_core::MemoryError> {
-        self.mem.write_bytes(addr, buf)?;
-        self.cache.invalidate_range(addr, buf.len());
-        Ok(())
+        match self.mem.write_bytes(addr, buf) {
+            Ok(()) => {
+                self.cache.invalidate_range(addr, buf.len());
+                Ok(())
+            }
+            Err(MemoryError::PermissionDenied { addr: fault_addr, write: true }) => {
+                if self.handle_write_fault(fault_addr) {
+                    self.mem.write_bytes(addr, buf)?;
+                    self.cache.invalidate_range(addr, buf.len());
+                    Ok(())
+                } else {
+                    Err(MemoryError::PermissionDenied { addr: fault_addr, write: true })
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Links and chains direct branches between two compiled blocks in executable memory

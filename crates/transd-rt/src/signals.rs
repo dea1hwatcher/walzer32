@@ -103,6 +103,14 @@ impl SignalManager {
         }
     }
 
+    /// Evaluates whether a host fault represents an SMC write trap and returns the guest address
+    pub fn is_smc_write_trap(&self, fault_addr: usize, is_write: bool, is_code_page: bool) -> Option<GuestAddr> {
+        match self.classify_fault_with_access(fault_addr, is_write, is_code_page) {
+            FaultOrigin::GuestCodeWriteTrap { guest_addr, .. } => Some(guest_addr),
+            _ => None,
+        }
+    }
+
     /// Installs POSIX signal handlers on Unix/Android targets
     pub fn install_handlers(&mut self) -> Result<(), String> {
         if SIGNAL_HANDLERS_ACTIVE.swap(true, Ordering::SeqCst) {

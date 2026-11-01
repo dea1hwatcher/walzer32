@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use byteorder::{ByteOrder, LittleEndian};
 use crate::addr::GuestAddr;
-use crate::memory::{Memory, MemoryError};
+use crate::memory::{Memory, MemoryError, PROT_EXEC, PROT_READ, PROT_WRITE};
 
 pub const ARENA_4GB_SIZE: usize = 0x1_0000_0000; // 4 GB (4,294,967,296 bytes)
 pub const PAGE_SIZE: usize = 4096;
@@ -64,6 +64,7 @@ mod os {
 pub struct ArenaMemory {
     base_ptr: *mut u8,
     committed_pages: HashSet<u32>,
+    page_protections: HashMap<u32, u8>,
 }
 
 unsafe impl Send for ArenaMemory {}
@@ -88,6 +89,7 @@ impl ArenaMemory {
             Ok(Self {
                 base_ptr: ptr as *mut u8,
                 committed_pages: HashSet::new(),
+                page_protections: HashMap::new(),
             })
         }
 
@@ -109,12 +111,13 @@ impl ArenaMemory {
             Ok(Self {
                 base_ptr: ptr as *mut u8,
                 committed_pages: HashSet::new(),
+                page_protections: HashMap::new(),
             })
         }
     }
 
     #[inline(always)]
-    fn check_committed(&self, addr: GuestAddr, len: usize) -> Result<(), MemoryError> {
+    fn check_access(&self, addr: GuestAddr, len: usize, write: bool) -> Result<(), MemoryError> {
         let start_pfn = addr.as_u32() >> 12;
         let end_addr = addr.as_u32().saturating_add(len.max(1) as u32 - 1);
         let end_pfn = end_addr >> 12;
@@ -123,8 +126,25 @@ impl ArenaMemory {
             if !self.committed_pages.contains(&pfn) {
                 return Err(MemoryError::Unmapped(GuestAddr::new(pfn << 12)));
             }
+            if !self.page_protections.is_empty() {
+                let prot = self.page_protections.get(&pfn).copied().unwrap_or(0x7);
+                if write {
+                    if (prot & (PROT_WRITE as u8)) == 0 {
+                        return Err(MemoryError::PermissionDenied { addr, write: true });
+                    }
+                } else {
+                    if (prot & (PROT_READ as u8)) == 0 {
+                        return Err(MemoryError::PermissionDenied { addr, write: false });
+                    }
+                }
+            }
         }
         Ok(())
+    }
+
+    #[inline(always)]
+    fn check_committed(&self, addr: GuestAddr, len: usize) -> Result<(), MemoryError> {
+        self.check_access(addr, len, false)
     }
 
     /// Commits physical backing for the guest address range `[addr, addr + len)`
@@ -172,20 +192,36 @@ impl ArenaMemory {
     }
 
     /// Changes page protection permissions on committed pages (e.g. for write-protecting code pages)
-    pub fn protect_range(&mut self, addr: GuestAddr, len: usize, read: bool, write: bool) -> Result<(), MemoryError> {
+    pub fn mprotect(&mut self, addr: GuestAddr, len: usize, prot: u32) -> Result<(), MemoryError> {
         if len == 0 {
             return Ok(());
         }
         let page_start = (addr.as_u32() & !0xFFF) as usize;
-        let page_end = ((addr.as_u32().saturating_add(len as u32 - 1)) | 0xFFF) as usize;
+        let page_end = ((addr.as_u32().saturating_add(len.max(1) as u32 - 1)) | 0xFFF) as usize;
         let prot_len = (page_end - page_start) + 1;
+
+        let start_pfn = (page_start >> 12) as u32;
+        let end_pfn = (page_end >> 12) as u32;
+
+        for pfn in start_pfn..=end_pfn {
+            if !self.committed_pages.contains(&pfn) {
+                return Err(MemoryError::Unmapped(addr));
+            }
+        }
+
+        let read = (prot & PROT_READ) != 0;
+        let write = (prot & PROT_WRITE) != 0;
+        let exec = (prot & PROT_EXEC) != 0;
 
         #[cfg(windows)]
         unsafe {
-            let fl_protect = match (read, write) {
-                (true, true) => os::PAGE_READWRITE,
-                (true, false) => 0x02, // PAGE_READONLY
-                (false, _) => os::PAGE_NOACCESS,
+            let fl_protect = match (exec, read, write) {
+                (true, _, true) => 0x40,      // PAGE_EXECUTE_READWRITE
+                (true, true, false) => 0x20, // PAGE_EXECUTE_READ
+                (true, false, false) => 0x10,// PAGE_EXECUTE
+                (false, true, true) => os::PAGE_READWRITE,
+                (false, true, false) => 0x02, // PAGE_READONLY
+                (false, false, _) => os::PAGE_NOACCESS,
             };
             let mut old_protect = 0u32;
             let target_ptr = self.base_ptr.add(page_start);
@@ -197,19 +233,50 @@ impl ArenaMemory {
 
         #[cfg(unix)]
         unsafe {
-            let prot = match (read, write) {
-                (true, true) => os::PROT_READ | os::PROT_WRITE,
-                (true, false) => os::PROT_READ,
-                (false, _) => os::PROT_NONE,
-            };
+            let mut unix_prot = os::PROT_NONE;
+            if read {
+                unix_prot |= os::PROT_READ;
+            }
+            if write {
+                unix_prot |= os::PROT_WRITE;
+            }
+            if exec {
+                unix_prot |= 4; // PROT_EXEC
+            }
             let target_ptr = self.base_ptr.add(page_start);
-            let res = os::mprotect(target_ptr as *mut _, prot_len, prot);
+            let res = os::mprotect(target_ptr as *mut _, prot_len, unix_prot);
             if res != 0 {
                 return Err(MemoryError::Unmapped(addr));
             }
         }
 
+        for pfn in start_pfn..=end_pfn {
+            self.page_protections.insert(pfn, (prot & 0x7) as u8);
+        }
+
         Ok(())
+    }
+
+    /// Queries the protection flags for a given guest address
+    pub fn get_protection(&self, addr: GuestAddr) -> u32 {
+        let pfn = addr.as_u32() >> 12;
+        self.page_protections
+            .get(&pfn)
+            .copied()
+            .map(|p| p as u32)
+            .unwrap_or(PROT_READ | PROT_WRITE | PROT_EXEC)
+    }
+
+    /// Legacy protect_range helper
+    pub fn protect_range(&mut self, addr: GuestAddr, len: usize, read: bool, write: bool) -> Result<(), MemoryError> {
+        let mut prot = 0;
+        if read {
+            prot |= PROT_READ;
+        }
+        if write {
+            prot |= PROT_WRITE;
+        }
+        self.mprotect(addr, len, prot)
     }
 
     /// Decommits and releases physical backing for the range
@@ -237,6 +304,7 @@ impl ArenaMemory {
         let end_pfn = (page_end >> 12) as u32;
         for pfn in start_pfn..=end_pfn {
             self.committed_pages.remove(&pfn);
+            self.page_protections.remove(&pfn);
         }
         Ok(())
     }
@@ -303,7 +371,7 @@ impl Memory for ArenaMemory {
     }
 
     fn write_u8(&mut self, addr: GuestAddr, val: u8) -> Result<(), MemoryError> {
-        self.check_committed(addr, 1)?;
+        self.check_access(addr, 1, true)?;
         unsafe {
             *self.base_ptr.add(addr.as_u32() as usize) = val;
         }
@@ -311,7 +379,7 @@ impl Memory for ArenaMemory {
     }
 
     fn write_u16(&mut self, addr: GuestAddr, val: u16) -> Result<(), MemoryError> {
-        self.check_committed(addr, 2)?;
+        self.check_access(addr, 2, true)?;
         unsafe {
             LittleEndian::write_u16(
                 std::slice::from_raw_parts_mut(self.base_ptr.add(addr.as_u32() as usize), 2),
@@ -322,7 +390,7 @@ impl Memory for ArenaMemory {
     }
 
     fn write_u32(&mut self, addr: GuestAddr, val: u32) -> Result<(), MemoryError> {
-        self.check_committed(addr, 4)?;
+        self.check_access(addr, 4, true)?;
         unsafe {
             LittleEndian::write_u32(
                 std::slice::from_raw_parts_mut(self.base_ptr.add(addr.as_u32() as usize), 4),
@@ -333,7 +401,7 @@ impl Memory for ArenaMemory {
     }
 
     fn write_u64(&mut self, addr: GuestAddr, val: u64) -> Result<(), MemoryError> {
-        self.check_committed(addr, 8)?;
+        self.check_access(addr, 8, true)?;
         unsafe {
             LittleEndian::write_u64(
                 std::slice::from_raw_parts_mut(self.base_ptr.add(addr.as_u32() as usize), 8),
@@ -344,7 +412,7 @@ impl Memory for ArenaMemory {
     }
 
     fn read_bytes(&self, addr: GuestAddr, buf: &mut [u8]) -> Result<(), MemoryError> {
-        self.check_committed(addr, buf.len())?;
+        self.check_access(addr, buf.len(), false)?;
         unsafe {
             buf.copy_from_slice(std::slice::from_raw_parts(
                 self.base_ptr.add(addr.as_u32() as usize),
@@ -355,12 +423,20 @@ impl Memory for ArenaMemory {
     }
 
     fn write_bytes(&mut self, addr: GuestAddr, buf: &[u8]) -> Result<(), MemoryError> {
-        self.check_committed(addr, buf.len())?;
+        self.check_access(addr, buf.len(), true)?;
         unsafe {
             std::slice::from_raw_parts_mut(self.base_ptr.add(addr.as_u32() as usize), buf.len())
                 .copy_from_slice(buf);
         }
         Ok(())
+    }
+
+    fn mprotect(&mut self, addr: GuestAddr, len: usize, prot: u32) -> Result<(), MemoryError> {
+        self.mprotect(addr, len, prot)
+    }
+
+    fn get_protection(&self, addr: GuestAddr) -> u32 {
+        self.get_protection(addr)
     }
 
     #[inline(always)]
