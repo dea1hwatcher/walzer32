@@ -757,6 +757,15 @@ impl ThumbDecoder {
             return ArmInst::new(Cond::AL, inst.op, raw);
         }
 
+        // Thumb-2 VFP instructions (Load/Store Single & Multiple, VPUSH/VPOP, ALU, Conversions)
+        if (hw1 & 0xEC00) == 0xEC00 && (hw2 & 0x0E00) == 0x0A00 {
+            let arm_raw = 0xE000_0000 | (((hw1 & 0x0FFF) as u32) << 16) | (hw2 as u32);
+            let inst = ArmDecoder::decode(arm_raw);
+            if !matches!(inst.op, Op::Unknown(_)) {
+                return ArmInst::new(Cond::AL, inst.op, raw);
+            }
+        }
+
         ArmInst::new(Cond::AL, Op::Unknown(raw), raw)
     }
 }
@@ -1074,6 +1083,50 @@ mod tests {
                 is_quad: false,
                 vd: 0,
                 vm: 2,
+            }
+        );
+
+        // Thumb-2 VPUSH {d8-d15} -> hi=0xED2D, lo=0x8B10
+        let (inst_vpush, size) = ThumbDecoder::decode(0xED2D, Some(0x8B10));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vpush.op,
+            Op::VfpLoadStoreMultiple {
+                is_load: false,
+                is_double: true,
+                writeback: true,
+                is_add: false,
+                rn: Reg::SP,
+                start_reg: 8,
+                count: 8,
+            }
+        );
+
+        // Thumb-2 VPOP {d8-d15} -> hi=0xECBD, lo=0x8B10
+        let (inst_vpop, size) = ThumbDecoder::decode(0xECBD, Some(0x8B10));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vpop.op,
+            Op::VfpLoadStoreMultiple {
+                is_load: true,
+                is_double: true,
+                writeback: true,
+                is_add: true,
+                rn: Reg::SP,
+                start_reg: 8,
+                count: 8,
+            }
+        );
+
+        // Thumb-2 VCVT.F64.F32 d0, s0 -> hi=0xEEB7, lo=0x0AC0
+        let (inst_vcvt_sc, size) = ThumbDecoder::decode(0xEEB7, Some(0x0AC0));
+        assert_eq!(size, 4);
+        assert_eq!(
+            inst_vcvt_sc.op,
+            Op::VfpCvt {
+                op: VfpCvtOp::F64FromF32,
+                dst: VfpReg::D(0),
+                src: VfpReg::S(0),
             }
         );
     }

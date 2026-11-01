@@ -138,26 +138,35 @@ impl CpuState {
 
     /// Reads single-precision float register s0 - s31
     pub fn s_reg(&self, idx: u8) -> f32 {
+        f32::from_bits(self.s_reg_u32(idx))
+    }
+
+    /// Reads raw 32-bit integer bits of single-precision register s0 - s31
+    pub fn s_reg_u32(&self, idx: u8) -> u32 {
         assert!(idx < 32);
         let d_idx = (idx / 2) as usize;
         let d_val = self.vfp[d_idx];
-        let bits = if idx.is_multiple_of(2) {
+        if idx.is_multiple_of(2) {
             d_val as u32
         } else {
             (d_val >> 32) as u32
-        };
-        f32::from_bits(bits)
+        }
     }
 
     /// Writes single-precision float register s0 - s31
     pub fn set_s_reg(&mut self, idx: u8, val: f32) {
+        self.set_s_reg_u32(idx, val.to_bits());
+    }
+
+    /// Writes raw 32-bit integer bits to single-precision register s0 - s31
+    pub fn set_s_reg_u32(&mut self, idx: u8, bits: u32) {
         assert!(idx < 32);
         let d_idx = (idx / 2) as usize;
-        let bits = val.to_bits() as u64;
+        let bits64 = bits as u64;
         if idx.is_multiple_of(2) {
-            self.vfp[d_idx] = (self.vfp[d_idx] & 0xFFFF_FFFF_0000_0000) | bits;
+            self.vfp[d_idx] = (self.vfp[d_idx] & 0xFFFF_FFFF_0000_0000) | bits64;
         } else {
-            self.vfp[d_idx] = (self.vfp[d_idx] & 0x0000_0000_FFFF_FFFF) | (bits << 32);
+            self.vfp[d_idx] = (self.vfp[d_idx] & 0x0000_0000_FFFF_FFFF) | (bits64 << 32);
         }
     }
 

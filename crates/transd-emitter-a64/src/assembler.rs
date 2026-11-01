@@ -767,6 +767,90 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// FMOV Wd, Sn (Move float register to 32-bit core register)
+    pub fn fmov_w_from_s(&mut self, rd: A64Reg, rn_s: u8) {
+        assert!(rn_s < 32);
+        let inst = 0x1E26_0000 | ((rn_s as u32) << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// FMOV Sd, Wn (Move 32-bit core register to float register)
+    pub fn fmov_s_from_w(&mut self, rd_s: u8, rn: A64Reg) {
+        assert!(rd_s < 32);
+        let inst = 0x1E27_0000 | (rn.index() << 5) | (rd_s as u32);
+        self.emit(inst);
+    }
+
+    /// FCVT Dd, Sn (Convert single-precision to double-precision)
+    pub fn fcvt_d_s(&mut self, rd: u8, rn: u8) {
+        assert!(rd < 32 && rn < 32);
+        let inst = 0x1E22_C000 | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FCVT Sd, Dn (Convert double-precision to single-precision)
+    pub fn fcvt_s_d(&mut self, rd: u8, rn: u8) {
+        assert!(rd < 32 && rn < 32);
+        let inst = 0x1E62_4000 | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SCVTF Sd, Sn (Scalar signed 32-bit int to single float)
+    pub fn scvtf_s_s(&mut self, rd: u8, rn: u8) {
+        assert!(rd < 32 && rn < 32);
+        let inst = 0x5E21_D800 | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// UCVTF Sd, Sn (Scalar unsigned 32-bit int to single float)
+    pub fn ucvtf_s_s(&mut self, rd: u8, rn: u8) {
+        assert!(rd < 32 && rn < 32);
+        let inst = 0x7E21_D800 | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FCVTZS Sd, Sn (Scalar single float to signed 32-bit int)
+    pub fn fcvtzs_s_s(&mut self, rd: u8, rn: u8) {
+        assert!(rd < 32 && rn < 32);
+        let inst = 0x5EA1_B800 | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FCVTZU Sd, Sn (Scalar single float to unsigned 32-bit int)
+    pub fn fcvtzu_s_s(&mut self, rd: u8, rn: u8) {
+        assert!(rd < 32 && rn < 32);
+        let inst = 0x7EA1_B800 | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// SCVTF Dd, Wn (Convert signed 32-bit core register to double float)
+    pub fn scvtf_d_w(&mut self, rd: u8, rn: A64Reg) {
+        assert!(rd < 32);
+        let inst = 0x1E62_0000 | (rn.index() << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// UCVTF Dd, Wn (Convert unsigned 32-bit core register to double float)
+    pub fn ucvtf_d_w(&mut self, rd: u8, rn: A64Reg) {
+        assert!(rd < 32);
+        let inst = 0x1E63_0000 | (rn.index() << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FCVTZS Wd, Dn (Convert double float to signed 32-bit core register)
+    pub fn fcvtzs_w_d(&mut self, rd: A64Reg, rn: u8) {
+        assert!(rn < 32);
+        let inst = 0x1E78_0000 | ((rn as u32) << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// FCVTZU Wd, Dn (Convert double float to unsigned 32-bit core register)
+    pub fn fcvtzu_w_d(&mut self, rd: A64Reg, rn: u8) {
+        assert!(rn < 32);
+        let inst = 0x1E79_0000 | ((rn as u32) << 5) | rd.index();
+        self.emit(inst);
+    }
+
     /// LDR St, [Xn, #offset] (Single-precision float load, offset multiple of 4, up to 16380)
     pub fn ldr_s_imm(&mut self, rt: u8, rn: A64Reg, offset: u32) {
         assert!(rt < 32);
@@ -1645,5 +1729,35 @@ mod tests {
         assert_eq!(asm.code[10], 0x0EA1_B820);
         assert_eq!(asm.code[11], 0x4EA1_B820);
         assert_eq!(asm.code[12], 0x6EA1_B820);
+    }
+
+    #[test]
+    fn test_asm_scalar_vcvt_and_fmov() {
+        let mut asm = A64Assembler::new();
+        asm.fmov_w_from_s(A64Reg::X0, 1);
+        asm.fmov_s_from_w(0, A64Reg::X1);
+        asm.fcvt_d_s(0, 1);
+        asm.fcvt_s_d(0, 1);
+        asm.scvtf_s_s(0, 1);
+        asm.ucvtf_s_s(0, 1);
+        asm.fcvtzs_s_s(0, 1);
+        asm.fcvtzu_s_s(0, 1);
+        asm.scvtf_d_w(0, A64Reg::X1);
+        asm.ucvtf_d_w(0, A64Reg::X1);
+        asm.fcvtzs_w_d(A64Reg::X0, 1);
+        asm.fcvtzu_w_d(A64Reg::X0, 1);
+
+        assert_eq!(asm.code[0], 0x1E26_0020);
+        assert_eq!(asm.code[1], 0x1E27_0020);
+        assert_eq!(asm.code[2], 0x1E22_C020);
+        assert_eq!(asm.code[3], 0x1E62_4020);
+        assert_eq!(asm.code[4], 0x5E21_D820);
+        assert_eq!(asm.code[5], 0x7E21_D820);
+        assert_eq!(asm.code[6], 0x5EA1_B820);
+        assert_eq!(asm.code[7], 0x7EA1_B820);
+        assert_eq!(asm.code[8], 0x1E62_0020);
+        assert_eq!(asm.code[9], 0x1E63_0020);
+        assert_eq!(asm.code[10], 0x1E78_0020);
+        assert_eq!(asm.code[11], 0x1E79_0020);
     }
 }

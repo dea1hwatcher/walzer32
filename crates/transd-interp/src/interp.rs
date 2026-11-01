@@ -669,6 +669,162 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
+            Op::VfpLoadStoreMultiple {
+                is_load,
+                is_double,
+                writeback,
+                is_add,
+                rn,
+                start_reg,
+                count,
+            } => {
+                let base = cpu.reg(rn);
+                let elem_size: u32 = if is_double { 8 } else { 4 };
+                let total_bytes = (count as u32) * elem_size;
+
+                let start_addr = if is_add {
+                    base
+                } else {
+                    base.wrapping_sub(total_bytes)
+                };
+
+                let mut current_addr = start_addr;
+                for i in 0..(count as usize) {
+                    let reg_idx = (start_reg as usize + i) as u8;
+                    let addr = GuestAddr::new(current_addr);
+                    if is_double {
+                        let d_idx = reg_idx % 32;
+                        if is_load {
+                            let val = mem.read_u64(addr)?;
+                            cpu.vfp[d_idx as usize] = val;
+                        } else {
+                            let val = cpu.vfp[d_idx as usize];
+                            mem.write_u64(addr, val)?;
+                        }
+                    } else {
+                        let s_idx = reg_idx % 32;
+                        if is_load {
+                            let val = mem.read_u32(addr)?;
+                            cpu.set_s_reg_u32(s_idx, val);
+                        } else {
+                            let val = cpu.s_reg_u32(s_idx);
+                            mem.write_u32(addr, val)?;
+                        }
+                    }
+                    current_addr = current_addr.wrapping_add(elem_size);
+                }
+
+                if writeback {
+                    let new_base = if is_add {
+                        base.wrapping_add(total_bytes)
+                    } else {
+                        base.wrapping_sub(total_bytes)
+                    };
+                    cpu.set_reg(rn, new_base);
+                }
+
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::VfpCvt { op, dst, src } => {
+                match op {
+                    VfpCvtOp::F64FromF32 => {
+                        let s_idx = match src { VfpReg::S(idx) => idx, _ => 0 };
+                        let d_idx = match dst { VfpReg::D(idx) => idx, _ => 0 };
+                        let f = cpu.s_reg(s_idx);
+                        cpu.set_d_reg(d_idx, f as f64);
+                    }
+                    VfpCvtOp::F32FromF64 => {
+                        let d_idx = match src { VfpReg::D(idx) => idx, _ => 0 };
+                        let s_idx = match dst { VfpReg::S(idx) => idx, _ => 0 };
+                        let d = cpu.d_reg(d_idx);
+                        cpu.set_s_reg(s_idx, d as f32);
+                    }
+                    VfpCvtOp::F32FromS32 => {
+                        let s_src = match src { VfpReg::S(idx) => idx, _ => 0 };
+                        let s_dst = match dst { VfpReg::S(idx) => idx, _ => 0 };
+                        let int_val = cpu.s_reg_u32(s_src) as i32;
+                        cpu.set_s_reg(s_dst, int_val as f32);
+                    }
+                    VfpCvtOp::F32FromU32 => {
+                        let s_src = match src { VfpReg::S(idx) => idx, _ => 0 };
+                        let s_dst = match dst { VfpReg::S(idx) => idx, _ => 0 };
+                        let uint_val = cpu.s_reg_u32(s_src);
+                        cpu.set_s_reg(s_dst, uint_val as f32);
+                    }
+                    VfpCvtOp::S32FromF32 => {
+                        let s_src = match src { VfpReg::S(idx) => idx, _ => 0 };
+                        let s_dst = match dst { VfpReg::S(idx) => idx, _ => 0 };
+                        let f = cpu.s_reg(s_src);
+                        let res = if f.is_nan() {
+                            0
+                        } else if f >= i32::MAX as f32 {
+                            i32::MAX as u32
+                        } else if f <= i32::MIN as f32 {
+                            i32::MIN as u32
+                        } else {
+                            (f as i32) as u32
+                        };
+                        cpu.set_s_reg_u32(s_dst, res);
+                    }
+                    VfpCvtOp::U32FromF32 => {
+                        let s_src = match src { VfpReg::S(idx) => idx, _ => 0 };
+                        let s_dst = match dst { VfpReg::S(idx) => idx, _ => 0 };
+                        let f = cpu.s_reg(s_src);
+                        let res = if f.is_nan() || f <= 0.0 {
+                            0
+                        } else if f >= u32::MAX as f32 {
+                            u32::MAX
+                        } else {
+                            f as u32
+                        };
+                        cpu.set_s_reg_u32(s_dst, res);
+                    }
+                    VfpCvtOp::F64FromS32 => {
+                        let s_src = match src { VfpReg::S(idx) => idx, _ => 0 };
+                        let d_dst = match dst { VfpReg::D(idx) => idx, _ => 0 };
+                        let int_val = cpu.s_reg_u32(s_src) as i32;
+                        cpu.set_d_reg(d_dst, int_val as f64);
+                    }
+                    VfpCvtOp::F64FromU32 => {
+                        let s_src = match src { VfpReg::S(idx) => idx, _ => 0 };
+                        let d_dst = match dst { VfpReg::D(idx) => idx, _ => 0 };
+                        let uint_val = cpu.s_reg_u32(s_src);
+                        cpu.set_d_reg(d_dst, uint_val as f64);
+                    }
+                    VfpCvtOp::S32FromF64 => {
+                        let d_src = match src { VfpReg::D(idx) => idx, _ => 0 };
+                        let s_dst = match dst { VfpReg::S(idx) => idx, _ => 0 };
+                        let d = cpu.d_reg(d_src);
+                        let res = if d.is_nan() {
+                            0
+                        } else if d >= i32::MAX as f64 {
+                            i32::MAX as u32
+                        } else if d <= i32::MIN as f64 {
+                            i32::MIN as u32
+                        } else {
+                            (d as i32) as u32
+                        };
+                        cpu.set_s_reg_u32(s_dst, res);
+                    }
+                    VfpCvtOp::U32FromF64 => {
+                        let d_src = match src { VfpReg::D(idx) => idx, _ => 0 };
+                        let s_dst = match dst { VfpReg::S(idx) => idx, _ => 0 };
+                        let d = cpu.d_reg(d_src);
+                        let res = if d.is_nan() || d <= 0.0 {
+                            0
+                        } else if d >= u32::MAX as f64 {
+                            u32::MAX
+                        } else {
+                            d as u32
+                        };
+                        cpu.set_s_reg_u32(s_dst, res);
+                    }
+                }
+
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
             Op::AtomicLoadEx { rd, rn } => {
                 let addr = GuestAddr::new(cpu.reg(rn));
                 let val = mem.read_u32(addr)?;

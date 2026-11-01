@@ -1234,32 +1234,53 @@ impl ArmDecoder {
             };
         }
 
-        // VLDR / VSTR: bits [27:25] == 0b110, bit 24 is P, bit 23 is U
+        // VLDR / VSTR / VLDM / VSTM / VPUSH / VPOP: bits [27:25] == 0b110
         if ((raw >> 25) & 0x7) == 0b110 {
-            let is_load = ((raw >> 20) & 1) != 0;
+            let p = ((raw >> 24) & 1) != 0;
             let u = ((raw >> 23) & 1) != 0;
-            let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
-            let imm8 = (raw & 0xFF) as i32 * 4;
-            let offset = if u { imm8 } else { -imm8 };
-
-            let vd = ((raw >> 12) & 0xF) as u8;
             let d = ((raw >> 22) & 1) as u8;
+            let w = ((raw >> 21) & 1) != 0;
+            let is_load = ((raw >> 20) & 1) != 0;
+            let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+            let vd = ((raw >> 12) & 0xF) as u8;
+            let imm8 = (raw & 0xFF) as u8;
 
-            let vfp_reg = if is_double {
-                let d_idx = (d << 4) | vd;
-                VfpReg::D(d_idx)
+            if p && !w {
+                // Single VLDR / VSTR
+                let offset = if u { (imm8 as i32) * 4 } else { -((imm8 as i32) * 4) };
+                let vfp_reg = if is_double {
+                    let d_idx = (d << 4) | vd;
+                    VfpReg::D(d_idx)
+                } else {
+                    let s_idx = (vd << 1) | d;
+                    VfpReg::S(s_idx)
+                };
+                return Op::VfpLoadStore {
+                    is_load,
+                    size,
+                    vfp_reg,
+                    rn,
+                    offset,
+                };
             } else {
-                let s_idx = (vd << 1) | d;
-                VfpReg::S(s_idx)
-            };
-
-            return Op::VfpLoadStore {
-                is_load,
-                size,
-                vfp_reg,
-                rn,
-                offset,
-            };
+                // VLDM / VSTM / VPUSH / VPOP (Multiple transfer)
+                let (start_reg, count) = if is_double {
+                    let d_idx = (d << 4) | vd;
+                    (d_idx, imm8 / 2)
+                } else {
+                    let s_idx = (vd << 1) | d;
+                    (s_idx, imm8)
+                };
+                return Op::VfpLoadStoreMultiple {
+                    is_load,
+                    is_double,
+                    writeback: w,
+                    is_add: u,
+                    rn,
+                    start_reg,
+                    count,
+                };
+            }
         }
 
         // VFP Data Processing
@@ -1284,8 +1305,8 @@ impl ArmDecoder {
             )
         };
 
-        // VFP 1-register extension / VCMP: bits [23:20] == 0b1011, bits [11:9] == 0b101
-        if ((raw >> 20) & 0xF) == 0b1011 && ((raw >> 9) & 0x7) == 0b101 {
+        // VFP 1-register extension / VCMP: bits [23:20] == 0b1D11, bits [11:9] == 0b101
+        if ((raw >> 20) & 0b1011) == 0b1011 && ((raw >> 9) & 0x7) == 0b101 {
             let opc2 = (raw >> 16) & 0xF;
             if opc2 == 0b0100 || opc2 == 0b0101 {
                 let with_zero = opc2 == 0b0101;
@@ -1322,6 +1343,52 @@ impl ArmDecoder {
                         src2,
                     };
                 }
+            } else if opc2 == 0b0111 {
+                // VCVT between Single and Double precision
+                let (op, dst, src) = if is_double {
+                    (
+                        VfpCvtOp::F32FromF64,
+                        VfpReg::S((vd << 1) | d),
+                        VfpReg::D((m << 4) | vm),
+                    )
+                } else {
+                    (
+                        VfpCvtOp::F64FromF32,
+                        VfpReg::D((d << 4) | vd),
+                        VfpReg::S((vm << 1) | m),
+                    )
+                };
+                return Op::VfpCvt { op, dst, src };
+            } else if opc2 == 0b1000 {
+                // VCVT from integer to floating-point
+                let signed = ((raw >> 7) & 1) != 0;
+                let src = VfpReg::S((vm << 1) | m);
+                let (op, dst) = if is_double {
+                    let op = if signed { VfpCvtOp::F64FromS32 } else { VfpCvtOp::F64FromU32 };
+                    (op, VfpReg::D((d << 4) | vd))
+                } else {
+                    let op = if signed { VfpCvtOp::F32FromS32 } else { VfpCvtOp::F32FromU32 };
+                    (op, VfpReg::S((vd << 1) | d))
+                };
+                return Op::VfpCvt { op, dst, src };
+            } else if opc2 == 0b1100 {
+                // VCVT from floating-point to unsigned 32-bit integer (round towards zero)
+                let dst = VfpReg::S((vd << 1) | d);
+                let (op, src) = if is_double {
+                    (VfpCvtOp::U32FromF64, VfpReg::D((m << 4) | vm))
+                } else {
+                    (VfpCvtOp::U32FromF32, VfpReg::S((vm << 1) | m))
+                };
+                return Op::VfpCvt { op, dst, src };
+            } else if opc2 == 0b1101 {
+                // VCVT from floating-point to signed 32-bit integer (round towards zero)
+                let dst = VfpReg::S((vd << 1) | d);
+                let (op, src) = if is_double {
+                    (VfpCvtOp::S32FromF64, VfpReg::D((m << 4) | vm))
+                } else {
+                    (VfpCvtOp::S32FromF32, VfpReg::S((vm << 1) | m))
+                };
+                return Op::VfpCvt { op, dst, src };
             }
         }
 
@@ -2057,6 +2124,80 @@ mod tests {
                 is_quad: true,
                 vd: 0,
                 vm: 2,
+            }
+        );
+
+        // VPUSH {d8-d15} (0xED2D_8B10)
+        let inst = ArmDecoder::decode(0xED2D_8B10);
+        assert_eq!(
+            inst.op,
+            Op::VfpLoadStoreMultiple {
+                is_load: false,
+                is_double: true,
+                writeback: true,
+                is_add: false,
+                rn: Reg::SP,
+                start_reg: 8,
+                count: 8,
+            }
+        );
+
+        // VPOP {d8-d15} (0xECBD_8B10)
+        let inst = ArmDecoder::decode(0xECBD_8B10);
+        assert_eq!(
+            inst.op,
+            Op::VfpLoadStoreMultiple {
+                is_load: true,
+                is_double: true,
+                writeback: true,
+                is_add: true,
+                rn: Reg::SP,
+                start_reg: 8,
+                count: 8,
+            }
+        );
+
+        // VCVT.F64.F32 d0, s0 (0xEEB7_0AC0)
+        let inst = ArmDecoder::decode(0xEEB7_0AC0);
+        assert_eq!(
+            inst.op,
+            Op::VfpCvt {
+                op: VfpCvtOp::F64FromF32,
+                dst: VfpReg::D(0),
+                src: VfpReg::S(0),
+            }
+        );
+
+        // VCVT.F32.F64 s0, d0 (0xEEB7_0BC0)
+        let inst = ArmDecoder::decode(0xEEB7_0BC0);
+        assert_eq!(
+            inst.op,
+            Op::VfpCvt {
+                op: VfpCvtOp::F32FromF64,
+                dst: VfpReg::S(0),
+                src: VfpReg::D(0),
+            }
+        );
+
+        // VCVT.F32.S32 s0, s0 (0xEEB8_0AC0)
+        let inst = ArmDecoder::decode(0xEEB8_0AC0);
+        assert_eq!(
+            inst.op,
+            Op::VfpCvt {
+                op: VfpCvtOp::F32FromS32,
+                dst: VfpReg::S(0),
+                src: VfpReg::S(0),
+            }
+        );
+
+        // VCVT.S32.F32 s0, s0 (0xEEBD_0AC0)
+        let inst = ArmDecoder::decode(0xEEBD_0AC0);
+        assert_eq!(
+            inst.op,
+            Op::VfpCvt {
+                op: VfpCvtOp::S32FromF32,
+                dst: VfpReg::S(0),
+                src: VfpReg::S(0),
             }
         );
     }

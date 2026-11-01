@@ -136,6 +136,20 @@ pub enum VfpOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VfpCvtOp {
+    F64FromF32,
+    F32FromF64,
+    F32FromS32,
+    F32FromU32,
+    S32FromF32,
+    U32FromF32,
+    F64FromS32,
+    F64FromU32,
+    S32FromF64,
+    U32FromF64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VfpReg {
     S(u8), // s0..s31
     D(u8), // d0..d31
@@ -305,6 +319,20 @@ pub enum Op {
         vfp_reg: VfpReg,
         rn: Reg,
         offset: i32,
+    },
+    VfpLoadStoreMultiple {
+        is_load: bool,
+        is_double: bool,
+        writeback: bool,
+        is_add: bool,
+        rn: Reg,
+        start_reg: u8,
+        count: u8,
+    },
+    VfpCvt {
+        op: VfpCvtOp,
+        dst: VfpReg,
+        src: VfpReg,
     },
     AtomicLoadEx {
         rd: Reg,
