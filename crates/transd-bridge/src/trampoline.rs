@@ -91,8 +91,10 @@ pub fn invoke_guest_extended<M: Memory>(
             if let transd_decoder::Op::Svc { imm } = inst.op {
                 // Try Bionic SVC
                 if bionic.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                    let next_pc = pc.add(4);
-                    engine.cpu.set_pc(next_pc);
+                    if engine.cpu.pc() == pc {
+                        let next_pc = pc.add(4);
+                        engine.cpu.set_pc(next_pc);
+                    }
                     continue;
                 }
                 // Try JNI SVC

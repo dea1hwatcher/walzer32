@@ -43,6 +43,14 @@ pub trait SyscallHandler: Send {
     }
 
     fn set_mmap_base(&mut self, _base: GuestAddr) {}
+
+    fn signal_state(&self) -> Option<&crate::signals::SignalState> {
+        None
+    }
+
+    fn signal_state_mut(&mut self) -> Option<&mut crate::signals::SignalState> {
+        None
+    }
 }
 
 pub struct DefaultSyscallHandler {
@@ -52,6 +60,7 @@ pub struct DefaultSyscallHandler {
     pub vfs: crate::vfs::VirtualFileSystem,
     pub brk: u32,
     pub mmap_current: GuestAddr,
+    pub signal_state: crate::signals::SignalState,
 }
 
 impl Default for DefaultSyscallHandler {
@@ -63,6 +72,7 @@ impl Default for DefaultSyscallHandler {
             vfs: crate::vfs::VirtualFileSystem::new(),
             brk: 0x4000_0000,
             mmap_current: GuestAddr::new(0x7100_0000),
+            signal_state: crate::signals::SignalState::new(),
         }
     }
 }
@@ -76,6 +86,7 @@ impl DefaultSyscallHandler {
             vfs: crate::vfs::VirtualFileSystem::new(),
             brk: 0x4000_0000,
             mmap_current: GuestAddr::new(0x7100_0000),
+            signal_state: crate::signals::SignalState::new(),
         }
     }
 
@@ -87,6 +98,7 @@ impl DefaultSyscallHandler {
             vfs,
             brk: 0x4000_0000,
             mmap_current: GuestAddr::new(0x7100_0000),
+            signal_state: crate::signals::SignalState::new(),
         }
     }
 
@@ -424,6 +436,153 @@ impl SyscallHandler for DefaultSyscallHandler {
                 cpu.set_reg(Reg::R0, 0); // Success
                 Ok(None)
             }
+            nr::RT_SIGACTION => {
+                let sig = args.arg0;
+                let act_ptr = GuestAddr::new(args.arg1);
+                let oldact_ptr = GuestAddr::new(args.arg2);
+                let sigsetsize = args.arg3 as usize;
+
+                let new_act = if act_ptr.as_u32() != 0 {
+                    match crate::signals::GuestSigaction::read_from_mem(mem, act_ptr, sigsetsize) {
+                        Ok(a) => Some(a),
+                        Err(_) => {
+                            cpu.set_reg(Reg::R0, (-14i32) as u32); // -EFAULT
+                            return Ok(None);
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                match self.signal_state.set_action(sig, new_act) {
+                    Ok(old_act) => {
+                        if oldact_ptr.as_u32() != 0 {
+                            if old_act.write_to_mem(mem, oldact_ptr, sigsetsize).is_err() {
+                                cpu.set_reg(Reg::R0, (-14i32) as u32);
+                                return Ok(None);
+                            }
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    Err(err) => {
+                        cpu.set_reg(Reg::R0, err as u32);
+                    }
+                }
+                Ok(None)
+            }
+            nr::RT_SIGPROCMASK => {
+                let how = args.arg0;
+                let set_ptr = GuestAddr::new(args.arg1);
+                let oldset_ptr = GuestAddr::new(args.arg2);
+                let sigsetsize = args.arg3 as usize;
+
+                let set = if set_ptr.as_u32() != 0 {
+                    let val = if sigsetsize >= 8 {
+                        let low = match mem.read_u32(set_ptr) {
+                            Ok(v) => v as u64,
+                            Err(_) => {
+                                cpu.set_reg(Reg::R0, (-14i32) as u32);
+                                return Ok(None);
+                            }
+                        };
+                        let high = match mem.read_u32(set_ptr.add(4)) {
+                            Ok(v) => v as u64,
+                            Err(_) => {
+                                cpu.set_reg(Reg::R0, (-14i32) as u32);
+                                return Ok(None);
+                            }
+                        };
+                        (high << 32) | low
+                    } else if sigsetsize >= 4 {
+                        match mem.read_u32(set_ptr) {
+                            Ok(v) => v as u64,
+                            Err(_) => {
+                                cpu.set_reg(Reg::R0, (-14i32) as u32);
+                                return Ok(None);
+                            }
+                        }
+                    } else {
+                        0
+                    };
+                    Some(val)
+                } else {
+                    None
+                };
+
+                match self.signal_state.sigprocmask(how, set) {
+                    Ok(old_mask) => {
+                        if oldset_ptr.as_u32() != 0 {
+                            if sigsetsize >= 8 {
+                                if mem.write_u32(oldset_ptr, old_mask as u32).is_err()
+                                    || mem.write_u32(oldset_ptr.add(4), (old_mask >> 32) as u32).is_err()
+                                {
+                                    cpu.set_reg(Reg::R0, (-14i32) as u32);
+                                    return Ok(None);
+                                }
+                            } else if sigsetsize >= 4 {
+                                if mem.write_u32(oldset_ptr, old_mask as u32).is_err() {
+                                    cpu.set_reg(Reg::R0, (-14i32) as u32);
+                                    return Ok(None);
+                                }
+                            }
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    Err(err) => {
+                        cpu.set_reg(Reg::R0, err as u32);
+                    }
+                }
+                Ok(None)
+            }
+            nr::SIGALTSTACK => {
+                let ss_ptr = GuestAddr::new(args.arg0);
+                let oss_ptr = GuestAddr::new(args.arg1);
+
+                let new_ss = if ss_ptr.as_u32() != 0 {
+                    match crate::signals::GuestStackT::read_from_mem(mem, ss_ptr) {
+                        Ok(ss) => Some(ss),
+                        Err(_) => {
+                            cpu.set_reg(Reg::R0, (-14i32) as u32);
+                            return Ok(None);
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                match self.signal_state.sigaltstack(new_ss, cpu.sp()) {
+                    Ok(old_ss) => {
+                        if oss_ptr.as_u32() != 0 {
+                            if old_ss.write_to_mem(mem, oss_ptr).is_err() {
+                                cpu.set_reg(Reg::R0, (-14i32) as u32);
+                                return Ok(None);
+                            }
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    Err(err) => {
+                        cpu.set_reg(Reg::R0, err as u32);
+                    }
+                }
+                Ok(None)
+            }
+            nr::RT_SIGRETURN | nr::SIGRETURN => {
+                match self.signal_state.restore_sigreturn(cpu, mem) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        cpu.set_reg(Reg::R0, (-14i32) as u32);
+                    }
+                }
+                Ok(None)
+            }
+            nr::KILL | nr::TKILL | nr::TGKILL => {
+                let sig = if args.nr == nr::TGKILL { args.arg2 } else { args.arg1 };
+                match self.signal_state.deliver_signal(sig, None, cpu, mem, None) {
+                    Ok(_) => cpu.set_reg(Reg::R0, 0),
+                    Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32),
+                }
+                Ok(None)
+            }
             _ => {
                 // Return -ENOSYS (-38) for unhandled syscalls
                 cpu.set_reg(Reg::R0, (-38i32) as u32);
@@ -442,6 +601,14 @@ impl SyscallHandler for DefaultSyscallHandler {
 
     fn set_mmap_base(&mut self, base: GuestAddr) {
         self.mmap_current = base;
+    }
+
+    fn signal_state(&self) -> Option<&crate::signals::SignalState> {
+        Some(&self.signal_state)
+    }
+
+    fn signal_state_mut(&mut self) -> Option<&mut crate::signals::SignalState> {
+        Some(&mut self.signal_state)
     }
 }
 
@@ -469,6 +636,25 @@ impl<M: Memory> DbtEngine<M> {
             telemetry: crate::telemetry::TelemetryManager::new(),
             async_jit: None,
             smc_guard_pages: false,
+        }
+    }
+
+    /// Delivers a guest signal or exception (SIGSEGV, SIGBUS, SIGILL, etc.)
+    /// to a registered guest signal handler if available.
+    /// Returns Ok(true) if the signal was delivered to a guest handler,
+    /// or Ok(false) if unhandled (default crash / terminate).
+    pub fn handle_guest_fault(
+        &mut self,
+        sig: u32,
+        fault_addr: Option<u32>,
+    ) -> Result<bool, EngineError> {
+        if let Some(signal_state) = self.syscall_handler.signal_state_mut() {
+            let handled = signal_state
+                .deliver_signal(sig, fault_addr, &mut self.cpu, &mut self.mem, None)
+                .map_err(EngineError::Memory)?;
+            Ok(handled)
+        } else {
+            Ok(false)
         }
     }
 

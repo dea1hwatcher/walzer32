@@ -66,6 +66,13 @@ pub enum BionicFuncId {
     Dlsym = 71,
     Dlclose = 72,
     Dlerror = 73,
+
+    // Signal Handling (POSIX / Bionic)
+    Sigaction = 80,
+    Sigprocmask = 81,
+    Sigaltstack = 82,
+    Raise = 83,
+    RtSigreturn = 84,
 }
 
 impl BionicFuncId {
@@ -120,6 +127,11 @@ impl BionicFuncId {
             71 => Some(Self::Dlsym),
             72 => Some(Self::Dlclose),
             73 => Some(Self::Dlerror),
+            80 => Some(Self::Sigaction),
+            81 => Some(Self::Sigprocmask),
+            82 => Some(Self::Sigaltstack),
+            83 => Some(Self::Raise),
+            84 => Some(Self::RtSigreturn),
             _ => None,
         }
     }
@@ -158,6 +170,7 @@ pub struct BionicBridge {
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
     pub dlerror_addr: GuestAddr,
+    pub signal_state: transd_rt::signals::SignalState,
 }
 
 impl BionicBridge {
@@ -174,6 +187,7 @@ impl BionicBridge {
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
+            signal_state: transd_rt::signals::SignalState::new(),
         };
 
         bridge.register_known_symbols();
@@ -242,6 +256,13 @@ impl BionicBridge {
             ("dlsym", BionicFuncId::Dlsym),
             ("dlclose", BionicFuncId::Dlclose),
             ("dlerror", BionicFuncId::Dlerror),
+
+            // Signal Handling (POSIX / Bionic)
+            ("sigaction", BionicFuncId::Sigaction),
+            ("sigprocmask", BionicFuncId::Sigprocmask),
+            ("sigaltstack", BionicFuncId::Sigaltstack),
+            ("raise", BionicFuncId::Raise),
+            ("__rt_sigreturn", BionicFuncId::RtSigreturn),
         ];
 
         for (name, id) in funcs {
@@ -302,6 +323,11 @@ impl BionicBridge {
             BionicFuncId::Dlsym,
             BionicFuncId::Dlclose,
             BionicFuncId::Dlerror,
+            BionicFuncId::Sigaction,
+            BionicFuncId::Sigprocmask,
+            BionicFuncId::Sigaltstack,
+            BionicFuncId::Raise,
+            BionicFuncId::RtSigreturn,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -790,6 +816,138 @@ impl BionicBridge {
                     cpu.set_reg(Reg::R0, self.dlerror_addr.as_u32());
                 } else {
                     cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::Sigaction => {
+                let sig = cpu.reg(Reg::R0);
+                let act_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let oldact_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                let new_act = if act_ptr.as_u32() != 0 {
+                    match transd_rt::signals::GuestSigaction::read_from_mem(mem, act_ptr, 8) {
+                        Ok(a) => Some(a),
+                        Err(_) => {
+                            cpu.set_reg(Reg::R0, (-14i32) as u32);
+                            return Ok(true);
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                match self.signal_state.set_action(sig, new_act) {
+                    Ok(old_act) => {
+                        if oldact_ptr.as_u32() != 0 {
+                            if old_act.write_to_mem(mem, oldact_ptr, 8).is_err() {
+                                cpu.set_reg(Reg::R0, (-14i32) as u32);
+                                return Ok(true);
+                            }
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    Err(err) => {
+                        cpu.set_reg(Reg::R0, err as u32);
+                    }
+                }
+            }
+            BionicFuncId::Sigprocmask => {
+                let how = cpu.reg(Reg::R0);
+                let set_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let oldset_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                let set = if set_ptr.as_u32() != 0 {
+                    let low = match mem.read_u32(set_ptr) {
+                        Ok(v) => v as u64,
+                        Err(_) => {
+                            cpu.set_reg(Reg::R0, (-14i32) as u32);
+                            return Ok(true);
+                        }
+                    };
+                    let high = match mem.read_u32(set_ptr.add(4)) {
+                        Ok(v) => v as u64,
+                        Err(_) => {
+                            cpu.set_reg(Reg::R0, (-14i32) as u32);
+                            return Ok(true);
+                        }
+                    };
+                    Some((high << 32) | low)
+                } else {
+                    None
+                };
+
+                match self.signal_state.sigprocmask(how, set) {
+                    Ok(old_mask) => {
+                        if oldset_ptr.as_u32() != 0 {
+                            if mem.write_u32(oldset_ptr, old_mask as u32).is_err()
+                                || mem.write_u32(oldset_ptr.add(4), (old_mask >> 32) as u32).is_err()
+                            {
+                                cpu.set_reg(Reg::R0, (-14i32) as u32);
+                                return Ok(true);
+                            }
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    Err(err) => {
+                        cpu.set_reg(Reg::R0, err as u32);
+                    }
+                }
+            }
+            BionicFuncId::Sigaltstack => {
+                let ss_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let oss_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+
+                let new_ss = if ss_ptr.as_u32() != 0 {
+                    match transd_rt::signals::GuestStackT::read_from_mem(mem, ss_ptr) {
+                        Ok(ss) => Some(ss),
+                        Err(_) => {
+                            cpu.set_reg(Reg::R0, (-14i32) as u32);
+                            return Ok(true);
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                match self.signal_state.sigaltstack(new_ss, cpu.sp()) {
+                    Ok(old_ss) => {
+                        if oss_ptr.as_u32() != 0 {
+                            if old_ss.write_to_mem(mem, oss_ptr).is_err() {
+                                cpu.set_reg(Reg::R0, (-14i32) as u32);
+                                return Ok(true);
+                            }
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    Err(err) => {
+                        cpu.set_reg(Reg::R0, err as u32);
+                    }
+                }
+            }
+            BionicFuncId::Raise => {
+                let sig = cpu.reg(Reg::R0);
+                let old_pc = cpu.pc();
+                cpu.set_pc(old_pc.add(4)); // Advance past SVC so sigreturn resumes at BX lr
+                let rt_sigreturn_stub = self.stub_base.add((BionicFuncId::RtSigreturn as u32) * 8);
+                match self.signal_state.deliver_signal(sig, None, cpu, mem, Some(rt_sigreturn_stub)) {
+                    Ok(true) => {
+                        // Signal delivered: CPU state (PC, SP, LR, R0-R2) adjusted to run handler
+                    }
+                    Ok(false) => {
+                        cpu.set_pc(old_pc);
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    Err(_) => {
+                        cpu.set_pc(old_pc);
+                        cpu.set_reg(Reg::R0, (-14i32) as u32);
+                    }
+                }
+            }
+            BionicFuncId::RtSigreturn => {
+                match self.signal_state.restore_sigreturn(cpu, mem) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        cpu.set_reg(Reg::R0, (-14i32) as u32);
+                    }
                 }
             }
             _ => {}
