@@ -2,6 +2,34 @@ use crate::addr::GuestAddr;
 use crate::cpsr::{Cond, Cpsr};
 use crate::reg::Reg;
 
+/// ARMv7 Floating-point Status and Control Register (FPSCR) bit definitions
+pub mod fpscr {
+    pub const N: u32 = 1 << 31; // Negative condition flag
+    pub const Z: u32 = 1 << 30; // Zero condition flag
+    pub const C: u32 = 1 << 29; // Carry condition flag
+    pub const V: u32 = 1 << 28; // Overflow condition flag
+    pub const QC: u32 = 1 << 27; // Cumulative saturation bit (NEON)
+    pub const AHP: u32 = 1 << 26; // Alternative half-precision control
+    pub const DN: u32 = 1 << 25; // Default NaN mode (1 = Default NaN, 0 = NaN propagation)
+    pub const FZ: u32 = 1 << 24; // Flush-to-zero mode (FTZ) (1 = flush denormals, 0 = IEEE-754)
+    pub const RMODE_MASK: u32 = 3 << 22; // Rounding Mode mask
+    pub const RMODE_RN: u32 = 0 << 22; // Round to Nearest (RN)
+    pub const RMODE_RP: u32 = 1 << 22; // Round towards Plus Infinity (RP)
+    pub const RMODE_RM: u32 = 2 << 22; // Round towards Minus Infinity (RM)
+    pub const RMODE_RZ: u32 = 3 << 22; // Round towards Zero (RZ)
+    pub const STRIDE_MASK: u32 = 3 << 20;
+    pub const LEN_MASK: u32 = 7 << 16;
+    pub const IDC: u32 = 1 << 7; // Input Denormal cumulative exception
+    pub const IXC: u32 = 1 << 4; // Inexact cumulative exception
+    pub const UFC: u32 = 1 << 3; // Underflow cumulative exception
+    pub const OFC: u32 = 1 << 2; // Overflow cumulative exception
+    pub const DZC: u32 = 1 << 1; // Division by Zero cumulative exception
+    pub const IOC: u32 = 1 << 0; // Invalid Operation cumulative exception
+
+    /// RunFast mode enabled by default on Android NDK (FZ=1, DN=1)
+    pub const RUNFAST_MODE: u32 = DN | FZ;
+}
+
 /// Fixed byte offsets for JIT assembly trampolines accessing CpuState
 pub const OFFSET_R0: usize = 0;
 pub const OFFSET_SP: usize = 13 * 4; // 52
@@ -223,6 +251,56 @@ impl CpuState {
         assert!(idx < 32);
         let d = (val[0].to_bits() as u64) | ((val[1].to_bits() as u64) << 32);
         self.vfp[idx as usize] = d;
+    }
+
+    // --- FPSCR Floating-Point Mode Helpers ---
+
+    #[inline(always)]
+    pub fn fpscr_ftz(&self) -> bool {
+        (self.fpscr & fpscr::FZ) != 0
+    }
+
+    #[inline(always)]
+    pub fn fpscr_default_nan(&self) -> bool {
+        (self.fpscr & fpscr::DN) != 0
+    }
+
+    #[inline(always)]
+    pub fn fpscr_rmode(&self) -> u32 {
+        (self.fpscr & fpscr::RMODE_MASK) >> 22
+    }
+
+    /// Sanitizes an input operand or operation result according to FPSCR FZ (Flush-To-Zero)
+    /// and DN (Default NaN) settings.
+    pub fn sanitize_f32(&mut self, val: f32, is_input: bool) -> f32 {
+        let mut res = val;
+        if self.fpscr_ftz() && res.is_subnormal() {
+            res = if res.is_sign_negative() { -0.0f32 } else { 0.0f32 };
+            self.fpscr |= if is_input { fpscr::IDC } else { fpscr::UFC };
+        }
+        if self.fpscr_default_nan() && res.is_nan() {
+            res = f32::from_bits(0x7FC0_0000);
+            if !val.is_nan() {
+                self.fpscr |= fpscr::IOC;
+            }
+        }
+        res
+    }
+
+    /// Sanitizes an f64 input operand or result according to FPSCR FZ and DN.
+    pub fn sanitize_f64(&mut self, val: f64, is_input: bool) -> f64 {
+        let mut res = val;
+        if self.fpscr_ftz() && res.is_subnormal() {
+            res = if res.is_sign_negative() { -0.0f64 } else { 0.0f64 };
+            self.fpscr |= if is_input { fpscr::IDC } else { fpscr::UFC };
+        }
+        if self.fpscr_default_nan() && res.is_nan() {
+            res = f64::from_bits(0x7FF8_0000_0000_0000);
+            if !val.is_nan() {
+                self.fpscr |= fpscr::IOC;
+            }
+        }
+        res
     }
 
     // --- Flag helpers ---

@@ -131,6 +131,8 @@ pub enum VfpOp {
     Sqrt,
     Cmp,
     CmpZero,
+    Fma,
+    Fms,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,7 +258,12 @@ pub enum Op {
         core_reg: Reg,
         vfp_reg: VfpReg,
     },
-    VfpMrsFpscr,
+    VfpMrsFpscr {
+        rt: Option<Reg>, // None = APSR_nzcv (CPSR), Some(r) = general purpose register
+    },
+    VfpMsrFpscr {
+        rt: Reg,
+    },
     VfpLoadStore {
         is_load: bool,
         size: VfpSize,

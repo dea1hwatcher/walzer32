@@ -9,7 +9,7 @@ pub use addr::GuestAddr;
 pub use arena::{ArenaMemory, SharedArenaMemory, ARENA_4GB_SIZE};
 pub use cpsr::{Cond, Cpsr};
 pub use cpu::{
-    CpuState, OFFSET_CPSR, OFFSET_EXCLUSIVE, OFFSET_FPSCR, OFFSET_LR, OFFSET_PC, OFFSET_R0,
+    fpscr, CpuState, OFFSET_CPSR, OFFSET_EXCLUSIVE, OFFSET_FPSCR, OFFSET_LR, OFFSET_PC, OFFSET_R0,
     OFFSET_SP, OFFSET_TLS, OFFSET_VFP,
 };
 pub use memory::{

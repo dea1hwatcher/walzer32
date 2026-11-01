@@ -732,6 +732,24 @@ impl ThumbDecoder {
             return ArmInst::new(Cond::AL, Op::Div { signed, rd, rn, rm }, raw);
         }
 
+        // Thumb-2 VMRS <Rt>, FPSCR (0xEEF1, 0x<Rt>A10)
+        if hw1 == 0xEEF1 && (hw2 & 0x0FFF) == 0x0A10 {
+            let rt_raw = ((hw2 >> 12) & 0xF) as u8;
+            let rt = if rt_raw == 15 {
+                None
+            } else {
+                Some(Reg::from_u8(rt_raw).unwrap_or(Reg::R0))
+            };
+            return ArmInst::new(Cond::AL, Op::VfpMrsFpscr { rt }, raw);
+        }
+
+        // Thumb-2 VMSR FPSCR, <Rt> (0xEEE1, 0x<Rt>A10)
+        if hw1 == 0xEEE1 && (hw2 & 0x0FFF) == 0x0A10 {
+            let rt_raw = ((hw2 >> 12) & 0xF) as u8;
+            let rt = Reg::from_u8(rt_raw).unwrap_or(Reg::R0);
+            return ArmInst::new(Cond::AL, Op::VfpMsrFpscr { rt }, raw);
+        }
+
         ArmInst::new(Cond::AL, Op::Unknown(raw), raw)
     }
 }
@@ -889,5 +907,15 @@ mod tests {
                 rn: Reg::R0,
             }
         );
+
+        // Thumb-2 VMRS APSR_nzcv, FPSCR -> hi=0xEEF1, lo=0xFA10
+        let (inst_vmrs, size) = ThumbDecoder::decode(0xEEF1, Some(0xFA10));
+        assert_eq!(size, 4);
+        assert_eq!(inst_vmrs.op, Op::VfpMrsFpscr { rt: None });
+
+        // Thumb-2 VMSR FPSCR, r3 -> hi=0xEEE1, lo=0x3A10
+        let (inst_vmsr, size) = ThumbDecoder::decode(0xEEE1, Some(0x3A10));
+        assert_eq!(size, 4);
+        assert_eq!(inst_vmsr.op, Op::VfpMsrFpscr { rt: Reg::R3 });
     }
 }

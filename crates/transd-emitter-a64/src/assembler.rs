@@ -713,6 +713,46 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// FMADD Sd, Sn, Sm, Sa (Fused Multiply-Add: Sd = Sa + Sn * Sm)
+    pub fn fmadd_s(&mut self, rd: u8, rn: u8, rm: u8, ra: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && ra < 32);
+        let inst = 0x1F00_0000 | ((rm as u32) << 16) | ((ra as u32) << 10) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FMSUB Sd, Sn, Sm, Sa (Fused Multiply-Subtract: Sd = Sa - Sn * Sm)
+    pub fn fmsub_s(&mut self, rd: u8, rn: u8, rm: u8, ra: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && ra < 32);
+        let inst = 0x1F00_8000 | ((rm as u32) << 16) | ((ra as u32) << 10) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FMADD Dd, Dn, Dm, Da (Fused Multiply-Add: Dd = Da + Dn * Dm)
+    pub fn fmadd_d(&mut self, rd: u8, rn: u8, rm: u8, ra: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && ra < 32);
+        let inst = 0x1F40_0000 | ((rm as u32) << 16) | ((ra as u32) << 10) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FMSUB Dd, Dn, Dm, Da (Fused Multiply-Subtract: Dd = Da - Dn * Dm)
+    pub fn fmsub_d(&mut self, rd: u8, rn: u8, rm: u8, ra: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && ra < 32);
+        let inst = 0x1F40_8000 | ((rm as u32) << 16) | ((ra as u32) << 10) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// MRS Xt, FPCR (Read Floating-Point Control Register)
+    pub fn mrs_fpcr(&mut self, rt: A64Reg) {
+        let inst = 0xD53B_4400 | (rt.index() as u32);
+        self.emit(inst);
+    }
+
+    /// MSR FPCR, Xt (Write Floating-Point Control Register)
+    pub fn msr_fpcr(&mut self, rt: A64Reg) {
+        let inst = 0xD51B_4400 | (rt.index() as u32);
+        self.emit(inst);
+    }
+
     /// FMOV Sd, Sn (Move single-precision register)
     pub fn fmov_s(&mut self, rd: u8, rn: u8) {
         assert!(rd < 32 && rn < 32);

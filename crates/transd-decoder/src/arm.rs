@@ -680,9 +680,23 @@ impl ArmDecoder {
     fn decode_vfp(raw: u32, is_double: bool) -> Op {
         let size = if is_double { VfpSize::F64 } else { VfpSize::F32 };
 
-        // VMRS APSR_nzcv, FPSCR: 0x_EF1_FA10
-        if (raw & 0x0FFF_FFFF) == 0x0EF1_FA10 {
-            return Op::VfpMrsFpscr;
+        // VMRS <Rt>, FPSCR: (0x_EF1_0A10)
+        // If Rt == 15 (0xF), Rt is APSR_nzcv (CPSR flags); otherwise Rt is core register
+        if (raw & 0x0FFF_0FFF) == 0x0EF1_0A10 {
+            let rt_raw = ((raw >> 12) & 0xF) as u8;
+            let rt = if rt_raw == 15 {
+                None
+            } else {
+                Some(Reg::from_u8(rt_raw).unwrap_or(Reg::R0))
+            };
+            return Op::VfpMrsFpscr { rt };
+        }
+
+        // VMSR FPSCR, <Rt>: (0x_EE1_0A10)
+        if (raw & 0x0FFF_0FFF) == 0x0EE1_0A10 {
+            let rt_raw = ((raw >> 12) & 0xF) as u8;
+            let rt = Reg::from_u8(rt_raw).unwrap_or(Reg::R0);
+            return Op::VfpMsrFpscr { rt };
         }
 
         // VMOV between core and single-precision float (s0..s31)
@@ -750,27 +764,53 @@ impl ArmDecoder {
             )
         };
 
-        // VCMP: bits [23:20] == 0b1011, bits [11:9] == 0b101
+        // VFP 1-register extension / VCMP: bits [23:20] == 0b1011, bits [11:9] == 0b101
         if ((raw >> 20) & 0xF) == 0b1011 && ((raw >> 9) & 0x7) == 0b101 {
-            let with_zero = ((raw >> 16) & 1) != 0;
-            let op = if with_zero {
-                VfpOp::CmpZero
-            } else {
-                VfpOp::Cmp
-            };
-            return Op::VfpAlu {
-                op,
-                size,
-                dst,
-                src1: dst,
-                src2,
-            };
+            let opc2 = (raw >> 16) & 0xF;
+            if opc2 == 0b0100 || opc2 == 0b0101 {
+                let with_zero = opc2 == 0b0101;
+                let op = if with_zero {
+                    VfpOp::CmpZero
+                } else {
+                    VfpOp::Cmp
+                };
+                return Op::VfpAlu {
+                    op,
+                    size,
+                    dst,
+                    src1: dst,
+                    src2,
+                };
+            } else if opc2 == 0b0001 {
+                return Op::VfpAlu {
+                    op: VfpOp::Sqrt,
+                    size,
+                    dst,
+                    src1: src2,
+                    src2,
+                };
+            } else if opc2 == 0b0000 {
+                let bit6 = (raw >> 6) & 1;
+                let bit7 = (raw >> 7) & 1;
+                if bit6 == 1 {
+                    let op = if bit7 == 1 { VfpOp::Abs } else { VfpOp::Neg };
+                    return Op::VfpAlu {
+                        op,
+                        size,
+                        dst,
+                        src1: src2,
+                        src2,
+                    };
+                }
+            }
         }
 
         // VADD: 0x0E30_0A00 (bits [23:20] == 0b0011, bit 6 == 0)
         // VSUB: 0x0E30_0A40 (bits [23:20] == 0b0011, bit 6 == 1)
         // VMUL: 0x0E20_0A00 (bits [23:20] == 0b0010, bit 6 == 0)
         // VDIV: 0x0E80_0A00 (bits [23:20] == 0b1000, bit 6 == 0)
+        // VFMA: 0x0EA0_0A00 (bits [23:20] == 0b1010, bit 6 == 0)
+        // VFMS: 0x0EA0_0A40 (bits [23:20] == 0b1010, bit 6 == 1)
         let op_code = (raw >> 20) & 0xF;
         let bit6 = (raw >> 6) & 1;
 
@@ -779,6 +819,8 @@ impl ArmDecoder {
             (0b0011, 1) => VfpOp::Sub,
             (0b0010, 0) => VfpOp::Mul,
             (0b1000, 0) => VfpOp::Div,
+            (0b1010, 0) => VfpOp::Fma,
+            (0b1010, 1) => VfpOp::Fms,
             _ => return Op::Unknown(raw),
         };
 
@@ -908,7 +950,15 @@ mod tests {
     fn test_decode_vfp_ops() {
         // VMRS APSR_nzcv, FPSCR -> 0xEEF1FA10
         let inst = ArmDecoder::decode(0xEEF1_FA10);
-        assert_eq!(inst.op, Op::VfpMrsFpscr);
+        assert_eq!(inst.op, Op::VfpMrsFpscr { rt: None });
+
+        // VMRS r1, FPSCR -> 0xEEF11A10
+        let inst_mrs = ArmDecoder::decode(0xEEF1_1A10);
+        assert_eq!(inst_mrs.op, Op::VfpMrsFpscr { rt: Some(Reg::R1) });
+
+        // VMSR FPSCR, r2 -> 0xEEE12A10
+        let inst_msr = ArmDecoder::decode(0xEEE1_2A10);
+        assert_eq!(inst_msr.op, Op::VfpMsrFpscr { rt: Reg::R2 });
 
         // VADD.F32 s0, s1, s2 -> 0xEE300A81
         let inst2 = ArmDecoder::decode(0xEE30_0A81);
@@ -921,6 +971,16 @@ mod tests {
                 assert_eq!(src2, VfpReg::S(2));
             }
             _ => panic!("Expected VFP Add"),
+        }
+
+        // VFMA.F32 s0, s1, s2 -> 0xEEA00A81
+        let inst_fma = ArmDecoder::decode(0xEEA0_0A81);
+        match inst_fma.op {
+            Op::VfpAlu { op, size, .. } => {
+                assert_eq!(op, VfpOp::Fma);
+                assert_eq!(size, VfpSize::F32);
+            }
+            _ => panic!("Expected VFMA"),
         }
     }
 

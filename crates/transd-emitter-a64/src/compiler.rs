@@ -1,5 +1,6 @@
 use transd_core::{
-    Cond, GuestAddr, Reg, OFFSET_EXCLUSIVE, OFFSET_PC, OFFSET_TLS, OFFSET_VFP,
+    Cond, GuestAddr, Reg, OFFSET_CPSR, OFFSET_EXCLUSIVE, OFFSET_FPSCR, OFFSET_PC, OFFSET_TLS,
+    OFFSET_VFP,
 };
 use transd_decoder::{
     AddrMode, AddrOffset, AluOp, ArmInst, BlockAddrMode, MemSize, MulOp, NeonOp, NeonSize, Op,
@@ -724,6 +725,14 @@ impl A64Compiler {
                             VfpOp::Abs => asm.fabs_s(2, 0),
                             VfpOp::Neg => asm.fneg_s(2, 0),
                             VfpOp::Sqrt => asm.fsqrt_s(2, 0),
+                            VfpOp::Fma => {
+                                asm.ldr_s_imm(3, A64Reg::X0, dst_off);
+                                asm.fmadd_s(2, 0, 1, 3);
+                            }
+                            VfpOp::Fms => {
+                                asm.ldr_s_imm(3, A64Reg::X0, dst_off);
+                                asm.fmsub_s(2, 0, 1, 3);
+                            }
                             VfpOp::Cmp => asm.fcmp_s(0, 1),
                             VfpOp::CmpZero => asm.fcmp_zero_s(0),
                         }
@@ -742,6 +751,14 @@ impl A64Compiler {
                             VfpOp::Abs => asm.fabs_d(2, 0),
                             VfpOp::Neg => asm.fneg_d(2, 0),
                             VfpOp::Sqrt => asm.fsqrt_d(2, 0),
+                            VfpOp::Fma => {
+                                asm.ldr_d_imm(3, A64Reg::X0, dst_off);
+                                asm.fmadd_d(2, 0, 1, 3);
+                            }
+                            VfpOp::Fms => {
+                                asm.ldr_d_imm(3, A64Reg::X0, dst_off);
+                                asm.fmsub_d(2, 0, 1, 3);
+                            }
                             VfpOp::Cmp => asm.fcmp_d(0, 1),
                             VfpOp::CmpZero => asm.fcmp_zero_d(0),
                         }
@@ -778,6 +795,35 @@ impl A64Compiler {
                     let src = load_guest_reg(asm, A64Reg::X9, *core_reg);
                     asm.str_w_imm(src, A64Reg::X0, vfp_off);
                 }
+            }
+            Op::VfpMrsFpscr { rt } => {
+                match rt {
+                    None => {
+                        asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, OFFSET_FPSCR as u32);
+                        asm.ldr_w_imm(A64Reg::X10, A64Reg::X0, OFFSET_CPSR as u32);
+                        asm.mov_imm32(A64Reg::X11, 0x0FFF_FFFF);
+                        asm.and_w_reg(A64Reg::X10, A64Reg::X10, A64Reg::X11);
+                        asm.mov_imm32(A64Reg::X11, 0xF000_0000);
+                        asm.and_w_reg(A64Reg::X9, A64Reg::X9, A64Reg::X11);
+                        asm.orr_w_reg(A64Reg::X10, A64Reg::X10, A64Reg::X9);
+                        asm.str_w_imm(A64Reg::X10, A64Reg::X0, OFFSET_CPSR as u32);
+                    }
+                    Some(r) => {
+                        asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, OFFSET_FPSCR as u32);
+                        store_guest_reg(asm, A64Reg::X9, *r);
+                    }
+                }
+            }
+            Op::VfpMsrFpscr { rt } => {
+                let src = load_guest_reg(asm, A64Reg::X9, *rt);
+                asm.str_w_imm(src, A64Reg::X0, OFFSET_FPSCR as u32);
+                asm.mrs_fpcr(A64Reg::X10);
+                asm.mov_imm32(A64Reg::X11, !0x03C0_0000);
+                asm.and_w_reg(A64Reg::X10, A64Reg::X10, A64Reg::X11);
+                asm.mov_imm32(A64Reg::X11, 0x03C0_0000);
+                asm.and_w_reg(A64Reg::X12, src, A64Reg::X11);
+                asm.orr_w_reg(A64Reg::X10, A64Reg::X10, A64Reg::X12);
+                asm.msr_fpcr(A64Reg::X10);
             }
             Op::AtomicLoadEx { rd, rn } => {
                 let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);

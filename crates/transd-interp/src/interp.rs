@@ -431,14 +431,17 @@ impl Interpreter {
             } => {
                 match size {
                     VfpSize::F32 => {
-                        let s1 = match src1 {
+                        let raw_s1 = match src1 {
                             VfpReg::S(idx) => cpu.s_reg(idx),
                             _ => 0.0,
                         };
-                        let s2 = match src2 {
+                        let raw_s2 = match src2 {
                             VfpReg::S(idx) => cpu.s_reg(idx),
                             _ => 0.0,
                         };
+
+                        let s1 = cpu.sanitize_f32(raw_s1, true);
+                        let s2 = cpu.sanitize_f32(raw_s2, true);
 
                         let mut res = 0.0f32;
                         match op {
@@ -449,6 +452,20 @@ impl Interpreter {
                             VfpOp::Abs => res = s1.abs(),
                             VfpOp::Neg => res = -s1,
                             VfpOp::Sqrt => res = s1.sqrt(),
+                            VfpOp::Fma => {
+                                let dst_val = match dst {
+                                    VfpReg::S(idx) => cpu.s_reg(idx),
+                                    _ => 0.0,
+                                };
+                                res = s1.mul_add(s2, dst_val);
+                            }
+                            VfpOp::Fms => {
+                                let dst_val = match dst {
+                                    VfpReg::S(idx) => cpu.s_reg(idx),
+                                    _ => 0.0,
+                                };
+                                res = (-s1).mul_add(s2, dst_val);
+                            }
                             VfpOp::Cmp | VfpOp::CmpZero => {
                                 let comp_val = if op == VfpOp::CmpZero { 0.0 } else { s2 };
                                 let (n, z, c, v) = if s1.is_nan() || comp_val.is_nan() {
@@ -471,20 +488,24 @@ impl Interpreter {
                         }
 
                         if !matches!(op, VfpOp::Cmp | VfpOp::CmpZero) {
+                            let sanitized_res = cpu.sanitize_f32(res, false);
                             if let VfpReg::S(dst_idx) = dst {
-                                cpu.set_s_reg(dst_idx, res);
+                                cpu.set_s_reg(dst_idx, sanitized_res);
                             }
                         }
                     }
                     VfpSize::F64 => {
-                        let d1 = match src1 {
+                        let raw_d1 = match src1 {
                             VfpReg::D(idx) => cpu.d_reg(idx),
                             _ => 0.0,
                         };
-                        let d2 = match src2 {
+                        let raw_d2 = match src2 {
                             VfpReg::D(idx) => cpu.d_reg(idx),
                             _ => 0.0,
                         };
+
+                        let d1 = cpu.sanitize_f64(raw_d1, true);
+                        let d2 = cpu.sanitize_f64(raw_d2, true);
 
                         let mut res = 0.0f64;
                         match op {
@@ -495,6 +516,20 @@ impl Interpreter {
                             VfpOp::Abs => res = d1.abs(),
                             VfpOp::Neg => res = -d1,
                             VfpOp::Sqrt => res = d1.sqrt(),
+                            VfpOp::Fma => {
+                                let dst_val = match dst {
+                                    VfpReg::D(idx) => cpu.d_reg(idx),
+                                    _ => 0.0,
+                                };
+                                res = d1.mul_add(d2, dst_val);
+                            }
+                            VfpOp::Fms => {
+                                let dst_val = match dst {
+                                    VfpReg::D(idx) => cpu.d_reg(idx),
+                                    _ => 0.0,
+                                };
+                                res = (-d1).mul_add(d2, dst_val);
+                            }
                             VfpOp::Cmp | VfpOp::CmpZero => {
                                 let comp_val = if op == VfpOp::CmpZero { 0.0 } else { d2 };
                                 let (n, z, c, v) = if d1.is_nan() || comp_val.is_nan() {
@@ -517,9 +552,36 @@ impl Interpreter {
                         }
 
                         if !matches!(op, VfpOp::Cmp | VfpOp::CmpZero) {
+                            let sanitized_res = cpu.sanitize_f64(res, false);
                             if let VfpReg::D(dst_idx) = dst {
-                                cpu.set_d_reg(dst_idx, res);
+                                cpu.set_d_reg(dst_idx, sanitized_res);
                             }
+                        }
+                    }
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::VfpMov { size, dst, src } => {
+                match size {
+                    VfpSize::F32 => {
+                        let val = match src {
+                            VfpReg::S(idx) => cpu.s_reg(idx),
+                            _ => 0.0,
+                        };
+                        let sanitized = cpu.sanitize_f32(val, false);
+                        if let VfpReg::S(dst_idx) = dst {
+                            cpu.set_s_reg(dst_idx, sanitized);
+                        }
+                    }
+                    VfpSize::F64 => {
+                        let val = match src {
+                            VfpReg::D(idx) => cpu.d_reg(idx),
+                            _ => 0.0,
+                        };
+                        let sanitized = cpu.sanitize_f64(val, false);
+                        if let VfpReg::D(dst_idx) = dst {
+                            cpu.set_d_reg(dst_idx, sanitized);
                         }
                     }
                 }
@@ -546,16 +608,28 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
-            Op::VfpMrsFpscr => {
-                let n = (cpu.fpscr & (1 << 31)) != 0;
-                let z = (cpu.fpscr & (1 << 30)) != 0;
-                let c = (cpu.fpscr & (1 << 29)) != 0;
-                let v = (cpu.fpscr & (1 << 28)) != 0;
-                cpu.cpsr.set(Cpsr::N, n);
-                cpu.cpsr.set(Cpsr::Z, z);
-                cpu.cpsr.set(Cpsr::C, c);
-                cpu.cpsr.set(Cpsr::V, v);
-
+            Op::VfpMrsFpscr { rt } => {
+                match rt {
+                    None => {
+                        let n = (cpu.fpscr & (1 << 31)) != 0;
+                        let z = (cpu.fpscr & (1 << 30)) != 0;
+                        let c = (cpu.fpscr & (1 << 29)) != 0;
+                        let v = (cpu.fpscr & (1 << 28)) != 0;
+                        cpu.cpsr.set(Cpsr::N, n);
+                        cpu.cpsr.set(Cpsr::Z, z);
+                        cpu.cpsr.set(Cpsr::C, c);
+                        cpu.cpsr.set(Cpsr::V, v);
+                    }
+                    Some(r) => {
+                        cpu.set_reg(r, cpu.fpscr);
+                    }
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::VfpMsrFpscr { rt } => {
+                let val = cpu.reg(rt);
+                cpu.fpscr = val;
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }

@@ -30,7 +30,7 @@ pub use audio::{
 };
 pub use audio_resample::AudioResampler;
 pub use audio_ring::AudioRingBuffer;
-pub use bionic::{BionicBridge, BionicFuncId, LogMessage, ThreadDescriptor};
+pub use bionic::{BionicBridge, BionicFuncId, LogMessage, ThreadDescriptor, BIONIC_SVC_MAGIC};
 pub use gles::{
     BufferState, DrawCallRecord, EglContextState, EglSurfaceState, GlesBridge, GlesFuncId,
     GLES_SVC_MAGIC, ShareGroup, SurfaceKind, SyncFenceState, TextureState, ThreadEglBinding,
