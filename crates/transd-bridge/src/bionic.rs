@@ -20,6 +20,28 @@ pub enum BionicFuncId {
     Strcmp = 11,
     Strcpy = 12,
     Abort = 13,
+    Memmove = 14,
+    Strncmp = 15,
+    Strncpy = 16,
+    Strcat = 17,
+    Strncat = 18,
+    Strchr = 19,
+
+    Strrchr = 100,
+    Strstr = 101,
+    Strtol = 102,
+    Strtoul = 103,
+    Atoi = 104,
+    Snprintf = 105,
+    Sprintf = 106,
+
+    ClockGettime = 110,
+    Gettimeofday = 111,
+
+    CxaAtexit = 120,
+    CxaFinalize = 121,
+
+    StackChkFail = 130,
 
     // Threading & Mutexes
     PthreadCreate = 20,
@@ -96,6 +118,12 @@ impl BionicFuncId {
             11 => Some(Self::Strcmp),
             12 => Some(Self::Strcpy),
             13 => Some(Self::Abort),
+            14 => Some(Self::Memmove),
+            15 => Some(Self::Strncmp),
+            16 => Some(Self::Strncpy),
+            17 => Some(Self::Strcat),
+            18 => Some(Self::Strncat),
+            19 => Some(Self::Strchr),
             20 => Some(Self::PthreadCreate),
             21 => Some(Self::PthreadJoin),
             22 => Some(Self::PthreadSelf),
@@ -140,6 +168,18 @@ impl BionicFuncId {
             90 => Some(Self::SystemPropertyGet),
             91 => Some(Self::SystemPropertyFind),
             92 => Some(Self::SystemPropertyRead),
+            100 => Some(Self::Strrchr),
+            101 => Some(Self::Strstr),
+            102 => Some(Self::Strtol),
+            103 => Some(Self::Strtoul),
+            104 => Some(Self::Atoi),
+            105 => Some(Self::Snprintf),
+            106 => Some(Self::Sprintf),
+            110 => Some(Self::ClockGettime),
+            111 => Some(Self::Gettimeofday),
+            120 => Some(Self::CxaAtexit),
+            121 => Some(Self::CxaFinalize),
+            130 => Some(Self::StackChkFail),
             _ => None,
         }
     }
@@ -180,6 +220,9 @@ pub struct BionicBridge {
     pub dlerror_addr: GuestAddr,
     pub signal_state: transd_rt::signals::SignalState,
     pub properties: crate::property::PropertyStore,
+    pub stack_chk_guard_addr: GuestAddr,
+    pub stack_chk_failed: bool,
+    pub atexit_handlers: Vec<(GuestAddr, u32, GuestAddr)>,
 }
 
 impl BionicBridge {
@@ -198,6 +241,9 @@ impl BionicBridge {
             dlerror_addr: stub_base.add(0x800),
             signal_state: transd_rt::signals::SignalState::new(),
             properties: crate::property::PropertyStore::new(stub_base.add(0x1000), 0x4000),
+            stack_chk_guard_addr: stub_base.add(0x700),
+            stack_chk_failed: false,
+            atexit_handlers: Vec::new(),
         };
 
         bridge.register_known_symbols();
@@ -278,12 +324,39 @@ impl BionicBridge {
             ("__system_property_get", BionicFuncId::SystemPropertyGet),
             ("__system_property_find", BionicFuncId::SystemPropertyFind),
             ("__system_property_read", BionicFuncId::SystemPropertyRead),
+
+            // Additional C runtime & Memory
+            ("memmove", BionicFuncId::Memmove),
+            ("strncmp", BionicFuncId::Strncmp),
+            ("strncpy", BionicFuncId::Strncpy),
+            ("strcat", BionicFuncId::Strcat),
+            ("strncat", BionicFuncId::Strncat),
+            ("strchr", BionicFuncId::Strchr),
+            ("strrchr", BionicFuncId::Strrchr),
+            ("strstr", BionicFuncId::Strstr),
+            ("strtol", BionicFuncId::Strtol),
+            ("strtoul", BionicFuncId::Strtoul),
+            ("atoi", BionicFuncId::Atoi),
+            ("snprintf", BionicFuncId::Snprintf),
+            ("sprintf", BionicFuncId::Sprintf),
+
+            // POSIX Timing
+            ("clock_gettime", BionicFuncId::ClockGettime),
+            ("gettimeofday", BionicFuncId::Gettimeofday),
+
+            // C++ ABI & Stack Protector
+            ("__cxa_atexit", BionicFuncId::CxaAtexit),
+            ("__cxa_finalize", BionicFuncId::CxaFinalize),
+            ("__stack_chk_fail", BionicFuncId::StackChkFail),
         ];
 
         for (name, id) in funcs {
             let addr = self.stub_base.add((id as u32) * 8);
             self.symbol_table.insert(name.to_string(), addr);
         }
+
+        // Export __stack_chk_guard canary variable
+        self.symbol_table.insert("__stack_chk_guard".to_string(), self.stack_chk_guard_addr);
     }
 
     /// Initializes stub code into memory at stub_base
@@ -346,6 +419,24 @@ impl BionicBridge {
             BionicFuncId::SystemPropertyGet,
             BionicFuncId::SystemPropertyFind,
             BionicFuncId::SystemPropertyRead,
+            BionicFuncId::Memmove,
+            BionicFuncId::Strncmp,
+            BionicFuncId::Strncpy,
+            BionicFuncId::Strcat,
+            BionicFuncId::Strncat,
+            BionicFuncId::Strchr,
+            BionicFuncId::Strrchr,
+            BionicFuncId::Strstr,
+            BionicFuncId::Strtol,
+            BionicFuncId::Strtoul,
+            BionicFuncId::Atoi,
+            BionicFuncId::Snprintf,
+            BionicFuncId::Sprintf,
+            BionicFuncId::ClockGettime,
+            BionicFuncId::Gettimeofday,
+            BionicFuncId::CxaAtexit,
+            BionicFuncId::CxaFinalize,
+            BionicFuncId::StackChkFail,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -354,6 +445,8 @@ impl BionicBridge {
             mem.write_u32(addr, svc_code)?;
             mem.write_u32(addr.add(4), bx_lr)?;
         }
+        // Initialize stack protector canary word
+        mem.write_u32(self.stack_chk_guard_addr, 0x000A_0DFF)?;
         Ok(())
     }
 
@@ -988,6 +1081,252 @@ impl BionicBridge {
                 let len = self.properties.system_property_read(pi_addr, name_out, val_out, mem)?;
                 cpu.set_reg(Reg::R0, len as u32);
             }
+            BionicFuncId::Memmove => {
+                let dst = GuestAddr::new(cpu.reg(Reg::R0));
+                let src = GuestAddr::new(cpu.reg(Reg::R1));
+                let count = cpu.reg(Reg::R2) as usize;
+                let mut buf = vec![0u8; count];
+                mem.read_bytes(src, &mut buf)?;
+                mem.write_bytes(dst, &buf)?;
+                cpu.set_reg(Reg::R0, dst.as_u32());
+            }
+            BionicFuncId::Strncmp => {
+                let s1_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let s2_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let n = cpu.reg(Reg::R2) as usize;
+                let mut diff = 0i32;
+                for i in 0..n {
+                    let b1 = mem.read_u8(s1_addr.add(i as u32))?;
+                    let b2 = mem.read_u8(s2_addr.add(i as u32))?;
+                    if b1 != b2 {
+                        diff = (b1 as i32) - (b2 as i32);
+                        break;
+                    }
+                    if b1 == 0 {
+                        break;
+                    }
+                }
+                cpu.set_reg(Reg::R0, diff as u32);
+            }
+            BionicFuncId::Strncpy => {
+                let dst_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let src_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let n = cpu.reg(Reg::R2) as usize;
+                let mut reached_null = false;
+                for i in 0..n {
+                    let b = if reached_null {
+                        0
+                    } else {
+                        let byte = mem.read_u8(src_addr.add(i as u32))?;
+                        if byte == 0 {
+                            reached_null = true;
+                        }
+                        byte
+                    };
+                    mem.write_u8(dst_addr.add(i as u32), b)?;
+                }
+                cpu.set_reg(Reg::R0, dst_addr.as_u32());
+            }
+            BionicFuncId::Strcat => {
+                let dst_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let src_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let mut dst_len = 0u32;
+                while mem.read_u8(dst_addr.add(dst_len))? != 0 {
+                    dst_len += 1;
+                }
+                let mut src_idx = 0u32;
+                loop {
+                    let b = mem.read_u8(src_addr.add(src_idx))?;
+                    mem.write_u8(dst_addr.add(dst_len + src_idx), b)?;
+                    if b == 0 {
+                        break;
+                    }
+                    src_idx += 1;
+                }
+                cpu.set_reg(Reg::R0, dst_addr.as_u32());
+            }
+            BionicFuncId::Strncat => {
+                let dst_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let src_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let n = cpu.reg(Reg::R2) as u32;
+                let mut dst_len = 0u32;
+                while mem.read_u8(dst_addr.add(dst_len))? != 0 {
+                    dst_len += 1;
+                }
+                let mut i = 0u32;
+                while i < n {
+                    let b = mem.read_u8(src_addr.add(i))?;
+                    if b == 0 {
+                        break;
+                    }
+                    mem.write_u8(dst_addr.add(dst_len + i), b)?;
+                    i += 1;
+                }
+                mem.write_u8(dst_addr.add(dst_len + i), 0)?;
+                cpu.set_reg(Reg::R0, dst_addr.as_u32());
+            }
+            BionicFuncId::Strchr => {
+                let s_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let c = (cpu.reg(Reg::R1) & 0xFF) as u8;
+                let mut idx = 0u32;
+                let mut found = 0u32;
+                loop {
+                    let b = mem.read_u8(s_addr.add(idx))?;
+                    if b == c {
+                        found = s_addr.add(idx).as_u32();
+                        break;
+                    }
+                    if b == 0 {
+                        break;
+                    }
+                    idx += 1;
+                }
+                cpu.set_reg(Reg::R0, found);
+            }
+            BionicFuncId::Strrchr => {
+                let s_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let c = (cpu.reg(Reg::R1) & 0xFF) as u8;
+                let mut idx = 0u32;
+                let mut last_found = 0u32;
+                loop {
+                    let b = mem.read_u8(s_addr.add(idx))?;
+                    if b == c {
+                        last_found = s_addr.add(idx).as_u32();
+                    }
+                    if b == 0 {
+                        break;
+                    }
+                    idx += 1;
+                }
+                cpu.set_reg(Reg::R0, last_found);
+            }
+            BionicFuncId::Strstr => {
+                let haystack_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let needle_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let haystack = Self::read_c_string(mem, haystack_addr)?;
+                let needle = Self::read_c_string(mem, needle_addr)?;
+                let res = if needle.is_empty() {
+                    haystack_addr.as_u32()
+                } else if let Some(pos) = haystack.find(&needle) {
+                    haystack_addr.add(pos as u32).as_u32()
+                } else {
+                    0
+                };
+                cpu.set_reg(Reg::R0, res);
+            }
+            BionicFuncId::Strtol => {
+                let s_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let endptr_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let base = cpu.reg(Reg::R2);
+                let s = Self::read_c_string(mem, s_addr)?;
+                let trimmed = s.trim_start();
+                let consumed_ws = s.len() - trimmed.len();
+                let (res, consumed) = parse_strtol(trimmed, base);
+                if endptr_addr.as_u32() != 0 {
+                    mem.write_u32(endptr_addr, s_addr.as_u32() + (consumed_ws + consumed) as u32)?;
+                }
+                cpu.set_reg(Reg::R0, res as u32);
+            }
+            BionicFuncId::Strtoul => {
+                let s_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let endptr_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let base = cpu.reg(Reg::R2);
+                let s = Self::read_c_string(mem, s_addr)?;
+                let trimmed = s.trim_start();
+                let consumed_ws = s.len() - trimmed.len();
+                let (res, consumed) = parse_strtoul(trimmed, base);
+                if endptr_addr.as_u32() != 0 {
+                    mem.write_u32(endptr_addr, s_addr.as_u32() + (consumed_ws + consumed) as u32)?;
+                }
+                cpu.set_reg(Reg::R0, res);
+            }
+            BionicFuncId::Atoi => {
+                let s_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let s = Self::read_c_string(mem, s_addr)?;
+                let val = s.trim().parse::<i32>().unwrap_or(0);
+                cpu.set_reg(Reg::R0, val as u32);
+            }
+            BionicFuncId::Snprintf => {
+                let buf_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let size = cpu.reg(Reg::R1) as usize;
+                let fmt_addr = GuestAddr::new(cpu.reg(Reg::R2));
+                let fmt = Self::read_c_string(mem, fmt_addr)?;
+                let r3 = cpu.reg(Reg::R3);
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let formatted = format_c_string_args(&fmt, &[r3], sp, mem)?;
+                let bytes = formatted.as_bytes();
+                let total_len = bytes.len();
+                if size > 0 && buf_addr.as_u32() != 0 {
+                    let to_copy = std::cmp::min(total_len, size - 1);
+                    mem.write_bytes(buf_addr, &bytes[..to_copy])?;
+                    mem.write_u8(buf_addr.add(to_copy as u32), 0)?;
+                }
+                cpu.set_reg(Reg::R0, total_len as u32);
+            }
+            BionicFuncId::Sprintf => {
+                let buf_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let fmt_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let fmt = Self::read_c_string(mem, fmt_addr)?;
+                let r2 = cpu.reg(Reg::R2);
+                let r3 = cpu.reg(Reg::R3);
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let formatted = format_c_string_args(&fmt, &[r2, r3], sp, mem)?;
+                let bytes = formatted.as_bytes();
+                let total_len = bytes.len();
+                if buf_addr.as_u32() != 0 {
+                    mem.write_bytes(buf_addr, bytes)?;
+                    mem.write_u8(buf_addr.add(total_len as u32), 0)?;
+                }
+                cpu.set_reg(Reg::R0, total_len as u32);
+            }
+            BionicFuncId::ClockGettime => {
+                let _clk_id = cpu.reg(Reg::R0);
+                let tp = GuestAddr::new(cpu.reg(Reg::R1));
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                if tp.as_u32() != 0 {
+                    mem.write_u32(tp, now.as_secs() as u32)?;
+                    mem.write_u32(tp.add(4), now.subsec_nanos())?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Gettimeofday => {
+                let tv = GuestAddr::new(cpu.reg(Reg::R0));
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                if tv.as_u32() != 0 {
+                    mem.write_u32(tv, now.as_secs() as u32)?;
+                    mem.write_u32(tv.add(4), now.subsec_micros())?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::CxaAtexit => {
+                let func = GuestAddr::new(cpu.reg(Reg::R0));
+                let arg = cpu.reg(Reg::R1);
+                let dso = GuestAddr::new(cpu.reg(Reg::R2));
+                self.atexit_handlers.push((func, arg, dso));
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::CxaFinalize => {
+                let dso = GuestAddr::new(cpu.reg(Reg::R0));
+                if dso.as_u32() == 0 {
+                    self.atexit_handlers.clear();
+                } else {
+                    self.atexit_handlers.retain(|(_, _, d)| *d != dso);
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::StackChkFail => {
+                self.stack_chk_failed = true;
+                self.logs.push(LogMessage {
+                    priority: 6,
+                    tag: "DEBUG".to_string(),
+                    text: "*** stack smashing detected ***: terminated".to_string(),
+                });
+                return Err(MemoryError::Unmapped(GuestAddr::new(0xDEAD_CAFE)));
+            }
             _ => {}
         }
 
@@ -1016,4 +1355,118 @@ impl SymbolResolver for BionicBridge {
         }
         self.dso_registry.resolve(name)
     }
+}
+
+fn format_c_string_args(
+    fmt: &str,
+    args: &[u32],
+    extra_sp: GuestAddr,
+    mem: &(impl Memory + ?Sized),
+) -> Result<String, MemoryError> {
+    let mut out = String::new();
+    let mut chars = fmt.chars().peekable();
+    let mut arg_idx = 0usize;
+
+    let next_arg = |idx: &mut usize| -> Result<u32, MemoryError> {
+        let val = if *idx < args.len() {
+            args[*idx]
+        } else {
+            let offset = (*idx - args.len()) as u32 * 4;
+            mem.read_u32(extra_sp.add(offset))?
+        };
+        *idx += 1;
+        Ok(val)
+    };
+
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            match chars.next() {
+                Some('%') => out.push('%'),
+                Some('s') => {
+                    let addr = GuestAddr::new(next_arg(&mut arg_idx)?);
+                    let s = BionicBridge::read_c_string(mem, addr)?;
+                    out.push_str(&s);
+                }
+                Some('d') | Some('i') => {
+                    let val = next_arg(&mut arg_idx)? as i32;
+                    out.push_str(&val.to_string());
+                }
+                Some('u') => {
+                    let val = next_arg(&mut arg_idx)?;
+                    out.push_str(&val.to_string());
+                }
+                Some('x') => {
+                    let val = next_arg(&mut arg_idx)?;
+                    out.push_str(&format!("{:x}", val));
+                }
+                Some('X') => {
+                    let val = next_arg(&mut arg_idx)?;
+                    out.push_str(&format!("{:X}", val));
+                }
+                Some('p') => {
+                    let val = next_arg(&mut arg_idx)?;
+                    out.push_str(&format!("0x{:08x}", val));
+                }
+                Some('c') => {
+                    let val = (next_arg(&mut arg_idx)? & 0xFF) as u8;
+                    out.push(val as char);
+                }
+                Some(other) => {
+                    out.push('%');
+                    out.push(other);
+                }
+                None => out.push('%'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Ok(out)
+}
+
+fn parse_strtol(s: &str, base: u32) -> (i32, usize) {
+    let s_bytes = s.as_bytes();
+    if s_bytes.is_empty() {
+        return (0, 0);
+    }
+    let (is_neg, start_idx) = match s_bytes[0] {
+        b'-' => (true, 1),
+        b'+' => (false, 1),
+        _ => (false, 0),
+    };
+    let remaining = &s[start_idx..];
+    let radix = if base == 0 {
+        if remaining.starts_with("0x") || remaining.starts_with("0X") {
+            16
+        } else if remaining.starts_with('0') && remaining.len() > 1 {
+            8
+        } else {
+            10
+        }
+    } else {
+        base
+    };
+    let to_parse = if radix == 16 && (remaining.starts_with("0x") || remaining.starts_with("0X")) {
+        &remaining[2..]
+    } else {
+        remaining
+    };
+    let mut consumed = 0;
+    for ch in to_parse.chars() {
+        if ch.is_digit(radix) {
+            consumed += 1;
+        } else {
+            break;
+        }
+    }
+    let full_consumed = (s.len() - to_parse.len()) + consumed;
+    let num_slice = &to_parse[..consumed];
+    let val = i64::from_str_radix(num_slice, radix).unwrap_or(0);
+    let final_val = if is_neg { -val } else { val };
+    (final_val as i32, full_consumed)
+}
+
+fn parse_strtoul(s: &str, base: u32) -> (u32, usize) {
+    let (val, consumed) = parse_strtol(s, base);
+    (val as u32, consumed)
 }
