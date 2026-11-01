@@ -1,10 +1,13 @@
+pub mod audio;
 pub mod bionic;
 pub mod gles;
 pub mod host;
 pub mod jni;
 pub mod jni_thunk;
 pub mod trampoline;
+pub mod vulkan;
 
+pub use audio::{AudioBridge, AudioBuffer, SL_PLAYSTATE_PAUSED, SL_PLAYSTATE_PLAYING, SL_PLAYSTATE_STOPPED};
 pub use bionic::{BionicBridge, BionicFuncId, LogMessage, ThreadDescriptor};
 pub use gles::{
     DrawCallRecord, GlesBridge, GlesFuncId, GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT,
@@ -18,4 +21,8 @@ pub use jni::{
 pub use jni_thunk::{JniThunk, JniThunkGenerator};
 pub use trampoline::{
     invoke_guest, invoke_guest_full, invoke_jni_method, invoke_jni_onload, SENTINEL_RETURN_ADDR,
+};
+pub use vulkan::{
+    VkApplicationInfo32, VkDeviceCreateInfo32, VkInstanceCreateInfo32, VkSubmitInfo32, VulkanBridge,
+    VK_ERROR_INITIALIZATION_FAILED, VK_SUCCESS,
 };
