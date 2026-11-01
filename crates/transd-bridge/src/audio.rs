@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use transd_core::{CpuState, GuestAddr, Memory, MemoryError, Reg};
 use transd_elf::SymbolResolver;
 
-use crate::audio_resample::AudioResampler;
+use crate::audio_resample::{downmix_to_stereo, AudioResampler};
 use crate::audio_ring::AudioRingBuffer;
 
 pub const SL_RESULT_SUCCESS: u32 = 0;
@@ -128,6 +128,7 @@ pub struct AudioBridge {
     pub volume_millibels: i32,
     pub ring_buffer: AudioRingBuffer<i16>,
     pub resampler: AudioResampler,
+    pub target_latency_ms: f32,
     pub stub_base: GuestAddr,
     pub symbol_table: HashMap<String, GuestAddr>,
 }
@@ -149,6 +150,7 @@ impl AudioBridge {
             volume_millibels: 0,
             ring_buffer: AudioRingBuffer::new(65536),
             resampler: AudioResampler::new(44100, 48000),
+            target_latency_ms: 10.0,
             stub_base,
             symbol_table: HashMap::new(),
         };
@@ -227,12 +229,21 @@ impl AudioBridge {
             pcm_samples.push(sample);
         }
 
+        // If format channels > 2 (e.g. Quad, 5.1, 7.1), downmix to stereo first
+        let stereo_samples = if self.format.channels > 2 {
+            let mut dm = Vec::with_capacity(pcm_samples.len() / (self.format.channels as usize) * 2);
+            downmix_to_stereo(self.format.channels, &pcm_samples, &mut dm);
+            dm
+        } else {
+            pcm_samples
+        };
+
         // Resample / expand to 48 kHz stereo
         let mut resampled = Vec::new();
         if self.format.channels == 1 {
-            self.resampler.resample_mono_to_stereo(&pcm_samples, &mut resampled);
+            self.resampler.resample_mono_to_stereo(&stereo_samples, &mut resampled);
         } else {
-            self.resampler.resample_stereo(&pcm_samples, &mut resampled);
+            self.resampler.resample_stereo(&stereo_samples, &mut resampled);
         }
 
         // Apply volume scaling if not unity
@@ -263,11 +274,19 @@ impl AudioBridge {
             return 0;
         }
 
+        let stereo_samples = if self.format.channels > 2 {
+            let mut dm = Vec::with_capacity(samples.len() / (self.format.channels as usize) * 2);
+            downmix_to_stereo(self.format.channels, samples, &mut dm);
+            dm
+        } else {
+            samples.to_vec()
+        };
+
         let mut resampled = Vec::new();
         if self.format.channels == 1 {
-            self.resampler.resample_mono_to_stereo(samples, &mut resampled);
+            self.resampler.resample_mono_to_stereo(&stereo_samples, &mut resampled);
         } else {
-            self.resampler.resample_stereo(samples, &mut resampled);
+            self.resampler.resample_stereo(&stereo_samples, &mut resampled);
         }
 
         let vol = self.volume_multiplier();
@@ -284,12 +303,30 @@ impl AudioBridge {
     /// Reads host stereo frames (48 kHz) from the lock-free ring buffer into `out`.
     /// `out` format: [L0, R0, L1, R1, ...]
     /// Returns the number of frames actually read (frames = samples / 2).
-    /// If fewer samples than requested are available, missing samples are filled with silence (0).
+    /// If fewer samples than requested are available, underrun concealment fade-out is applied.
     pub fn read_host_frames(&mut self, out: &mut [i16]) -> usize {
-        let samples_read = self.ring_buffer.pop_slice(out);
+        let samples_read = self.ring_buffer.pop_slice_with_concealment(out);
         self.total_bytes_played += (samples_read * 2) as u64;
         samples_read / 2
     }
+
+    /// Sets target audio playback latency in milliseconds
+    pub fn set_target_latency_ms(&mut self, ms: f32) {
+        self.target_latency_ms = ms.clamp(1.0, 100.0);
+    }
+
+    /// Current audio latency in milliseconds at host 48,000 Hz stereo output
+    #[inline]
+    pub fn current_latency_ms(&self) -> f32 {
+        self.ring_buffer.latency_ms(48000, 2)
+    }
+
+    /// Ratio of buffer capacity currently occupied [0.0 .. 1.0]
+    #[inline]
+    pub fn buffer_watermark_ratio(&self) -> f32 {
+        self.ring_buffer.watermark_fill_ratio()
+    }
+
 
     /// Consumes the next buffer in queue (forwarding to host audio hardware)
     pub fn consume_next_buffer(&mut self) -> Option<AudioBuffer> {
@@ -322,6 +359,7 @@ impl AudioBridge {
     pub fn overrun_count(&self) -> u64 {
         self.ring_buffer.overrun_count()
     }
+
 
     /// Number of available stereo frames in ring buffer
     #[inline]

@@ -77,4 +77,14 @@ fn test_android_jni_audio_exports() {
 
     let overruns = unsafe { Java_com_transd_loader_TransdEngine_nativeGetAudioOverruns(env, clazz) };
     assert_eq!(overruns, 0);
+
+    // 5. Query and set audio latency metrics via JNI
+    let initial_lat = unsafe { Java_com_transd_loader_TransdEngine_nativeGetAudioLatencyMs(env, clazz) };
+    assert_eq!(initial_lat, 0.0);
+
+    let set_target_res = unsafe { Java_com_transd_loader_TransdEngine_nativeSetTargetAudioLatencyMs(env, clazz, 8.0) };
+    assert_eq!(set_target_res, JNI_OK);
+
+    let wm = unsafe { Java_com_transd_loader_TransdEngine_nativeGetAudioWatermarkRatio(env, clazz) };
+    assert_eq!(wm, 0.0);
 }

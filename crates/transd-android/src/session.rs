@@ -285,6 +285,21 @@ impl TransdSession {
         self.audio.overrun_count()
     }
 
+    /// Returns current audio playback latency in milliseconds at 48kHz stereo
+    pub fn get_audio_latency_ms(&self) -> f32 {
+        self.audio.current_latency_ms()
+    }
+
+    /// Sets target audio latency in milliseconds
+    pub fn set_target_audio_latency_ms(&mut self, ms: f32) {
+        self.audio.set_target_latency_ms(ms);
+    }
+
+    /// Returns audio ring buffer fill ratio [0.0 .. 1.0]
+    pub fn get_audio_watermark_ratio(&self) -> f32 {
+        self.audio.buffer_watermark_ratio()
+    }
+
     /// Sets directory for reading and writing persistent AOT translation caches
     pub fn set_aot_cache_dir(&mut self, dir: impl Into<std::path::PathBuf>) {
         self.aot_cache_dir = Some(dir.into());

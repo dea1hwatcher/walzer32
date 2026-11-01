@@ -432,6 +432,62 @@ pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeGetAudioOverr
     }
 }
 
+/// JNI Export: Get Current Audio Latency in milliseconds
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeGetAudioLatencyMs(
+    _env: JNIEnv,
+    _clazz: JClass,
+) -> f32 {
+    let guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return 0.0,
+    };
+
+    if let Some(session) = guard.as_ref() {
+        session.get_audio_latency_ms()
+    } else {
+        0.0
+    }
+}
+
+/// JNI Export: Set Target Audio Latency in milliseconds
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeSetTargetAudioLatencyMs(
+    _env: JNIEnv,
+    _clazz: JClass,
+    latency_ms: f32,
+) -> JInt {
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return JNI_ERR_GENERIC,
+    };
+
+    if let Some(session) = guard.as_mut() {
+        session.set_target_audio_latency_ms(latency_ms);
+        JNI_OK
+    } else {
+        JNI_ERR_GENERIC
+    }
+}
+
+/// JNI Export: Get Audio Ring Buffer Watermark Ratio (0.0 .. 1.0)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeGetAudioWatermarkRatio(
+    _env: JNIEnv,
+    _clazz: JClass,
+) -> f32 {
+    let guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(_) => return 0.0,
+    };
+
+    if let Some(session) = guard.as_ref() {
+        session.get_audio_watermark_ratio()
+    } else {
+        0.0
+    }
+}
+
 
 /// JNI Export: Set AOT Cache Directory
 #[unsafe(no_mangle)]

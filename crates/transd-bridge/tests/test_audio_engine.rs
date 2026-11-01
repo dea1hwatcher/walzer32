@@ -249,3 +249,62 @@ fn test_audio_underrun_and_silence_fill() {
     // Underrun counter incremented
     assert_eq!(audio.underrun_count(), 1);
 }
+
+#[test]
+fn test_audio_multichannel_5_1_downmixing() {
+    let mut mem = FlatMemory::new(GuestAddr::new(0x1000), 0x20000);
+    let mut audio = AudioBridge::new();
+    audio.set_format(AudioFormat {
+        channels: 6, // 5.1 Surround
+        sample_rate_hz: 48000,
+        bits_per_sample: 16,
+    });
+
+    // 100 frames of 5.1 surround: L=1000, R=2000, C=500, LFE=400, Ls=300, Rs=600
+    let mut raw_bytes = Vec::new();
+    for _ in 0..100 {
+        let frame: [i16; 6] = [1000, 2000, 500, 400, 300, 600];
+        for s in frame {
+            raw_bytes.extend_from_slice(&s.to_le_bytes());
+        }
+    }
+    let pcm_addr = GuestAddr::new(0x3000);
+    mem.write_bytes(pcm_addr, &raw_bytes).unwrap();
+
+    let res = audio.enqueue_buffer(&mem, pcm_addr, raw_bytes.len()).unwrap();
+    assert_eq!(res, SL_RESULT_SUCCESS);
+
+    // Should have 100 frames of stereo
+    assert_eq!(audio.available_frames(), 100);
+
+    let mut out = vec![0i16; 200];
+    let read = audio.read_host_frames(&mut out);
+    assert_eq!(read, 100);
+
+    // Verify ITU downmix values: L = ~1765, R = ~2977
+    assert!((out[0] - 1765).abs() <= 2);
+    assert!((out[1] - 2977).abs() <= 2);
+}
+
+#[test]
+fn test_audio_latency_and_watermark_metrics() {
+    let mut audio = AudioBridge::new();
+    audio.set_format(AudioFormat {
+        sample_rate_hz: 48000,
+        channels: 2,
+        bits_per_sample: 16,
+    });
+    audio.set_target_latency_ms(5.0);
+    assert_eq!(audio.target_latency_ms, 5.0);
+
+    // Enqueue 240 stereo frames at 48kHz (480 samples) -> 5.0 ms latency
+    let pcm = vec![100i16; 480];
+    audio.enqueue_pcm_samples(&pcm);
+
+    let lat = audio.current_latency_ms();
+    assert!((lat - 5.0).abs() < 0.05);
+
+    let wm = audio.buffer_watermark_ratio();
+    assert!(wm > 0.0);
+}
+
