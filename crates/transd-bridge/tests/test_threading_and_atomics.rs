@@ -1,4 +1,5 @@
 use transd_core::{FlatMemory, GuestAddr, Memory, SharedMemory};
+use transd_elf::SymbolResolver;
 use transd_rt::DbtEngine;
 use transd_bridge::{
     invoke_guest, BionicBridge, JniBridge,
@@ -263,4 +264,43 @@ fn test_shared_memory_concurrent_access() {
 
     let updated = mem.read_u32(addr).unwrap();
     assert_eq!(updated, 0x9999_8888);
+}
+
+#[test]
+fn test_aeabi_read_tp() {
+    let mut mem = FlatMemory::new(GuestAddr::new(0x7000_0000), 0x200_000);
+    let mut bionic = BionicBridge::new(GuestAddr::new(0x7000_0000), GuestAddr::new(0x7010_0000), 0x100_000);
+    bionic.install_stubs(&mut mem).unwrap();
+    let mut jni = JniBridge::new(GuestAddr::new(0x7005_0000));
+    jni.install(&mut mem).unwrap();
+    let mut engine = DbtEngine::new(mem);
+
+    // Set thread pointer in CPU
+    let expected_tp = 0x7015_8000;
+    engine.cpu.tls_ptr = expected_tp;
+
+    // Resolve __aeabi_read_tp address
+    let read_tp_addr = bionic.resolve("__aeabi_read_tp").expect("__aeabi_read_tp must be defined");
+
+    // Guest code calling __aeabi_read_tp:
+    // PUSH {lr}
+    // BLX r1
+    // POP {lr}
+    // BX lr
+    let code_addr = GuestAddr::new(0x7002_0000);
+    let insts = [
+        0xE52DE004, // STR lr, [sp, #-4]!
+        0xE12FFF31, // BLX r1
+        0xE49DE004, // LDR lr, [sp], #4
+        0xE12FFF1E, // BX lr
+    ];
+    for (i, &word) in insts.iter().enumerate() {
+        engine.mem.write_u32(code_addr.add((i * 4) as u32), word).unwrap();
+    }
+    engine.cpu.set_reg(transd_core::Reg::R1, read_tp_addr.as_u32());
+    engine.cpu.set_sp(0x701F_F000);
+
+    let res = invoke_guest(&mut engine, &mut bionic, &mut jni, code_addr, &[]).unwrap();
+    assert_eq!(res, expected_tp);
+    assert_eq!(engine.cpu.reg(transd_core::Reg::R0), expected_tp);
 }

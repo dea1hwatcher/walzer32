@@ -72,9 +72,17 @@ pub const R_ARM_NONE: u8 = 0;
 pub const R_ARM_PC24: u8 = 1;
 pub const R_ARM_ABS32: u8 = 2;
 pub const R_ARM_REL32: u8 = 3;
+pub const R_ARM_TLS_DTPMOD32: u8 = 17;
+pub const R_ARM_TLS_DTPOFF32: u8 = 18;
+pub const R_ARM_TLS_TPOFF32: u8 = 19;
 pub const R_ARM_GLOB_DAT: u8 = 21;
 pub const R_ARM_JUMP_SLOT: u8 = 22;
 pub const R_ARM_RELATIVE: u8 = 23;
+pub const R_ARM_TLS_GD32: u8 = 104;
+pub const R_ARM_TLS_LDM32: u8 = 105;
+pub const R_ARM_TLS_LDO32: u8 = 106;
+pub const R_ARM_TLS_IE32: u8 = 107;
+pub const R_ARM_TLS_LE32: u8 = 108;
 
 // Symbol types & bindings
 pub const STB_LOCAL: u8 = 0;

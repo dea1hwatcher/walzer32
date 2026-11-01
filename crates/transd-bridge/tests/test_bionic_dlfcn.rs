@@ -49,6 +49,7 @@ fn test_bionic_dlopen_and_dlsym() {
         fini_array: Vec::new(),
         symbols: syms,
         symbol_details: details,
+        tls_template: None,
     };
     let lib_handle = bridge.register_library(lib);
 

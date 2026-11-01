@@ -109,6 +109,16 @@ pub struct SymbolInfo {
     pub is_default_version: bool,
 }
 
+/// Thread-Local Storage (TLS) template information for a loaded library
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsTemplateInfo {
+    pub template_addr: GuestAddr,
+    pub filesz: u32,
+    pub memsz: u32,
+    pub align: u32,
+    pub module_id: u32,
+}
+
 /// Information about a successfully loaded shared object (.so)
 #[derive(Debug, Clone)]
 pub struct LoadedLibrary {
@@ -132,9 +142,35 @@ pub struct LoadedLibrary {
     pub symbols: HashMap<String, GuestAddr>,
     /// Detailed exported symbols map (Symbol Name -> List of SymbolInfo)
     pub symbol_details: HashMap<String, Vec<SymbolInfo>>,
+    /// Thread-Local Storage (TLS) template, if this library contains a PT_TLS segment
+    pub tls_template: Option<TlsTemplateInfo>,
 }
 
 impl LoadedLibrary {
+    /// Instantiates a thread's TLS block from this library's TLS template.
+    /// Writes initialized template data and zeroes the remainder up to `memsz`.
+    pub fn instantiate_tls(
+        &self,
+        target_addr: GuestAddr,
+        mem: &mut impl Memory,
+    ) -> Result<usize, MemoryError> {
+        if let Some(tls) = &self.tls_template {
+            if tls.filesz > 0 {
+                let mut template_data = vec![0u8; tls.filesz as usize];
+                mem.read_bytes(tls.template_addr, &mut template_data)?;
+                mem.write_bytes(target_addr, &template_data)?;
+            }
+            if tls.memsz > tls.filesz {
+                let bss_len = (tls.memsz - tls.filesz) as usize;
+                let zeroes = vec![0u8; bss_len];
+                mem.write_bytes(target_addr.add(tls.filesz), &zeroes)?;
+            }
+            Ok(tls.memsz as usize)
+        } else {
+            Ok(0)
+        }
+    }
+
     /// Finds the address of an exported symbol (e.g. "JNI_OnLoad")
     pub fn find_symbol(&self, name: &str) -> Option<GuestAddr> {
         if let Some(&addr) = self.symbols.get(name) {
@@ -334,6 +370,21 @@ impl ElfLoader {
                 let bss_target = seg_target.add(ph.p_filesz);
                 let zeroes = vec![0u8; bss_size];
                 mem.write_bytes(bss_target, &zeroes)?;
+            }
+        }
+
+        // 2b. Check for PT_TLS segment
+        let mut tls_template = None;
+        for ph in &parser.program_headers {
+            if ph.p_type == PT_TLS {
+                tls_template = Some(TlsTemplateInfo {
+                    template_addr: load_base.add(ph.p_vaddr),
+                    filesz: ph.p_filesz,
+                    memsz: ph.p_memsz,
+                    align: ph.p_align.max(4),
+                    module_id: 1,
+                });
+                break;
             }
         }
 
@@ -589,6 +640,19 @@ impl ElfLoader {
             SymbolBinding::Global
         };
 
+        // Helper to read symbol value (st_value) by index
+        let get_symbol_val_by_idx = |idx: u32| -> u32 {
+            if let Some(sym_va) = symtab_vaddr
+                && let Some(sym_file_off) = parser.vaddr_to_offset(sym_va)
+            {
+                let off = sym_file_off + (idx as usize) * syment;
+                if off + syment <= data.len() {
+                    return LittleEndian::read_u32(&data[off + 4..off + 8]);
+                }
+            }
+            0
+        };
+
         // 6. Apply Relocations (both DT_REL and DT_JMPREL)
         let mut rel_tables = Vec::new();
         if let (Some(va), sz) = (rel_vaddr, relsz) {
@@ -651,6 +715,23 @@ impl ElfLoader {
                             }
                         }
                     }
+                    R_ARM_TLS_DTPMOD32 => {
+                        let mod_id = tls_template.as_ref().map(|t| t.module_id).unwrap_or(1);
+                        mem.write_u32(target_addr, mod_id)?;
+                    }
+                    R_ARM_TLS_DTPOFF32 => {
+                        let sym_val = get_symbol_val_by_idx(sym_idx);
+                        mem.write_u32(target_addr, sym_val)?;
+                    }
+                    R_ARM_TLS_TPOFF32 | R_ARM_TLS_IE32 => {
+                        let sym_val = get_symbol_val_by_idx(sym_idx);
+                        mem.write_u32(target_addr, sym_val)?;
+                    }
+                    R_ARM_TLS_LE32 => {
+                        let sym_val = get_symbol_val_by_idx(sym_idx);
+                        let addend = mem.read_u32(target_addr)?;
+                        mem.write_u32(target_addr, sym_val.wrapping_add(addend))?;
+                    }
                     _ => {}
                 }
             }
@@ -694,6 +775,7 @@ impl ElfLoader {
             fini_array,
             symbols,
             symbol_details,
+            tls_template,
         })
     }
 }

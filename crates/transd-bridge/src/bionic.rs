@@ -30,6 +30,7 @@ pub enum BionicFuncId {
     PthreadMutexUnlock = 25,
     PthreadMutexDestroy = 26,
     PthreadOnce = 27,
+    AeabiReadTp = 28,
 
     // Memory protection
     Mprotect = 30,
@@ -91,6 +92,7 @@ impl BionicFuncId {
             25 => Some(Self::PthreadMutexUnlock),
             26 => Some(Self::PthreadMutexDestroy),
             27 => Some(Self::PthreadOnce),
+            28 => Some(Self::AeabiReadTp),
             30 => Some(Self::Mprotect),
             40 => Some(Self::Sinf),
             41 => Some(Self::Cosf),
@@ -206,6 +208,7 @@ impl BionicBridge {
             ("pthread_mutex_unlock", BionicFuncId::PthreadMutexUnlock),
             ("pthread_mutex_destroy", BionicFuncId::PthreadMutexDestroy),
             ("pthread_once", BionicFuncId::PthreadOnce),
+            ("__aeabi_read_tp", BionicFuncId::AeabiReadTp),
             ("mprotect", BionicFuncId::Mprotect),
 
             // libm math intrinsics (Single-precision f32)
@@ -271,6 +274,7 @@ impl BionicBridge {
             BionicFuncId::PthreadMutexUnlock,
             BionicFuncId::PthreadMutexDestroy,
             BionicFuncId::PthreadOnce,
+            BionicFuncId::AeabiReadTp,
             BionicFuncId::Mprotect,
             BionicFuncId::Sinf,
             BionicFuncId::Cosf,
@@ -515,6 +519,9 @@ impl BionicBridge {
                     mem.write_u32(once_ptr, 1)?;
                 }
                 cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AeabiReadTp => {
+                cpu.set_reg(Reg::R0, cpu.tls_ptr);
             }
             BionicFuncId::Mprotect => {
                 let addr = GuestAddr::new(cpu.reg(Reg::R0));

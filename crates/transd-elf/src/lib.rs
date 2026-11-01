@@ -5,6 +5,6 @@ pub mod parser;
 pub use header::*;
 pub use loader::{
     CompositeResolver, DsoRegistry, ElfLoader, LoadedLibrary, LoaderError, NullResolver,
-    SymbolBinding, SymbolInfo, SymbolResolver,
+    SymbolBinding, SymbolInfo, SymbolResolver, TlsTemplateInfo,
 };
 pub use parser::{ElfError, ElfParser};
