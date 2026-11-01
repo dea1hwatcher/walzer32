@@ -3,7 +3,7 @@ use transd_core::{
     OFFSET_VFP,
 };
 use transd_decoder::{
-    AddrMode, AddrOffset, AluOp, ArmInst, BitFieldOp, BlockAddrMode, ByteRevOp, DspMulOp, ExtendOp, MemSize, MulOp,
+    AddrMode, AddrOffset, AluOp, ArmInst, BitFieldOp, BlockAddrMode, ByteRevOp, DspMulOp, ExtendOp, HighMulOp, MemSize, MulOp,
     NeonCvtOp, NeonOp, NeonPermuteOp, NeonRevOp, NeonSize, NeonWriteback, Op, Operand2, PkhOp, ShiftAmount,
     ShiftType, VfpCvtOp, VfpOp, VfpReg, VfpSize,
 };
@@ -636,6 +636,42 @@ impl A64Compiler {
                         asm.sub_w_reg(dst_reg, A64Reg::X12, A64Reg::X13);
                         let rn_reg = load_guest_reg(asm, A64Reg::X14, *rn);
                         asm.add_w_reg(dst_reg, dst_reg, rn_reg);
+                    }
+                }
+
+                if pinned_reg(*rd).is_none() {
+                    let rd_offset = (rd.index() * 4) as u32;
+                    asm.str_w_imm(dst_reg, A64Reg::X0, rd_offset);
+                }
+            }
+            Op::HighMul { op, rd, rn, rm, ra } => {
+                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                let rm_reg = load_guest_reg(asm, A64Reg::X10, *rm);
+                let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
+
+                asm.smull_x(A64Reg::X12, rn_reg, rm_reg);
+
+                let round = match op {
+                    HighMulOp::Smmul { round } | HighMulOp::Smmla { round } | HighMulOp::Smmls { round } => *round,
+                };
+                if round {
+                    asm.mov_imm64(A64Reg::X13, 0x8000_0000);
+                    asm.add_x_reg(A64Reg::X12, A64Reg::X12, A64Reg::X13);
+                }
+
+                asm.lsr_x_imm(A64Reg::X12, A64Reg::X12, 32);
+
+                match op {
+                    HighMulOp::Smmul { .. } => {
+                        asm.mov_w_reg(dst_reg, A64Reg::X12);
+                    }
+                    HighMulOp::Smmla { .. } => {
+                        let ra_reg = ra.map(|r| load_guest_reg(asm, A64Reg::X13, r)).unwrap_or(A64Reg::SP);
+                        asm.add_w_reg(dst_reg, ra_reg, A64Reg::X12);
+                    }
+                    HighMulOp::Smmls { .. } => {
+                        let ra_reg = ra.map(|r| load_guest_reg(asm, A64Reg::X13, r)).unwrap_or(A64Reg::SP);
+                        asm.sub_w_reg(dst_reg, ra_reg, A64Reg::X12);
                     }
                 }
 

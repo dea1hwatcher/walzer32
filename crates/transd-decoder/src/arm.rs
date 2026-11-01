@@ -937,6 +937,23 @@ impl ArmDecoder {
                 }
             }
 
+            // Saturated Arithmetic: QADD, QSUB, QDADD, QDSUB
+            // cond 0001 0xx0 Rn Rd 0000 0101 Rm
+            if (raw & 0x0F90_0FF0) == 0x0100_0050 {
+                let op_bits = (raw >> 21) & 0x3;
+                let rn = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+                let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+                let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+                let op = match op_bits {
+                    0b00 => CoreSatOp::Qadd,
+                    0b01 => CoreSatOp::Qsub,
+                    0b10 => CoreSatOp::Qdadd,
+                    0b11 => CoreSatOp::Qdsub,
+                    _ => unreachable!(),
+                };
+                return Op::CoreSat { op, rd, rm, rn };
+            }
+
             // 16-bit DSP Multiplies (SMULxy, SMLAxy, SMULWy, SMLAWy)
             // cond 0001 0xx0 Rd Rn Rs 1xx0 Rm
             if (raw & 0x0F90_0090) == 0x0100_0080 {
@@ -1336,6 +1353,62 @@ impl ArmDecoder {
                 (true, true) => DspMulOp::Smlsd { swap },
             };
             return Op::DspMul { op, rd, rn, rm, rs };
+        }
+
+        // SSAT / USAT
+        // SSAT: cond 0110 101 sat5 Rd imm5 sh 01 Rm (raw & 0x0FA0_0070 == 0x06A0_0010)
+        // USAT: cond 0110 111 sat5 Rd imm5 sh 01 Rm (raw & 0x0FA0_0070 == 0x06E0_0010)
+        if (raw & 0x0F20_0030) == 0x0620_0010 {
+            let is_unsigned = ((raw >> 22) & 1) != 0;
+            let sat5 = ((raw >> 16) & 0x1F) as u8;
+            let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let imm5 = ((raw >> 7) & 0x1F) as u8;
+            let sh = ((raw >> 6) & 1) != 0;
+            let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            let shift_type = if sh { ShiftType::Asr } else { ShiftType::Lsl };
+            let op = if is_unsigned {
+                BitSatOp::Usat { sat_imm: sat5, shift_type, shift_imm: imm5 }
+            } else {
+                BitSatOp::Ssat { sat_imm: sat5 + 1, shift_type, shift_imm: imm5 }
+            };
+            return Op::BitSat { op, rd, rn: rm };
+        }
+
+        // SSAT16 / USAT16
+        // SSAT16: cond 0110 1010 sat4 Rd 1111 0011 Rm (raw & 0x0FB0_0FF0 == 0x06A0_0F30)
+        // USAT16: cond 0110 1110 sat4 Rd 1111 0011 Rm (raw & 0x0FB0_0FF0 == 0x06E0_0F30)
+        if (raw & 0x0F20_0FF0) == 0x0620_0F30 {
+            let is_unsigned = ((raw >> 22) & 1) != 0;
+            let sat4 = ((raw >> 16) & 0xF) as u8;
+            let rd = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+            let op = if is_unsigned {
+                BitSatOp::Usat16 { sat_imm: sat4 }
+            } else {
+                BitSatOp::Ssat16 { sat_imm: sat4 + 1 }
+            };
+            return Op::BitSat { op, rd, rn: rm };
+        }
+
+        // SMMUL / SMMLA / SMMLS
+        // SMMUL/SMMLA: cond 0111 0101 Rd Ra Rm 000 R 0001 Rn (raw & 0x0FF0_00D0 == 0x0750_0010)
+        // SMMLS:       cond 0111 0101 Rd Ra Rm 110 R 0001 Rn (raw & 0x0FF0_00D0 == 0x0750_00D0)
+        if (raw & 0x0FF0_0010) == 0x0750_0010 {
+            let is_sub = ((raw >> 6) & 0x3) == 0x3;
+            let round = ((raw >> 5) & 1) != 0;
+            let rd = Reg::from_u8(((raw >> 16) & 0xF) as u8).unwrap_or(Reg::R0);
+            let ra_raw = ((raw >> 12) & 0xF) as u8;
+            let rm = Reg::from_u8(((raw >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rn = Reg::from_u8((raw & 0xF) as u8).unwrap_or(Reg::R0);
+
+            let (op, ra) = if is_sub {
+                (HighMulOp::Smmls { round }, Some(Reg::from_u8(ra_raw).unwrap_or(Reg::R0)))
+            } else if ra_raw == 15 {
+                (HighMulOp::Smmul { round }, None)
+            } else {
+                (HighMulOp::Smmla { round }, Some(Reg::from_u8(ra_raw).unwrap_or(Reg::R0)))
+            };
+            return Op::HighMul { op, rd, rn, rm, ra };
         }
 
         let is_reg_offset = ((raw >> 25) & 1) != 0;
@@ -2781,5 +2854,95 @@ mod tests {
                 rotation: 8,
             }
         );
+    }
+    #[test]
+    fn test_decode_arm_core_saturation_and_smmul() {
+        // QADD r1, r3, r2 -> 0xE102_1053
+        let inst = ArmDecoder::decode(0xE102_1053);
+        assert_eq!(inst.op, Op::CoreSat { op: CoreSatOp::Qadd, rd: Reg::R1, rm: Reg::R3, rn: Reg::R2 });
+
+        // QSUB r1, r3, r2 -> 0xE122_1053
+        let inst = ArmDecoder::decode(0xE122_1053);
+        assert_eq!(inst.op, Op::CoreSat { op: CoreSatOp::Qsub, rd: Reg::R1, rm: Reg::R3, rn: Reg::R2 });
+
+        // QDADD r1, r3, r2 -> 0xE142_1053
+        let inst = ArmDecoder::decode(0xE142_1053);
+        assert_eq!(inst.op, Op::CoreSat { op: CoreSatOp::Qdadd, rd: Reg::R1, rm: Reg::R3, rn: Reg::R2 });
+
+        // QDSUB r1, r3, r2 -> 0xE162_1053
+        let inst = ArmDecoder::decode(0xE162_1053);
+        assert_eq!(inst.op, Op::CoreSat { op: CoreSatOp::Qdsub, rd: Reg::R1, rm: Reg::R3, rn: Reg::R2 });
+
+        // SSAT r1, #16, r2, lsl #2 -> 0xE6AF_1112
+        let inst = ArmDecoder::decode(0xE6AF_1112);
+        assert_eq!(inst.op, Op::BitSat {
+            op: BitSatOp::Ssat { sat_imm: 16, shift_type: ShiftType::Lsl, shift_imm: 2 },
+            rd: Reg::R1,
+            rn: Reg::R2,
+        });
+
+        // USAT r1, #16, r2, asr #3 -> 0xE6F0_11D2
+        let inst = ArmDecoder::decode(0xE6F0_11D2);
+        assert_eq!(inst.op, Op::BitSat {
+            op: BitSatOp::Usat { sat_imm: 16, shift_type: ShiftType::Asr, shift_imm: 3 },
+            rd: Reg::R1,
+            rn: Reg::R2,
+        });
+
+        // SSAT16 r1, #8, r2 -> 0xE6A7_1F32
+        let inst = ArmDecoder::decode(0xE6A7_1F32);
+        assert_eq!(inst.op, Op::BitSat {
+            op: BitSatOp::Ssat16 { sat_imm: 8 },
+            rd: Reg::R1,
+            rn: Reg::R2,
+        });
+
+        // USAT16 r1, #8, r2 -> 0xE6E8_1F32
+        let inst = ArmDecoder::decode(0xE6E8_1F32);
+        assert_eq!(inst.op, Op::BitSat {
+            op: BitSatOp::Usat16 { sat_imm: 8 },
+            rd: Reg::R1,
+            rn: Reg::R2,
+        });
+
+        // SMMUL r1, r2, r3 -> 0xE751_F312
+        let inst = ArmDecoder::decode(0xE751_F312);
+        assert_eq!(inst.op, Op::HighMul {
+            op: HighMulOp::Smmul { round: false },
+            rd: Reg::R1,
+            rn: Reg::R2,
+            rm: Reg::R3,
+            ra: None,
+        });
+
+        // SMMULR r1, r2, r3 -> 0xE751_F332
+        let inst = ArmDecoder::decode(0xE751_F332);
+        assert_eq!(inst.op, Op::HighMul {
+            op: HighMulOp::Smmul { round: true },
+            rd: Reg::R1,
+            rn: Reg::R2,
+            rm: Reg::R3,
+            ra: None,
+        });
+
+        // SMMLA r1, r2, r3, r4 -> 0xE751_4312
+        let inst = ArmDecoder::decode(0xE751_4312);
+        assert_eq!(inst.op, Op::HighMul {
+            op: HighMulOp::Smmla { round: false },
+            rd: Reg::R1,
+            rn: Reg::R2,
+            rm: Reg::R3,
+            ra: Some(Reg::R4),
+        });
+
+        // SMMLS r1, r2, r3, r4 -> 0xE751_43D2
+        let inst = ArmDecoder::decode(0xE751_43D2);
+        assert_eq!(inst.op, Op::HighMul {
+            op: HighMulOp::Smmls { round: false },
+            rd: Reg::R1,
+            rn: Reg::R2,
+            rm: Reg::R3,
+            ra: Some(Reg::R4),
+        });
     }
 }

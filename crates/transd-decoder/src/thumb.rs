@@ -799,6 +799,37 @@ impl ThumbDecoder {
             return ArmInst::new(Cond::AL, Op::BitField { op, rd, rn, lsb, width }, raw);
         }
 
+        // Thumb-32 SSAT16 / USAT16: 1111 0011 0010 Rn / 1111 0011 1010 Rn
+        if ((hw1 & 0xFFF0) == 0xF320 || (hw1 & 0xFFF0) == 0xF3A0) && (hw2 & 0x70F0) == 0 {
+            let is_unsigned = (hw1 & 0x0080) != 0;
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let sat4 = (hw2 & 0xF) as u8;
+            let op = if is_unsigned {
+                BitSatOp::Usat16 { sat_imm: sat4 }
+            } else {
+                BitSatOp::Ssat16 { sat_imm: sat4 + 1 }
+            };
+            return ArmInst::new(Cond::AL, Op::BitSat { op, rd, rn }, raw);
+        }
+
+        // Thumb-32 SSAT / USAT: 1111 0011 00sh 0 Rn / 1111 0011 10sh 0 Rn
+        if ((hw1 & 0xFFD0) == 0xF300 || (hw1 & 0xFFD0) == 0xF380) && (hw2 & 0x8020) == 0 {
+            let is_unsigned = (hw1 & 0x0080) != 0;
+            let sh = (hw1 & 0x0020) != 0;
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let imm5 = ((((hw2 >> 12) & 0x7) << 2) | ((hw2 >> 6) & 0x3)) as u8;
+            let sat5 = (hw2 & 0x1F) as u8;
+            let shift_type = if sh { ShiftType::Asr } else { ShiftType::Lsl };
+            let op = if is_unsigned {
+                BitSatOp::Usat { sat_imm: sat5, shift_type, shift_imm: imm5 }
+            } else {
+                BitSatOp::Ssat { sat_imm: sat5 + 1, shift_type, shift_imm: imm5 }
+            };
+            return ArmInst::new(Cond::AL, Op::BitSat { op, rd, rn }, raw);
+        }
+
         // Thumb-32 RBIT, REV.W, REV16.W, REVSH.W: 0xFA9n_F0xm
         if (hw1 & 0xFFF0) == 0xFA90 {
             let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
@@ -916,6 +947,22 @@ impl ThumbDecoder {
             }
         }
 
+        // Thumb-32 QADD / QDADD / QSUB / QDSUB
+        if (hw1 & 0xFFF0) == 0xFA80 && (hw2 & 0xF0C0) == 0xF080 {
+            let op_code = (hw2 >> 4) & 0x3;
+            let op = match op_code {
+                0 => CoreSatOp::Qadd,
+                1 => CoreSatOp::Qdadd,
+                2 => CoreSatOp::Qsub,
+                3 => CoreSatOp::Qdsub,
+                _ => unreachable!(),
+            };
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+            return ArmInst::new(Cond::AL, Op::CoreSat { op, rd, rm, rn }, raw);
+        }
+
         // Thumb-2 VMOV 2 core registers <-> 1 double or 2 singles
         if (hw1 & 0xFFE0) == 0xEC40 && ((hw2 & 0x0FD0) == 0x0B10 || (hw2 & 0x0FD0) == 0x0A10) {
             let to_core = ((hw1 >> 4) & 1) != 0;
@@ -1016,6 +1063,30 @@ impl ThumbDecoder {
                 DspMulOp::Smlsd { swap }
             };
             return ArmInst::new(Cond::AL, Op::DspMul { op, rd, rn: ra, rm, rs: rn }, raw);
+        }
+
+        // Thumb-32 SMMUL / SMMLA / SMMLS: 0xFB50 / 0xFB60
+        if ((hw1 & 0xFFF0) == 0xFB50 || (hw1 & 0xFFF0) == 0xFB60) && (hw2 & 0x00E0) == 0x0000 {
+            let is_sub = (hw1 & 0x00F0) == 0x0060;
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let ra_raw = ((hw2 >> 12) & 0xF) as u8;
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let round = ((hw2 >> 4) & 1) != 0;
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+
+            let op = if is_sub {
+                HighMulOp::Smmls { round }
+            } else if ra_raw == 15 {
+                HighMulOp::Smmul { round }
+            } else {
+                HighMulOp::Smmla { round }
+            };
+            let ra = if is_sub || ra_raw != 15 {
+                Some(Reg::from_u8(ra_raw).unwrap_or(Reg::R0))
+            } else {
+                None
+            };
+            return ArmInst::new(Cond::AL, Op::HighMul { op, rd, rn, rm, ra }, raw);
         }
 
         // Thumb-2 VMRS <Rt>, FPSCR (0xEEF1, 0x<Rt>A10)
@@ -1612,5 +1683,107 @@ mod tests {
                 rotation: 0,
             }
         );
+    }
+    #[test]
+    fn test_thumb_core_saturation_and_smmul() {
+        // Thumb-32 QADD r1, r2, r3 -> hw1=0xFA83, hw2=0xF182
+        let (inst, size) = ThumbDecoder::decode(0xFA83, Some(0xF182));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::CoreSat { op: CoreSatOp::Qadd, rd: Reg::R1, rm: Reg::R2, rn: Reg::R3 });
+
+        // Thumb-32 QDADD r1, r2, r3 -> hw1=0xFA83, hw2=0xF192
+        let (inst, size) = ThumbDecoder::decode(0xFA83, Some(0xF192));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::CoreSat { op: CoreSatOp::Qdadd, rd: Reg::R1, rm: Reg::R2, rn: Reg::R3 });
+
+        // Thumb-32 QSUB r1, r2, r3 -> hw1=0xFA83, hw2=0xF1A2
+        let (inst, size) = ThumbDecoder::decode(0xFA83, Some(0xF1A2));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::CoreSat { op: CoreSatOp::Qsub, rd: Reg::R1, rm: Reg::R2, rn: Reg::R3 });
+
+        // Thumb-32 QDSUB r1, r2, r3 -> hw1=0xFA83, hw2=0xF1B2
+        let (inst, size) = ThumbDecoder::decode(0xFA83, Some(0xF1B2));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::CoreSat { op: CoreSatOp::Qdsub, rd: Reg::R1, rm: Reg::R2, rn: Reg::R3 });
+
+        // Thumb-32 SSAT r1, #16, r2, lsl #2 -> hw1=0xF302, hw2=0x018F
+        let (inst, size) = ThumbDecoder::decode(0xF302, Some(0x018F));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::BitSat {
+            op: BitSatOp::Ssat { sat_imm: 16, shift_type: ShiftType::Lsl, shift_imm: 2 },
+            rd: Reg::R1,
+            rn: Reg::R2,
+        });
+
+        // Thumb-32 USAT r1, #15, r2, asr #2 -> hw1=0xF3A2, hw2=0x018F
+        let (inst, size) = ThumbDecoder::decode(0xF3A2, Some(0x018F));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::BitSat {
+            op: BitSatOp::Usat { sat_imm: 15, shift_type: ShiftType::Asr, shift_imm: 2 },
+            rd: Reg::R1,
+            rn: Reg::R2,
+        });
+
+        // Thumb-32 SSAT16 r1, #8, r2 -> hw1=0xF322, hw2=0x0107
+        let (inst, size) = ThumbDecoder::decode(0xF322, Some(0x0107));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::BitSat {
+            op: BitSatOp::Ssat16 { sat_imm: 8 },
+            rd: Reg::R1,
+            rn: Reg::R2,
+        });
+
+        // Thumb-32 USAT16 r1, #8, r2 -> hw1=0xF3A2, hw2=0x0108
+        let (inst, size) = ThumbDecoder::decode(0xF3A2, Some(0x0108));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::BitSat {
+            op: BitSatOp::Usat16 { sat_imm: 8 },
+            rd: Reg::R1,
+            rn: Reg::R2,
+        });
+
+        // Thumb-32 SMMUL r1, r2, r3 -> hw1=0xFB52, hw2=0xF103
+        let (inst, size) = ThumbDecoder::decode(0xFB52, Some(0xF103));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::HighMul {
+            op: HighMulOp::Smmul { round: false },
+            rd: Reg::R1,
+            rn: Reg::R2,
+            rm: Reg::R3,
+            ra: None,
+        });
+
+        // Thumb-32 SMMULR r1, r2, r3 -> hw1=0xFB52, hw2=0xF113
+        let (inst, size) = ThumbDecoder::decode(0xFB52, Some(0xF113));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::HighMul {
+            op: HighMulOp::Smmul { round: true },
+            rd: Reg::R1,
+            rn: Reg::R2,
+            rm: Reg::R3,
+            ra: None,
+        });
+
+        // Thumb-32 SMMLA r1, r2, r3, r4 -> hw1=0xFB52, hw2=0x4103
+        let (inst, size) = ThumbDecoder::decode(0xFB52, Some(0x4103));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::HighMul {
+            op: HighMulOp::Smmla { round: false },
+            rd: Reg::R1,
+            rn: Reg::R2,
+            rm: Reg::R3,
+            ra: Some(Reg::R4),
+        });
+
+        // Thumb-32 SMMLS r1, r2, r3, r4 -> hw1=0xFB62, hw2=0x4103
+        let (inst, size) = ThumbDecoder::decode(0xFB62, Some(0x4103));
+        assert_eq!(size, 4);
+        assert_eq!(inst.op, Op::HighMul {
+            op: HighMulOp::Smmls { round: false },
+            rd: Reg::R1,
+            rn: Reg::R2,
+            rm: Reg::R3,
+            ra: Some(Reg::R4),
+        });
     }
 }

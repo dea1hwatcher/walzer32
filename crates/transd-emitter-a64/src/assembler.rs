@@ -710,6 +710,12 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// SXTW Xd, Wn (Signed extend 32-bit register to 64-bit: SBFM Xd, Xn, #0, #31)
+    pub fn sxtw_x(&mut self, rd: A64Reg, rn: A64Reg) {
+        let inst = 0x9340_7C00 | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
     /// ROR Wd, Wn, #shift (Rotate right 32-bit register: EXTR Wd, Wn, Wn, #shift)
     pub fn ror_w(&mut self, rd: A64Reg, rn: A64Reg, shift: u8) {
         let imm = (shift & 31) as u32;

@@ -198,6 +198,41 @@ pub enum DspMulOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreSatOp {
+    Qadd,
+    Qsub,
+    Qdadd,
+    Qdsub,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitSatOp {
+    Ssat {
+        sat_imm: u8,
+        shift_type: ShiftType,
+        shift_imm: u8,
+    },
+    Usat {
+        sat_imm: u8,
+        shift_type: ShiftType,
+        shift_imm: u8,
+    },
+    Ssat16 {
+        sat_imm: u8,
+    },
+    Usat16 {
+        sat_imm: u8,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HighMulOp {
+    Smmul { round: bool },
+    Smmla { round: bool },
+    Smmls { round: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsrValue {
     Reg(Reg),
     Imm(u32),
@@ -459,6 +494,24 @@ pub enum Op {
         rd_hi: Reg,
         rn: Reg,
         rm: Reg,
+    },
+    CoreSat {
+        op: CoreSatOp,
+        rd: Reg,
+        rm: Reg,
+        rn: Reg,
+    },
+    BitSat {
+        op: BitSatOp,
+        rd: Reg,
+        rn: Reg,
+    },
+    HighMul {
+        op: HighMulOp,
+        rd: Reg,
+        rn: Reg,
+        rm: Reg,
+        ra: Option<Reg>,
     },
     VfpMrsFpscr {
         rt: Option<Reg>, // None = APSR_nzcv (CPSR), Some(r) = general purpose register

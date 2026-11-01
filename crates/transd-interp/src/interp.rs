@@ -1038,6 +1038,196 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
+            Op::CoreSat { op, rd, rm, rn } => {
+                let m = cpu.reg(rm) as i32;
+                let n = cpu.reg(rn) as i32;
+                let res = match op {
+                    CoreSatOp::Qadd => {
+                        let (sum, of) = m.overflowing_add(n);
+                        if of {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            m.saturating_add(n)
+                        } else {
+                            sum
+                        }
+                    }
+                    CoreSatOp::Qsub => {
+                        let (diff, of) = m.overflowing_sub(n);
+                        if of {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            m.saturating_sub(n)
+                        } else {
+                            diff
+                        }
+                    }
+                    CoreSatOp::Qdadd => {
+                        let (n2, of1) = n.overflowing_add(n);
+                        let n2_sat = if of1 {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            n.saturating_add(n)
+                        } else {
+                            n2
+                        };
+                        let (sum, of2) = m.overflowing_add(n2_sat);
+                        if of2 {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            m.saturating_add(n2_sat)
+                        } else {
+                            sum
+                        }
+                    }
+                    CoreSatOp::Qdsub => {
+                        let (n2, of1) = n.overflowing_add(n);
+                        let n2_sat = if of1 {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            n.saturating_add(n)
+                        } else {
+                            n2
+                        };
+                        let (diff, of2) = m.overflowing_sub(n2_sat);
+                        if of2 {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            m.saturating_sub(n2_sat)
+                        } else {
+                            diff
+                        }
+                    }
+                };
+                cpu.set_reg(rd, res as u32);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::BitSat { op, rd, rn } => {
+                let n_val = cpu.reg(rn);
+                let res = match op {
+                    BitSatOp::Ssat { sat_imm, shift_type, shift_imm } => {
+                        let shifted = match shift_type {
+                            ShiftType::Lsl => (n_val as i32) << shift_imm,
+                            ShiftType::Asr => (n_val as i32) >> shift_imm,
+                            _ => n_val as i32,
+                        };
+                        let sat = sat_imm as u32;
+                        let max_val = if sat >= 32 { i32::MAX as i64 } else { (1i64 << (sat - 1)) - 1 };
+                        let min_val = if sat >= 32 { i32::MIN as i64 } else { -(1i64 << (sat - 1)) };
+                        let val_i64 = shifted as i64;
+                        if val_i64 > max_val {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            max_val as u32
+                        } else if val_i64 < min_val {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            min_val as u32
+                        } else {
+                            shifted as u32
+                        }
+                    }
+                    BitSatOp::Usat { sat_imm, shift_type, shift_imm } => {
+                        let shifted = match shift_type {
+                            ShiftType::Lsl => (n_val as i32) << shift_imm,
+                            ShiftType::Asr => (n_val as i32) >> shift_imm,
+                            _ => n_val as i32,
+                        };
+                        let sat = sat_imm as u32;
+                        let max_val = if sat >= 32 { u32::MAX as i64 } else { (1i64 << sat) - 1 };
+                        let val_i64 = shifted as i64;
+                        if val_i64 > max_val {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            max_val as u32
+                        } else if val_i64 < 0 {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            0
+                        } else {
+                            shifted as u32
+                        }
+                    }
+                    BitSatOp::Ssat16 { sat_imm } => {
+                        let sat = sat_imm as i32;
+                        let max_val = (1i32 << (sat - 1)) - 1;
+                        let min_val = -(1i32 << (sat - 1));
+
+                        let v_lo = n_val as i16 as i32;
+                        let v_hi = (n_val >> 16) as i16 as i32;
+
+                        let lo = if v_lo > max_val {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            max_val as u16
+                        } else if v_lo < min_val {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            min_val as u16
+                        } else {
+                            v_lo as u16
+                        };
+
+                        let hi = if v_hi > max_val {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            max_val as u16
+                        } else if v_hi < min_val {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            min_val as u16
+                        } else {
+                            v_hi as u16
+                        };
+
+                        ((hi as u32) << 16) | (lo as u32)
+                    }
+                    BitSatOp::Usat16 { sat_imm } => {
+                        let sat = sat_imm as i32;
+                        let max_val = if sat >= 16 { 0xFFFF } else { (1i32 << sat) - 1 };
+
+                        let v_lo = n_val as i16 as i32;
+                        let v_hi = (n_val >> 16) as i16 as i32;
+
+                        let lo = if v_lo > max_val {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            max_val as u16
+                        } else if v_lo < 0 {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            0
+                        } else {
+                            v_lo as u16
+                        };
+
+                        let hi = if v_hi > max_val {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            max_val as u16
+                        } else if v_hi < 0 {
+                            cpu.cpsr.insert(transd_core::Cpsr::Q);
+                            0
+                        } else {
+                            v_hi as u16
+                        };
+
+                        ((hi as u32) << 16) | (lo as u32)
+                    }
+                };
+                cpu.set_reg(rd, res);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::HighMul { op, rd, rn, rm, ra } => {
+                let n = cpu.reg(rn) as i32 as i64;
+                let m = cpu.reg(rm) as i32 as i64;
+                let round_offset = match op {
+                    HighMulOp::Smmul { round } | HighMulOp::Smmla { round } | HighMulOp::Smmls { round } => {
+                        if round { 0x8000_0000i64 } else { 0i64 }
+                    }
+                };
+                let prod = (n * m).wrapping_add(round_offset);
+                let high_word = (prod >> 32) as i32;
+                let res = match op {
+                    HighMulOp::Smmul { .. } => high_word as u32,
+                    HighMulOp::Smmla { .. } => {
+                        let a = ra.map(|r| cpu.reg(r) as i32).unwrap_or(0);
+                        a.wrapping_add(high_word) as u32
+                    }
+                    HighMulOp::Smmls { .. } => {
+                        let a = ra.map(|r| cpu.reg(r) as i32).unwrap_or(0);
+                        a.wrapping_sub(high_word) as u32
+                    }
+                };
+                cpu.set_reg(rd, res);
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
             Op::VfpAlu {
                 op,
                 size,
