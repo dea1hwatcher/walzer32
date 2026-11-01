@@ -146,6 +146,24 @@ pub enum BionicFuncId {
     InetAton = 269,
     InetNtoa = 270,
 
+    // Pipe & raw I/O
+    Pipe = 280,
+    Read = 281,
+    Write = 282,
+
+    // Extended allocator
+    MallocUsableSize = 285,
+    Memalign = 286,
+    PosixMemalign = 287,
+
+    // pthread barriers
+    PthreadBarrierInit = 290,
+    PthreadBarrierWait = 291,
+    PthreadBarrierDestroy = 292,
+
+    // High-resolution timed sleep
+    ClockNanosleep = 300,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -362,6 +380,16 @@ impl BionicFuncId {
             268 => Some(Self::Ntohl),
             269 => Some(Self::InetAton),
             270 => Some(Self::InetNtoa),
+            280 => Some(Self::Pipe),
+            281 => Some(Self::Read),
+            282 => Some(Self::Write),
+            285 => Some(Self::MallocUsableSize),
+            286 => Some(Self::Memalign),
+            287 => Some(Self::PosixMemalign),
+            290 => Some(Self::PthreadBarrierInit),
+            291 => Some(Self::PthreadBarrierWait),
+            292 => Some(Self::PthreadBarrierDestroy),
+            300 => Some(Self::ClockNanosleep),
             _ => None,
         }
     }
@@ -417,6 +445,9 @@ pub struct BionicBridge {
     pub next_socket_fd: u32,
     // Inlined net buffer for inet_ntoa result
     pub inet_ntoa_addr: GuestAddr,
+    // Pipe descriptor table: guest_read_fd -> guest_write_fd, plus a small in-process buffer
+    pub pipe_fds: HashMap<u32, (u32, Vec<u8>)>, // read_fd -> (write_fd, buffer)
+    pub next_pipe_fd: u32,
 }
 
 impl BionicBridge {
@@ -456,6 +487,8 @@ impl BionicBridge {
             socket_fds: HashMap::new(),
             next_socket_fd: 10, // Guest FDs start at 10 to avoid clash with 0/1/2
             inet_ntoa_addr: stub_base.add(0xA00),
+            pipe_fds: HashMap::new(),
+            next_pipe_fd: 100, // Guest pipe FDs start at 100
         };
 
         bridge.register_known_symbols();
@@ -661,6 +694,16 @@ impl BionicBridge {
             ("ntohl", BionicFuncId::Ntohl),
             ("inet_aton", BionicFuncId::InetAton),
             ("inet_ntoa", BionicFuncId::InetNtoa),
+            ("pipe", BionicFuncId::Pipe),
+            ("read", BionicFuncId::Read),
+            ("write", BionicFuncId::Write),
+            ("malloc_usable_size", BionicFuncId::MallocUsableSize),
+            ("memalign", BionicFuncId::Memalign),
+            ("posix_memalign", BionicFuncId::PosixMemalign),
+            ("pthread_barrier_init", BionicFuncId::PthreadBarrierInit),
+            ("pthread_barrier_wait", BionicFuncId::PthreadBarrierWait),
+            ("pthread_barrier_destroy", BionicFuncId::PthreadBarrierDestroy),
+            ("clock_nanosleep", BionicFuncId::ClockNanosleep),
         ];
 
         for (name, id) in funcs {
@@ -829,6 +872,16 @@ impl BionicBridge {
             BionicFuncId::Ntohl,
             BionicFuncId::InetAton,
             BionicFuncId::InetNtoa,
+            BionicFuncId::Pipe,
+            BionicFuncId::Read,
+            BionicFuncId::Write,
+            BionicFuncId::MallocUsableSize,
+            BionicFuncId::Memalign,
+            BionicFuncId::PosixMemalign,
+            BionicFuncId::PthreadBarrierInit,
+            BionicFuncId::PthreadBarrierWait,
+            BionicFuncId::PthreadBarrierDestroy,
+            BionicFuncId::ClockNanosleep,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -2400,6 +2453,155 @@ impl BionicBridge {
                 mem.write_u8(self.inet_ntoa_addr.add(bytes.len() as u32), 0)?;
                 cpu.set_reg(Reg::R0, self.inet_ntoa_addr.as_u32());
             }
+            // ── Stage 59: pipe / read / write ─────────────────────────────
+            BionicFuncId::Pipe => {
+                // pipe(int pipefd[2]) -> 0; stores read_fd and write_fd at pipefd[0] and pipefd[1]
+                let arr_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let read_fd  = self.next_pipe_fd;
+                let write_fd = self.next_pipe_fd + 1;
+                self.next_pipe_fd += 2;
+                self.pipe_fds.insert(read_fd, (write_fd, Vec::new()));
+                if arr_ptr.as_u32() != 0 {
+                    mem.write_u32(arr_ptr, read_fd)?;
+                    mem.write_u32(arr_ptr.add(4), write_fd)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            BionicFuncId::Read => {
+                // read(fd, buf, count) -> bytes read
+                // If fd is a pipe read end, drain our in-process buffer.
+                let fd      = cpu.reg(Reg::R0);
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let count   = cpu.reg(Reg::R2) as usize;
+                if let Some((_write_fd, buf)) = self.pipe_fds.get_mut(&fd) {
+                    let n = count.min(buf.len());
+                    let data: Vec<u8> = buf.drain(..n).collect();
+                    for (i, b) in data.iter().enumerate() {
+                        mem.write_u8(buf_ptr.add(i as u32), *b)?;
+                    }
+                    cpu.set_reg(Reg::R0, n as u32);
+                } else {
+                    // Non-pipe fd: stub EOF
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+
+            BionicFuncId::Write => {
+                // write(fd, buf, count) -> bytes written
+                // If fd is a pipe write end, push into the paired read buffer.
+                let fd      = cpu.reg(Reg::R0);
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let count   = cpu.reg(Reg::R2) as usize;
+                // Find if fd is a write end of a pipe
+                let read_fd_opt = self.pipe_fds.iter()
+                    .find(|(_, (w, _))| *w == fd)
+                    .map(|(r, _)| *r);
+                if let Some(read_fd) = read_fd_opt {
+                    let mut data = Vec::with_capacity(count);
+                    for i in 0..count {
+                        data.push(mem.read_u8(buf_ptr.add(i as u32))?);
+                    }
+                    if let Some((_, buf)) = self.pipe_fds.get_mut(&read_fd) {
+                        buf.extend_from_slice(&data);
+                    }
+                    cpu.set_reg(Reg::R0, count as u32);
+                } else {
+                    // Non-pipe fd (e.g. stdout/stderr): consume silently
+                    cpu.set_reg(Reg::R0, count as u32);
+                }
+            }
+
+            // ── Stage 59: Extended allocator ──────────────────────────────
+            BionicFuncId::MallocUsableSize => {
+                // malloc_usable_size(ptr) -> 0 (conservative stub)
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            BionicFuncId::Memalign => {
+                // memalign(alignment, size) -> aligned pointer from heap
+                // We align our heap_current up to the requested alignment.
+                let alignment = cpu.reg(Reg::R0) as u64;
+                let size      = cpu.reg(Reg::R1);
+                let align = if alignment.is_power_of_two() && alignment >= 4 { alignment as u32 } else { 4 };
+                // Round up heap_current to alignment
+                let cur = self.heap_current.as_u32();
+                let aligned = (cur + align - 1) & !(align - 1);
+                let ptr = GuestAddr::new(aligned);
+                self.heap_current = ptr.add(size.max(4));
+                if self.heap_current.as_u32() > self.heap_limit.as_u32() {
+                    cpu.set_reg(Reg::R0, 0); // OOM
+                } else {
+                    cpu.set_reg(Reg::R0, ptr.as_u32());
+                }
+            }
+
+            BionicFuncId::PosixMemalign => {
+                // posix_memalign(memptr**, alignment, size) -> 0 on success
+                let memptr_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let alignment  = cpu.reg(Reg::R1) as u64;
+                let size       = cpu.reg(Reg::R2);
+                let align = if alignment.is_power_of_two() && alignment >= 4 { alignment as u32 } else { 4 };
+                let cur = self.heap_current.as_u32();
+                let aligned = (cur + align - 1) & !(align - 1);
+                let ptr = GuestAddr::new(aligned);
+                self.heap_current = ptr.add(size.max(4));
+                if self.heap_current.as_u32() > self.heap_limit.as_u32() {
+                    cpu.set_reg(Reg::R0, 12); // ENOMEM
+                } else {
+                    if memptr_ptr.as_u32() != 0 {
+                        mem.write_u32(memptr_ptr, ptr.as_u32())?;
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+
+            // ── Stage 59: pthread_barrier_* ───────────────────────────────
+            BionicFuncId::PthreadBarrierInit => {
+                // pthread_barrier_init(barrier*, attr*, count) -> 0
+                // Store count at barrier+0, current at barrier+4 (= count for fresh barrier)
+                let barrier_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let count = cpu.reg(Reg::R2);
+                if barrier_ptr.as_u32() != 0 {
+                    mem.write_u32(barrier_ptr, count)?;
+                    mem.write_u32(barrier_ptr.add(4), count)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            BionicFuncId::PthreadBarrierWait => {
+                // pthread_barrier_wait(barrier*) -> 0 (or PTHREAD_BARRIER_SERIAL_THREAD = -1)
+                // In a single-threaded stub: just decrement counter, return SERIAL when it hits 0.
+                let barrier_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if barrier_ptr.as_u32() != 0 {
+                    let count   = mem.read_u32(barrier_ptr)?;
+                    let current = mem.read_u32(barrier_ptr.add(4))?;
+                    let next = current.saturating_sub(1);
+                    if next == 0 {
+                        // Reset barrier
+                        mem.write_u32(barrier_ptr.add(4), count)?;
+                        cpu.set_reg(Reg::R0, u32::MAX); // PTHREAD_BARRIER_SERIAL_THREAD (-1 as u32)
+                    } else {
+                        mem.write_u32(barrier_ptr.add(4), next)?;
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 22); // EINVAL
+                }
+            }
+
+            BionicFuncId::PthreadBarrierDestroy => {
+                // pthread_barrier_destroy(barrier*) -> 0
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            // ── Stage 59: clock_nanosleep ─────────────────────────────────
+            BionicFuncId::ClockNanosleep => {
+                // clock_nanosleep(clockid, flags, *req, *rem) -> 0
+                // Stub: immediately return success (no actual sleep in DBT context)
+                cpu.set_reg(Reg::R0, 0);
+            }
+
 
             _ => {}
         }
