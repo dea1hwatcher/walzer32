@@ -191,6 +191,33 @@ pub enum BionicFuncId {
     Getpgrp = 361,
     Setpgid = 362,
 
+    // File System & Directory Operations
+    Open = 370,
+    Openat = 371,
+    Lseek = 372,
+    Lseek64 = 373,
+    Stat = 374,
+    Stat64 = 375,
+    Fstat = 376,
+    Fstat64 = 377,
+    Lstat = 378,
+    Lstat64 = 379,
+    Fstatat = 380,
+    Access = 381,
+    Faccessat = 382,
+    Mkdir = 383,
+    Mkdirat = 384,
+    Unlink = 385,
+    Unlinkat = 386,
+    Getcwd = 387,
+    Chdir = 388,
+    Readlink = 389,
+    Readlinkat = 390,
+    Rename = 391,
+    Renameat = 392,
+    Ftruncate = 393,
+    Ftruncate64 = 394,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -432,6 +459,31 @@ impl BionicFuncId {
             360 => Some(Self::Setsid),
             361 => Some(Self::Getpgrp),
             362 => Some(Self::Setpgid),
+            370 => Some(Self::Open),
+            371 => Some(Self::Openat),
+            372 => Some(Self::Lseek),
+            373 => Some(Self::Lseek64),
+            374 => Some(Self::Stat),
+            375 => Some(Self::Stat64),
+            376 => Some(Self::Fstat),
+            377 => Some(Self::Fstat64),
+            378 => Some(Self::Lstat),
+            379 => Some(Self::Lstat64),
+            380 => Some(Self::Fstatat),
+            381 => Some(Self::Access),
+            382 => Some(Self::Faccessat),
+            383 => Some(Self::Mkdir),
+            384 => Some(Self::Mkdirat),
+            385 => Some(Self::Unlink),
+            386 => Some(Self::Unlinkat),
+            387 => Some(Self::Getcwd),
+            388 => Some(Self::Chdir),
+            389 => Some(Self::Readlink),
+            390 => Some(Self::Readlinkat),
+            391 => Some(Self::Rename),
+            392 => Some(Self::Renameat),
+            393 => Some(Self::Ftruncate),
+            394 => Some(Self::Ftruncate64),
             _ => None,
         }
     }
@@ -490,6 +542,8 @@ pub struct BionicBridge {
     // Pipe descriptor table: guest_read_fd -> guest_write_fd, plus a small in-process buffer
     pub pipe_fds: HashMap<u32, (u32, Vec<u8>)>, // read_fd -> (write_fd, buffer)
     pub next_pipe_fd: u32,
+    pub vfs: transd_rt::vfs::VirtualFileSystem,
+    pub cwd: String,
 }
 
 impl BionicBridge {
@@ -531,6 +585,8 @@ impl BionicBridge {
             inet_ntoa_addr: stub_base.add(0xA00),
             pipe_fds: HashMap::new(),
             next_pipe_fd: 100, // Guest pipe FDs start at 100
+            vfs: transd_rt::vfs::VirtualFileSystem::new(),
+            cwd: "/data/data/com.transd.app".to_string(),
         };
 
         bridge.register_known_symbols();
@@ -761,6 +817,32 @@ impl BionicBridge {
             ("setsid", BionicFuncId::Setsid),
             ("getpgrp", BionicFuncId::Getpgrp),
             ("setpgid", BionicFuncId::Setpgid),
+            ("open", BionicFuncId::Open),
+            ("openat", BionicFuncId::Openat),
+            ("lseek", BionicFuncId::Lseek),
+            ("lseek64", BionicFuncId::Lseek64),
+            ("stat", BionicFuncId::Stat),
+            ("stat64", BionicFuncId::Stat64),
+            ("fstat", BionicFuncId::Fstat),
+            ("fstat64", BionicFuncId::Fstat64),
+            ("lstat", BionicFuncId::Lstat),
+            ("lstat64", BionicFuncId::Lstat64),
+            ("fstatat", BionicFuncId::Fstatat),
+            ("fstatat64", BionicFuncId::Fstatat),
+            ("access", BionicFuncId::Access),
+            ("faccessat", BionicFuncId::Faccessat),
+            ("mkdir", BionicFuncId::Mkdir),
+            ("mkdirat", BionicFuncId::Mkdirat),
+            ("unlink", BionicFuncId::Unlink),
+            ("unlinkat", BionicFuncId::Unlinkat),
+            ("getcwd", BionicFuncId::Getcwd),
+            ("chdir", BionicFuncId::Chdir),
+            ("readlink", BionicFuncId::Readlink),
+            ("readlinkat", BionicFuncId::Readlinkat),
+            ("rename", BionicFuncId::Rename),
+            ("renameat", BionicFuncId::Renameat),
+            ("ftruncate", BionicFuncId::Ftruncate),
+            ("ftruncate64", BionicFuncId::Ftruncate64),
         ];
 
         for (name, id) in funcs {
@@ -954,6 +1036,31 @@ impl BionicBridge {
             BionicFuncId::Setsid,
             BionicFuncId::Getpgrp,
             BionicFuncId::Setpgid,
+            BionicFuncId::Open,
+            BionicFuncId::Openat,
+            BionicFuncId::Lseek,
+            BionicFuncId::Lseek64,
+            BionicFuncId::Stat,
+            BionicFuncId::Stat64,
+            BionicFuncId::Fstat,
+            BionicFuncId::Fstat64,
+            BionicFuncId::Lstat,
+            BionicFuncId::Lstat64,
+            BionicFuncId::Fstatat,
+            BionicFuncId::Access,
+            BionicFuncId::Faccessat,
+            BionicFuncId::Mkdir,
+            BionicFuncId::Mkdirat,
+            BionicFuncId::Unlink,
+            BionicFuncId::Unlinkat,
+            BionicFuncId::Getcwd,
+            BionicFuncId::Chdir,
+            BionicFuncId::Readlink,
+            BionicFuncId::Readlinkat,
+            BionicFuncId::Rename,
+            BionicFuncId::Renameat,
+            BionicFuncId::Ftruncate,
+            BionicFuncId::Ftruncate64,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -2421,7 +2528,10 @@ impl BionicBridge {
             BionicFuncId::SocketClose => {
                 // close(fd) -> 0 or -1
                 let fd = cpu.reg(Reg::R0);
-                if self.socket_fds.remove(&fd).is_some() {
+                if self.socket_fds.remove(&fd).is_some()
+                    || self.pipe_fds.remove(&fd).is_some()
+                    || self.vfs.close(fd).is_ok()
+                {
                     cpu.set_reg(Reg::R0, 0);
                 } else {
                     cpu.set_reg(Reg::R0, 0xFFFF_FFFF); // EBADF
@@ -2542,7 +2652,6 @@ impl BionicBridge {
 
             BionicFuncId::Read => {
                 // read(fd, buf, count) -> bytes read
-                // If fd is a pipe read end, drain our in-process buffer.
                 let fd      = cpu.reg(Reg::R0);
                 let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
                 let count   = cpu.reg(Reg::R2) as usize;
@@ -2554,18 +2663,26 @@ impl BionicBridge {
                     }
                     cpu.set_reg(Reg::R0, n as u32);
                 } else {
-                    // Non-pipe fd: stub EOF
-                    cpu.set_reg(Reg::R0, 0);
+                    let mut tmp = vec![0u8; count];
+                    match self.vfs.read(fd, &mut tmp) {
+                        Ok(n) => {
+                            for i in 0..n {
+                                mem.write_u8(buf_ptr.add(i as u32), tmp[i])?;
+                            }
+                            cpu.set_reg(Reg::R0, n as u32);
+                        }
+                        Err(_) => {
+                            cpu.set_reg(Reg::R0, 0);
+                        }
+                    }
                 }
             }
 
             BionicFuncId::Write => {
                 // write(fd, buf, count) -> bytes written
-                // If fd is a pipe write end, push into the paired read buffer.
                 let fd      = cpu.reg(Reg::R0);
                 let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
                 let count   = cpu.reg(Reg::R2) as usize;
-                // Find if fd is a write end of a pipe
                 let read_fd_opt = self.pipe_fds.iter()
                     .find(|(_, (w, _))| *w == fd)
                     .map(|(r, _)| *r);
@@ -2578,9 +2695,18 @@ impl BionicBridge {
                         buf.extend_from_slice(&data);
                     }
                     cpu.set_reg(Reg::R0, count as u32);
-                } else {
-                    // Non-pipe fd (e.g. stdout/stderr): consume silently
+                } else if fd == 1 || fd == 2 {
+                    // stdout / stderr: consumed
                     cpu.set_reg(Reg::R0, count as u32);
+                } else {
+                    let mut data = Vec::with_capacity(count);
+                    for i in 0..count {
+                        data.push(mem.read_u8(buf_ptr.add(i as u32))?);
+                    }
+                    match self.vfs.write(fd, &data) {
+                        Ok(n) => cpu.set_reg(Reg::R0, n as u32),
+                        Err(_) => cpu.set_reg(Reg::R0, count as u32),
+                    }
                 }
             }
 
@@ -2810,6 +2936,245 @@ impl BionicBridge {
                 // setpgid(pid, pgid) -> 0
                 cpu.set_reg(Reg::R0, 0);
             }
+            // ── Stage 61: POSIX File System & Directory APIs ─────────────
+            BionicFuncId::Open => {
+                // open(path, flags, mode) -> fd or -1
+                let path_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let flags = cpu.reg(Reg::R1);
+                if path_ptr.as_u32() != 0 {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    match self.vfs.open(&path, flags) {
+                        Ok(fd) => cpu.set_reg(Reg::R0, fd),
+                        Err(_) => cpu.set_reg(Reg::R0, u32::MAX),
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+
+            BionicFuncId::Openat => {
+                // openat(dirfd, path, flags, mode) -> fd or -1
+                let path_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let flags = cpu.reg(Reg::R2);
+                if path_ptr.as_u32() != 0 {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    match self.vfs.open(&path, flags) {
+                        Ok(fd) => cpu.set_reg(Reg::R0, fd),
+                        Err(_) => cpu.set_reg(Reg::R0, u32::MAX),
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+
+            BionicFuncId::Lseek => {
+                // lseek(fd, offset, whence) -> new offset or -1
+                let fd = cpu.reg(Reg::R0);
+                let offset = cpu.reg(Reg::R1) as i32 as i64;
+                let whence = cpu.reg(Reg::R2) as i32;
+                match self.vfs.seek(fd, offset, whence) {
+                    Ok(new_pos) => cpu.set_reg(Reg::R0, new_pos as u32),
+                    Err(_) => cpu.set_reg(Reg::R0, u32::MAX),
+                }
+            }
+
+            BionicFuncId::Lseek64 => {
+                // lseek64(fd, offset64, whence) -> new offset64 or -1
+                let fd = cpu.reg(Reg::R0);
+                let (offset, whence) = if cpu.reg(Reg::R3) <= 2 {
+                    let lo = cpu.reg(Reg::R1) as u64;
+                    let hi = cpu.reg(Reg::R2) as u64;
+                    ((lo | (hi << 32)) as i64, cpu.reg(Reg::R3) as i32)
+                } else {
+                    let lo = cpu.reg(Reg::R2) as u64;
+                    let hi = cpu.reg(Reg::R3) as u64;
+                    let sp = GuestAddr::new(cpu.sp());
+                    let w = mem.read_u32(sp).unwrap_or(0) as i32;
+                    ((lo | (hi << 32)) as i64, w)
+                };
+                match self.vfs.seek(fd, offset, whence) {
+                    Ok(new_pos) => {
+                        cpu.set_reg(Reg::R0, new_pos as u32);
+                        cpu.set_reg(Reg::R1, (new_pos >> 32) as u32);
+                    }
+                    Err(_) => {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                        cpu.set_reg(Reg::R1, u32::MAX);
+                    }
+                }
+            }
+
+            BionicFuncId::Stat | BionicFuncId::Stat64 | BionicFuncId::Lstat | BionicFuncId::Lstat64 => {
+                // stat/stat64/lstat/lstat64(path, buf) -> 0 or -1
+                let path_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let buf_ptr  = GuestAddr::new(cpu.reg(Reg::R1));
+                if path_ptr.as_u32() != 0 && buf_ptr.as_u32() != 0 {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    match self.vfs.stat64(&path) {
+                        Ok(st) => {
+                            st.write_to_memory(mem, buf_ptr)?;
+                            cpu.set_reg(Reg::R0, 0);
+                        }
+                        Err(_) => {
+                            cpu.set_reg(Reg::R0, u32::MAX);
+                        }
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+
+            BionicFuncId::Fstat | BionicFuncId::Fstat64 => {
+                // fstat/fstat64(fd, buf) -> 0 or -1
+                let fd = cpu.reg(Reg::R0);
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if buf_ptr.as_u32() != 0 {
+                    match self.vfs.fstat64(fd) {
+                        Ok(st) => {
+                            st.write_to_memory(mem, buf_ptr)?;
+                            cpu.set_reg(Reg::R0, 0);
+                        }
+                        Err(_) => {
+                            cpu.set_reg(Reg::R0, u32::MAX);
+                        }
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+
+            BionicFuncId::Fstatat => {
+                // fstatat(dirfd, path, buf, flags) -> 0 or -1
+                let path_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let buf_ptr  = GuestAddr::new(cpu.reg(Reg::R2));
+                if path_ptr.as_u32() != 0 && buf_ptr.as_u32() != 0 {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    match self.vfs.stat64(&path) {
+                        Ok(st) => {
+                            st.write_to_memory(mem, buf_ptr)?;
+                            cpu.set_reg(Reg::R0, 0);
+                        }
+                        Err(_) => {
+                            cpu.set_reg(Reg::R0, u32::MAX);
+                        }
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+
+            BionicFuncId::Access => {
+                // access(path, mode) -> 0 or -1
+                let path_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if path_ptr.as_u32() != 0 {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    if self.vfs.get_file(&path).is_some()
+                        || path.starts_with("/proc")
+                        || path.starts_with("/sys")
+                        || path.starts_with("/system")
+                        || path.starts_with("/data")
+                    {
+                        cpu.set_reg(Reg::R0, 0);
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+
+            BionicFuncId::Faccessat => {
+                // faccessat(dirfd, path, mode, flags) -> 0 or -1
+                let path_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if path_ptr.as_u32() != 0 {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    if self.vfs.get_file(&path).is_some()
+                        || path.starts_with("/proc")
+                        || path.starts_with("/sys")
+                        || path.starts_with("/system")
+                        || path.starts_with("/data")
+                    {
+                        cpu.set_reg(Reg::R0, 0);
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+
+            BionicFuncId::Mkdir | BionicFuncId::Mkdirat => {
+                // mkdir(path, mode) -> 0 (stub)
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            BionicFuncId::Unlink | BionicFuncId::Unlinkat => {
+                // unlink(path) -> 0 (stub)
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            BionicFuncId::Getcwd => {
+                // getcwd(buf, size) -> buf or NULL
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let size = cpu.reg(Reg::R1) as usize;
+                if buf_ptr.as_u32() != 0 && size > self.cwd.len() {
+                    let bytes = self.cwd.as_bytes();
+                    for (i, b) in bytes.iter().enumerate() {
+                        mem.write_u8(buf_ptr.add(i as u32), *b)?;
+                    }
+                    mem.write_u8(buf_ptr.add(bytes.len() as u32), 0)?;
+                    cpu.set_reg(Reg::R0, buf_ptr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+
+            BionicFuncId::Chdir => {
+                // chdir(path) -> 0 or -1
+                let path_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if path_ptr.as_u32() != 0 {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    self.cwd = path;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+
+            BionicFuncId::Readlink | BionicFuncId::Readlinkat => {
+                // readlink(path, buf, bufsiz) / readlinkat(dirfd, path, buf, bufsiz) -> count or -1
+                let (path_ptr, buf_ptr, bufsiz) = if func_id == BionicFuncId::Readlinkat {
+                    (GuestAddr::new(cpu.reg(Reg::R1)), GuestAddr::new(cpu.reg(Reg::R2)), cpu.reg(Reg::R3) as usize)
+                } else {
+                    (GuestAddr::new(cpu.reg(Reg::R0)), GuestAddr::new(cpu.reg(Reg::R1)), cpu.reg(Reg::R2) as usize)
+                };
+                if path_ptr.as_u32() != 0 && buf_ptr.as_u32() != 0 {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    if path == "/proc/self/exe" {
+                        let target = b"/system/bin/app_process32";
+                        let len = target.len().min(bufsiz);
+                        for i in 0..len {
+                            mem.write_u8(buf_ptr.add(i as u32), target[i])?;
+                        }
+                        cpu.set_reg(Reg::R0, len as u32);
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+
+            BionicFuncId::Rename | BionicFuncId::Renameat => {
+                // rename(old, new) -> 0 (stub)
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            BionicFuncId::Ftruncate | BionicFuncId::Ftruncate64 => {
+                // ftruncate(fd, length) -> 0 (stub)
+                cpu.set_reg(Reg::R0, 0);
+            }
+
 
 
 

@@ -122,6 +122,7 @@ impl TransdSession {
 
     /// Registers a custom in-memory file in the guest VFS
     pub fn register_vfs_file(&mut self, path: &str, content: Vec<u8>) {
+        self.bionic.vfs.register_file(path, content.clone());
         if let Some(vfs) = self.engine.vfs_mut() {
             vfs.register_file(path, content);
         }
@@ -129,6 +130,7 @@ impl TransdSession {
 
     /// Adds a path redirection rule in the guest VFS
     pub fn add_vfs_redirect(&mut self, from: &str, to: &str) {
+        self.bionic.vfs.add_redirect(from, to);
         if let Some(vfs) = self.engine.vfs_mut() {
             vfs.add_redirect(from, to);
         }
@@ -236,6 +238,7 @@ impl TransdSession {
 
     /// Mounts an Android main OBB expansion pack into the guest VFS
     pub fn mount_obb(&mut self, package_name: &str, version: u32, obb_bytes: Vec<u8>) {
+        self.bionic.vfs.mount_obb(package_name, version, obb_bytes.clone());
         if let Some(vfs) = self.engine.vfs_mut() {
             vfs.mount_obb(package_name, version, obb_bytes);
         }
@@ -243,6 +246,7 @@ impl TransdSession {
 
     /// Mounts an Android patch OBB expansion pack into the guest VFS
     pub fn mount_patch_obb(&mut self, package_name: &str, version: u32, obb_bytes: Vec<u8>) {
+        self.bionic.vfs.mount_patch_obb(package_name, version, obb_bytes.clone());
         if let Some(vfs) = self.engine.vfs_mut() {
             vfs.mount_patch_obb(package_name, version, obb_bytes);
         }
@@ -250,6 +254,7 @@ impl TransdSession {
 
     /// Mounts a package's private app data directory in VFS (/data/data/{package_name}/)
     pub fn mount_app_data_dir(&mut self, package_name: &str) {
+        self.bionic.vfs.mount_app_data_dir(package_name);
         if let Some(vfs) = self.engine.vfs_mut() {
             vfs.mount_app_data_dir(package_name);
         }
