@@ -103,6 +103,49 @@ pub enum BionicFuncId {
     Strerror = 211,
     StrerrorR = 212,
 
+    // Dynamic Linker Iteration
+    DlIteratePhdr = 220,
+
+    // Atomic Builtins (__atomic_* / __sync_*)
+    AtomicFetchAdd4 = 230,
+    AtomicFetchSub4 = 231,
+    AtomicFetchAnd4 = 232,
+    AtomicFetchOr4 = 233,
+    AtomicFetchXor4 = 234,
+    AtomicLoad4 = 235,
+    AtomicStore4 = 236,
+    AtomicCompareExchange4 = 237,
+    AtomicExchange4 = 238,
+
+    // Sync builtins (__sync_*)
+    SyncValCompareAndSwap4 = 240,
+    SyncBoolCompareAndSwap4 = 241,
+    SyncFetchAndAdd4 = 242,
+    SyncFetchAndSub4 = 243,
+
+    // POSIX Sockets (sys/socket.h)
+    Socket = 250,
+    SocketConnect = 251,
+    SocketBind = 252,
+    SocketListen = 253,
+    SocketAccept = 254,
+    SocketSend = 255,
+    SocketRecv = 256,
+    SocketSendto = 257,
+    SocketRecvfrom = 258,
+    SocketShutdown = 259,
+    SocketClose = 260,
+    SocketGetSockname = 261,
+    SocketGetPeername = 262,
+    SocketSetsockopt = 263,
+    SocketGetsockopt = 264,
+    Htons = 265,
+    Htonl = 266,
+    Ntohs = 267,
+    Ntohl = 268,
+    InetAton = 269,
+    InetNtoa = 270,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -284,6 +327,41 @@ impl BionicFuncId {
             210 => Some(Self::GnuUnwindFindExidx),
             211 => Some(Self::Strerror),
             212 => Some(Self::StrerrorR),
+            220 => Some(Self::DlIteratePhdr),
+            230 => Some(Self::AtomicFetchAdd4),
+            231 => Some(Self::AtomicFetchSub4),
+            232 => Some(Self::AtomicFetchAnd4),
+            233 => Some(Self::AtomicFetchOr4),
+            234 => Some(Self::AtomicFetchXor4),
+            235 => Some(Self::AtomicLoad4),
+            236 => Some(Self::AtomicStore4),
+            237 => Some(Self::AtomicCompareExchange4),
+            238 => Some(Self::AtomicExchange4),
+            240 => Some(Self::SyncValCompareAndSwap4),
+            241 => Some(Self::SyncBoolCompareAndSwap4),
+            242 => Some(Self::SyncFetchAndAdd4),
+            243 => Some(Self::SyncFetchAndSub4),
+            250 => Some(Self::Socket),
+            251 => Some(Self::SocketConnect),
+            252 => Some(Self::SocketBind),
+            253 => Some(Self::SocketListen),
+            254 => Some(Self::SocketAccept),
+            255 => Some(Self::SocketSend),
+            256 => Some(Self::SocketRecv),
+            257 => Some(Self::SocketSendto),
+            258 => Some(Self::SocketRecvfrom),
+            259 => Some(Self::SocketShutdown),
+            260 => Some(Self::SocketClose),
+            261 => Some(Self::SocketGetSockname),
+            262 => Some(Self::SocketGetPeername),
+            263 => Some(Self::SocketSetsockopt),
+            264 => Some(Self::SocketGetsockopt),
+            265 => Some(Self::Htons),
+            266 => Some(Self::Htonl),
+            267 => Some(Self::Ntohs),
+            268 => Some(Self::Ntohl),
+            269 => Some(Self::InetAton),
+            270 => Some(Self::InetNtoa),
             _ => None,
         }
     }
@@ -334,6 +412,11 @@ pub struct BionicBridge {
     pub env_vars: HashMap<String, String>,
     pub env_addrs: HashMap<String, GuestAddr>,
     pub pid: u32,
+    // Socket descriptor table: guest_fd -> (host_family, host_type, is_connected)
+    pub socket_fds: HashMap<u32, (i32, i32, bool)>,
+    pub next_socket_fd: u32,
+    // Inlined net buffer for inet_ntoa result
+    pub inet_ntoa_addr: GuestAddr,
 }
 
 impl BionicBridge {
@@ -370,6 +453,9 @@ impl BionicBridge {
             },
             env_addrs: HashMap::new(),
             pid: 1000,
+            socket_fds: HashMap::new(),
+            next_socket_fd: 10, // Guest FDs start at 10 to avoid clash with 0/1/2
+            inet_ntoa_addr: stub_base.add(0xA00),
         };
 
         bridge.register_known_symbols();
@@ -534,6 +620,47 @@ impl BionicBridge {
             ("__gnu_Unwind_Find_exidx", BionicFuncId::GnuUnwindFindExidx),
             ("strerror", BionicFuncId::Strerror),
             ("strerror_r", BionicFuncId::StrerrorR),
+
+            // Dynamic Linker Iteration
+            ("dl_iterate_phdr", BionicFuncId::DlIteratePhdr),
+
+            // Atomic Builtins
+            ("__atomic_fetch_add_4", BionicFuncId::AtomicFetchAdd4),
+            ("__atomic_fetch_sub_4", BionicFuncId::AtomicFetchSub4),
+            ("__atomic_fetch_and_4", BionicFuncId::AtomicFetchAnd4),
+            ("__atomic_fetch_or_4", BionicFuncId::AtomicFetchOr4),
+            ("__atomic_fetch_xor_4", BionicFuncId::AtomicFetchXor4),
+            ("__atomic_load_4", BionicFuncId::AtomicLoad4),
+            ("__atomic_store_4", BionicFuncId::AtomicStore4),
+            ("__atomic_compare_exchange_4", BionicFuncId::AtomicCompareExchange4),
+            ("__atomic_exchange_4", BionicFuncId::AtomicExchange4),
+            ("__sync_val_compare_and_swap_4", BionicFuncId::SyncValCompareAndSwap4),
+            ("__sync_bool_compare_and_swap_4", BionicFuncId::SyncBoolCompareAndSwap4),
+            ("__sync_fetch_and_add_4", BionicFuncId::SyncFetchAndAdd4),
+            ("__sync_fetch_and_sub_4", BionicFuncId::SyncFetchAndSub4),
+
+            // POSIX Sockets
+            ("socket", BionicFuncId::Socket),
+            ("connect", BionicFuncId::SocketConnect),
+            ("bind", BionicFuncId::SocketBind),
+            ("listen", BionicFuncId::SocketListen),
+            ("accept", BionicFuncId::SocketAccept),
+            ("send", BionicFuncId::SocketSend),
+            ("recv", BionicFuncId::SocketRecv),
+            ("sendto", BionicFuncId::SocketSendto),
+            ("recvfrom", BionicFuncId::SocketRecvfrom),
+            ("shutdown", BionicFuncId::SocketShutdown),
+            ("close", BionicFuncId::SocketClose),
+            ("getsockname", BionicFuncId::SocketGetSockname),
+            ("getpeername", BionicFuncId::SocketGetPeername),
+            ("setsockopt", BionicFuncId::SocketSetsockopt),
+            ("getsockopt", BionicFuncId::SocketGetsockopt),
+            ("htons", BionicFuncId::Htons),
+            ("htonl", BionicFuncId::Htonl),
+            ("ntohs", BionicFuncId::Ntohs),
+            ("ntohl", BionicFuncId::Ntohl),
+            ("inet_aton", BionicFuncId::InetAton),
+            ("inet_ntoa", BionicFuncId::InetNtoa),
         ];
 
         for (name, id) in funcs {
@@ -667,6 +794,41 @@ impl BionicBridge {
             BionicFuncId::GnuUnwindFindExidx,
             BionicFuncId::Strerror,
             BionicFuncId::StrerrorR,
+            BionicFuncId::DlIteratePhdr,
+            BionicFuncId::AtomicFetchAdd4,
+            BionicFuncId::AtomicFetchSub4,
+            BionicFuncId::AtomicFetchAnd4,
+            BionicFuncId::AtomicFetchOr4,
+            BionicFuncId::AtomicFetchXor4,
+            BionicFuncId::AtomicLoad4,
+            BionicFuncId::AtomicStore4,
+            BionicFuncId::AtomicCompareExchange4,
+            BionicFuncId::AtomicExchange4,
+            BionicFuncId::SyncValCompareAndSwap4,
+            BionicFuncId::SyncBoolCompareAndSwap4,
+            BionicFuncId::SyncFetchAndAdd4,
+            BionicFuncId::SyncFetchAndSub4,
+            BionicFuncId::Socket,
+            BionicFuncId::SocketConnect,
+            BionicFuncId::SocketBind,
+            BionicFuncId::SocketListen,
+            BionicFuncId::SocketAccept,
+            BionicFuncId::SocketSend,
+            BionicFuncId::SocketRecv,
+            BionicFuncId::SocketSendto,
+            BionicFuncId::SocketRecvfrom,
+            BionicFuncId::SocketShutdown,
+            BionicFuncId::SocketClose,
+            BionicFuncId::SocketGetSockname,
+            BionicFuncId::SocketGetPeername,
+            BionicFuncId::SocketSetsockopt,
+            BionicFuncId::SocketGetsockopt,
+            BionicFuncId::Htons,
+            BionicFuncId::Htonl,
+            BionicFuncId::Ntohs,
+            BionicFuncId::Ntohl,
+            BionicFuncId::InetAton,
+            BionicFuncId::InetNtoa,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -1874,6 +2036,371 @@ impl BionicBridge {
                     cpu.set_reg(Reg::R0, 0);
                 }
             }
+            BionicFuncId::DlIteratePhdr => {
+                // dl_iterate_phdr(callback, data)
+                // callback: fn(*const dl_phdr_info, size_t, *mut void) -> i32
+                // dl_phdr_info: { dlpi_addr: u32, dlpi_name_ptr: u32, dlpi_phdr: u32, dlpi_phnum: u16 }
+                // We stub this: iterate all loaded libraries, call back for each.
+                // For simplicity in DBT: we return 0 (no libraries enumerated, callback not invoked)
+                // This matches Android behavior when no phdr callback has been registered.
+                // Real unwind stacks use __gnu_Unwind_Find_exidx instead.
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            // --- Atomic Builtins ---
+            BionicFuncId::AtomicFetchAdd4 => {
+                // __atomic_fetch_add_4(ptr, val, memorder) -> old_val
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val = cpu.reg(Reg::R1);
+                if ptr.as_u32() != 0 {
+                    let old = mem.read_u32(ptr)?;
+                    mem.write_u32(ptr, old.wrapping_add(val))?;
+                    cpu.set_reg(Reg::R0, old);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::AtomicFetchSub4 => {
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val = cpu.reg(Reg::R1);
+                if ptr.as_u32() != 0 {
+                    let old = mem.read_u32(ptr)?;
+                    mem.write_u32(ptr, old.wrapping_sub(val))?;
+                    cpu.set_reg(Reg::R0, old);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::AtomicFetchAnd4 => {
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val = cpu.reg(Reg::R1);
+                if ptr.as_u32() != 0 {
+                    let old = mem.read_u32(ptr)?;
+                    mem.write_u32(ptr, old & val)?;
+                    cpu.set_reg(Reg::R0, old);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::AtomicFetchOr4 => {
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val = cpu.reg(Reg::R1);
+                if ptr.as_u32() != 0 {
+                    let old = mem.read_u32(ptr)?;
+                    mem.write_u32(ptr, old | val)?;
+                    cpu.set_reg(Reg::R0, old);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::AtomicFetchXor4 => {
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val = cpu.reg(Reg::R1);
+                if ptr.as_u32() != 0 {
+                    let old = mem.read_u32(ptr)?;
+                    mem.write_u32(ptr, old ^ val)?;
+                    cpu.set_reg(Reg::R0, old);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::AtomicLoad4 => {
+                // __atomic_load_4(ptr, memorder) -> val
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if ptr.as_u32() != 0 {
+                    let val = mem.read_u32(ptr)?;
+                    cpu.set_reg(Reg::R0, val);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::AtomicStore4 => {
+                // __atomic_store_4(ptr, val, memorder)
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val = cpu.reg(Reg::R1);
+                if ptr.as_u32() != 0 {
+                    mem.write_u32(ptr, val)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AtomicCompareExchange4 => {
+                // __atomic_compare_exchange_4(ptr, expected_ptr, desired, weak, success_mo, fail_mo) -> bool
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let expected_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let desired = cpu.reg(Reg::R2);
+                if ptr.as_u32() != 0 && expected_ptr.as_u32() != 0 {
+                    let current = mem.read_u32(ptr)?;
+                    let expected = mem.read_u32(expected_ptr)?;
+                    if current == expected {
+                        mem.write_u32(ptr, desired)?;
+                        cpu.set_reg(Reg::R0, 1); // true: success
+                    } else {
+                        mem.write_u32(expected_ptr, current)?; // update expected to current
+                        cpu.set_reg(Reg::R0, 0); // false: failure
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::AtomicExchange4 => {
+                // __atomic_exchange_4(ptr, val, memorder) -> old_val
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val = cpu.reg(Reg::R1);
+                if ptr.as_u32() != 0 {
+                    let old = mem.read_u32(ptr)?;
+                    mem.write_u32(ptr, val)?;
+                    cpu.set_reg(Reg::R0, old);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::SyncValCompareAndSwap4 => {
+                // __sync_val_compare_and_swap_4(ptr, old, new) -> old_value
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let expected = cpu.reg(Reg::R1);
+                let desired = cpu.reg(Reg::R2);
+                if ptr.as_u32() != 0 {
+                    let current = mem.read_u32(ptr)?;
+                    if current == expected {
+                        mem.write_u32(ptr, desired)?;
+                    }
+                    cpu.set_reg(Reg::R0, current);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::SyncBoolCompareAndSwap4 => {
+                // __sync_bool_compare_and_swap_4(ptr, old, new) -> bool
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let expected = cpu.reg(Reg::R1);
+                let desired = cpu.reg(Reg::R2);
+                if ptr.as_u32() != 0 {
+                    let current = mem.read_u32(ptr)?;
+                    if current == expected {
+                        mem.write_u32(ptr, desired)?;
+                        cpu.set_reg(Reg::R0, 1);
+                    } else {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::SyncFetchAndAdd4 => {
+                // __sync_fetch_and_add_4(ptr, val) -> old_val
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val = cpu.reg(Reg::R1);
+                if ptr.as_u32() != 0 {
+                    let old = mem.read_u32(ptr)?;
+                    mem.write_u32(ptr, old.wrapping_add(val))?;
+                    cpu.set_reg(Reg::R0, old);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::SyncFetchAndSub4 => {
+                // __sync_fetch_and_sub_4(ptr, val) -> old_val
+                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val = cpu.reg(Reg::R1);
+                if ptr.as_u32() != 0 {
+                    let old = mem.read_u32(ptr)?;
+                    mem.write_u32(ptr, old.wrapping_sub(val))?;
+                    cpu.set_reg(Reg::R0, old);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+
+            // --- POSIX Sockets ---
+            BionicFuncId::Socket => {
+                // socket(domain, type, protocol) -> fd or -1
+                let domain = cpu.reg(Reg::R0) as i32;
+                let sock_type = cpu.reg(Reg::R1) as i32;
+                // Allocate a guest FD; record (domain, type, not-connected)
+                let fd = self.next_socket_fd;
+                self.next_socket_fd += 1;
+                self.socket_fds.insert(fd, (domain, sock_type, false));
+                cpu.set_reg(Reg::R0, fd);
+            }
+            BionicFuncId::SocketConnect => {
+                // connect(sockfd, addr, addrlen) -> 0 or -1
+                let fd = cpu.reg(Reg::R0);
+                if let Some(entry) = self.socket_fds.get_mut(&fd) {
+                    entry.2 = true; // mark connected
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF); // -1 EBADF
+                }
+            }
+            BionicFuncId::SocketBind => {
+                // bind(sockfd, addr, addrlen) -> 0 or -1
+                let fd = cpu.reg(Reg::R0);
+                if self.socket_fds.contains_key(&fd) {
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SocketListen => {
+                // listen(sockfd, backlog) -> 0 or -1
+                let fd = cpu.reg(Reg::R0);
+                if self.socket_fds.contains_key(&fd) {
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SocketAccept => {
+                // accept(sockfd, addr, addrlen) -> new_fd or -1
+                let fd = cpu.reg(Reg::R0);
+                if self.socket_fds.contains_key(&fd) {
+                    let new_fd = self.next_socket_fd;
+                    self.next_socket_fd += 1;
+                    let entry = *self.socket_fds.get(&fd).unwrap();
+                    self.socket_fds.insert(new_fd, (entry.0, entry.1, true));
+                    cpu.set_reg(Reg::R0, new_fd);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SocketSend | BionicFuncId::SocketSendto => {
+                // send(sockfd, buf, len, flags) -> bytes_sent or -1
+                let fd = cpu.reg(Reg::R0);
+                let len = cpu.reg(Reg::R2);
+                if self.socket_fds.contains_key(&fd) {
+                    cpu.set_reg(Reg::R0, len); // pretend all bytes sent
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SocketRecv | BionicFuncId::SocketRecvfrom => {
+                // recv(sockfd, buf, len, flags) -> bytes_received or -1
+                // Stub: return 0 bytes (EOF / no data)
+                let fd = cpu.reg(Reg::R0);
+                if self.socket_fds.contains_key(&fd) {
+                    cpu.set_reg(Reg::R0, 0); // 0 = EOF / no data available
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SocketShutdown => {
+                // shutdown(sockfd, how) -> 0 or -1
+                let fd = cpu.reg(Reg::R0);
+                if let Some(entry) = self.socket_fds.get_mut(&fd) {
+                    entry.2 = false;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SocketClose => {
+                // close(fd) -> 0 or -1
+                let fd = cpu.reg(Reg::R0);
+                if self.socket_fds.remove(&fd).is_some() {
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF); // EBADF
+                }
+            }
+            BionicFuncId::SocketGetSockname | BionicFuncId::SocketGetPeername => {
+                // getsockname(sockfd, addr, addrlen) -> 0 or -1
+                // Writes minimal sockaddr_in (AF_INET=2, port=0, addr=127.0.0.1)
+                let fd = cpu.reg(Reg::R0);
+                let addr_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let addrlen_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                if self.socket_fds.contains_key(&fd) && addr_ptr.as_u32() != 0 {
+                    mem.write_u16(addr_ptr, 2)?; // AF_INET = 2
+                    mem.write_u16(addr_ptr.add(2), 0)?; // port = 0
+                    mem.write_u32(addr_ptr.add(4), 0x0100_007F)?; // 127.0.0.1 in network byte order
+                    if addrlen_ptr.as_u32() != 0 {
+                        mem.write_u32(addrlen_ptr, 16)?; // sizeof(sockaddr_in)
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SocketSetsockopt => {
+                // setsockopt(sockfd, level, optname, optval, optlen) -> 0 or -1
+                let fd = cpu.reg(Reg::R0);
+                if self.socket_fds.contains_key(&fd) {
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SocketGetsockopt => {
+                // getsockopt(sockfd, level, optname, optval, optlen) -> 0 or -1
+                let fd = cpu.reg(Reg::R0);
+                if self.socket_fds.contains_key(&fd) {
+                    let optval_ptr = GuestAddr::new(cpu.reg(Reg::R3));
+                    let optlen_ptr = GuestAddr::new(cpu.reg(Reg::R3).wrapping_add(4));
+                    if optval_ptr.as_u32() != 0 {
+                        mem.write_u32(optval_ptr, 0)?;
+                    }
+                    if optlen_ptr.as_u32() != 0 {
+                        mem.write_u32(optlen_ptr, 4)?;
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::Htons => {
+                let val = cpu.reg(Reg::R0) as u16;
+                cpu.set_reg(Reg::R0, val.to_be() as u32);
+            }
+            BionicFuncId::Htonl => {
+                let val = cpu.reg(Reg::R0);
+                cpu.set_reg(Reg::R0, val.to_be());
+            }
+            BionicFuncId::Ntohs => {
+                let val = cpu.reg(Reg::R0) as u16;
+                cpu.set_reg(Reg::R0, u16::from_be(val) as u32);
+            }
+            BionicFuncId::Ntohl => {
+                let val = cpu.reg(Reg::R0);
+                cpu.set_reg(Reg::R0, u32::from_be(val));
+            }
+            BionicFuncId::InetAton => {
+                // inet_aton(cp, inp) -> 1 on success, 0 on failure
+                let cp_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let inp_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if cp_ptr.as_u32() != 0 {
+                    let s = Self::read_c_string(mem, cp_ptr)?;
+                    let parts: Vec<&str> = s.trim().split('.').collect();
+                    if parts.len() == 4 {
+                        let octets: Vec<u8> = parts.iter()
+                            .filter_map(|p| p.parse::<u8>().ok())
+                            .collect();
+                        if octets.len() == 4 {
+                            let addr = u32::from_be_bytes([octets[0], octets[1], octets[2], octets[3]]);
+                            if inp_ptr.as_u32() != 0 {
+                                mem.write_u32(inp_ptr, addr)?;
+                            }
+                            cpu.set_reg(Reg::R0, 1);
+                        } else {
+                            cpu.set_reg(Reg::R0, 0);
+                        }
+                    } else {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::InetNtoa => {
+                // inet_ntoa(in) -> *const c_char (static buffer)
+                // Input: u32 in network byte order in R0
+                let addr_be = cpu.reg(Reg::R0);
+                let b = addr_be.to_be_bytes();
+                let s = format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3]);
+                let bytes = s.as_bytes();
+                mem.write_bytes(self.inet_ntoa_addr, bytes)?;
+                mem.write_u8(self.inet_ntoa_addr.add(bytes.len() as u32), 0)?;
+                cpu.set_reg(Reg::R0, self.inet_ntoa_addr.as_u32());
+            }
+
             _ => {}
         }
 
