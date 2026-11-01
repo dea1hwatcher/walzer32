@@ -23,3 +23,15 @@ license = "MIT OR Apache-2.0"
 bitflags = "2.8"
 thiserror = "2.0"
 byteorder = "1.5"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Android deployment profile — minimize binary size for on-device .so
+# Usage: cargo build --profile release-android --target aarch64-linux-android
+# ─────────────────────────────────────────────────────────────────────────────
+[profile.release-android]
+inherits = "release"
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

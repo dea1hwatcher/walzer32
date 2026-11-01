@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Transd cross-compilation configuration
+# Target: aarch64-linux-android (API 35, ARMv9 — matches Cortex-X3/A715)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Android ARM64 (primary deployment target) ─────────────────────────────────
+# Requires Android NDK r26+ with clang toolchain in PATH.
+# Typical NDK path: $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/
+#
+# To build for device:
+#   cargo build --target aarch64-linux-android --release
+#
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android35-clang"
+ar = "llvm-ar"
+rustflags = [
+    # Enable AArch64 crypto extensions (SHA2, AES) available on Cortex-X3
+    "-C", "target-cpu=cortex-a55",
+    # Strip debug info for release deployable binary
+]
+
+# ── Android ARM64 (API 21 minimum for older device support) ───────────────────
+[target.aarch64-linux-android21]
+linker = "aarch64-linux-android21-clang"
+ar = "llvm-ar"
+
+# ── Linux x86-64 dev host (default, used by CI / cargo test) ─────────────────
+# No special configuration needed — uses system Rust toolchain.
+
+# ── Workspace-wide build settings ─────────────────────────────────────────────
+[build]
+# Parallel codegen units: maximize parallelism on dev host
+# jobs = 8   # Uncomment to limit parallel Cargo jobs
+
+[profile.release-android]
+# Custom profile for Android deployment: small binary + LTO
+inherits = "release"
+opt-level = "z"          # Minimize binary size
+lto = "thin"             # Link-time optimization (thin for faster builds)
+codegen-units = 1        # Single CGU for maximum size reduction
+strip = "symbols"        # Strip debug symbols (reduces APK size)
+panic = "abort"          # No stack unwinding (saves ~50 KB on arm64)
