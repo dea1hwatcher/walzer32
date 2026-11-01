@@ -189,6 +189,7 @@ fn test_asset_open_read_seek_getbuffer() {
         None,
         None,
         Some(&mut asset),
+        None,
         code_addr,
         &[],
     ).unwrap();

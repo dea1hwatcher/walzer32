@@ -36,6 +36,20 @@ pub mod nr {
     pub const FACCESSAT: u32 = 334;
     pub const ARM_CACHE_FLUSH: u32 = 0xF0002;
     pub const ARM_SET_TLS: u32 = 0xF0005;
+    pub const MEMFD_CREATE: u32 = 385;
+}
+
+/// Linux Android Ashmem ioctl commands
+pub mod ashmem_cmd {
+    pub const ASHMEM_SET_NAME: u32 = 0x41007701;
+    pub const ASHMEM_GET_NAME: u32 = 0x81007702;
+    pub const ASHMEM_SET_SIZE: u32 = 0x40047703;
+    pub const ASHMEM_SET_SIZE_64: u32 = 0x40087703;
+    pub const ASHMEM_GET_SIZE: u32 = 0x7704;
+    pub const ASHMEM_SET_PROT_MASK: u32 = 0x40047705;
+    pub const ASHMEM_SET_PROT_MASK_64: u32 = 0x40087705;
+    pub const ASHMEM_GET_PROT_MASK: u32 = 0x7706;
+    pub const ASHMEM_IS_INITIALIZED: u32 = 0x770B;
 }
 
 /// Linux Futex operation constants

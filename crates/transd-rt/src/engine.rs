@@ -41,6 +41,8 @@ pub trait SyscallHandler: Send {
     fn vfs_mut(&mut self) -> Option<&mut crate::vfs::VirtualFileSystem> {
         None
     }
+
+    fn set_mmap_base(&mut self, _base: GuestAddr) {}
 }
 
 pub struct DefaultSyscallHandler {
@@ -49,6 +51,7 @@ pub struct DefaultSyscallHandler {
     pub tid: u32,
     pub vfs: crate::vfs::VirtualFileSystem,
     pub brk: u32,
+    pub mmap_current: GuestAddr,
 }
 
 impl Default for DefaultSyscallHandler {
@@ -59,6 +62,7 @@ impl Default for DefaultSyscallHandler {
             tid: 1000,
             vfs: crate::vfs::VirtualFileSystem::new(),
             brk: 0x4000_0000,
+            mmap_current: GuestAddr::new(0x7100_0000),
         }
     }
 }
@@ -71,6 +75,7 @@ impl DefaultSyscallHandler {
             tid,
             vfs: crate::vfs::VirtualFileSystem::new(),
             brk: 0x4000_0000,
+            mmap_current: GuestAddr::new(0x7100_0000),
         }
     }
 
@@ -81,7 +86,12 @@ impl DefaultSyscallHandler {
             tid: 1000,
             vfs,
             brk: 0x4000_0000,
+            mmap_current: GuestAddr::new(0x7100_0000),
         }
+    }
+
+    pub fn set_mmap_base(&mut self, base: GuestAddr) {
+        self.mmap_current = base;
     }
 }
 
@@ -356,6 +366,64 @@ impl SyscallHandler for DefaultSyscallHandler {
                 }
                 Ok(None)
             }
+            nr::IOCTL => {
+                let fd = args.arg0;
+                let cmd = args.arg1;
+                let arg = args.arg2;
+                match self.vfs.ioctl(fd, cmd, arg, mem) {
+                    Ok(val) => cpu.set_reg(Reg::R0, val),
+                    Err(err) => cpu.set_reg(Reg::R0, (-err) as u32),
+                }
+                Ok(None)
+            }
+            nr::MEMFD_CREATE => {
+                let name_addr = GuestAddr::new(args.arg0);
+                let flags = args.arg1;
+                let name = crate::vfs::read_cstring_from_mem(mem, name_addr, 256)
+                    .unwrap_or_else(|_| "memfd".to_string());
+                match self.vfs.create_memfd(&name, flags) {
+                    Ok(fd) => cpu.set_reg(Reg::R0, fd),
+                    Err(err) => cpu.set_reg(Reg::R0, (-err) as u32),
+                }
+                Ok(None)
+            }
+            nr::MMAP2 => {
+                let req_addr = args.arg0;
+                let len = args.arg1 as usize;
+                let prot = args.arg2;
+                let _flags = args.arg3;
+                let fd = args.arg4;
+                let _pgoff = args.arg5;
+
+                let aligned_len = (len + 0xFFF) & !0xFFF;
+                let map_addr = if req_addr != 0 {
+                    GuestAddr::new(req_addr)
+                } else {
+                    let addr = self.mmap_current;
+                    self.mmap_current = self.mmap_current.add(aligned_len as u32);
+                    addr
+                };
+
+                // If fd corresponds to an ashmem region, copy its initial data into guest memory
+                if let Some(ashmem) = self.vfs.ashmem_regions.get(&fd) {
+                    if let Ok(lock) = ashmem.data.lock() {
+                        let copy_len = aligned_len.min(lock.len());
+                        if copy_len > 0 {
+                            let _ = mem.write_bytes(map_addr, &lock[..copy_len]);
+                        }
+                    }
+                }
+
+                let _ = mem.mprotect(map_addr, aligned_len, prot);
+                cpu.set_reg(Reg::R0, map_addr.as_u32());
+                Ok(None)
+            }
+            nr::MUNMAP => {
+                let _addr = GuestAddr::new(args.arg0);
+                let _len = args.arg1 as usize;
+                cpu.set_reg(Reg::R0, 0); // Success
+                Ok(None)
+            }
             _ => {
                 // Return -ENOSYS (-38) for unhandled syscalls
                 cpu.set_reg(Reg::R0, (-38i32) as u32);
@@ -370,6 +438,10 @@ impl SyscallHandler for DefaultSyscallHandler {
 
     fn vfs_mut(&mut self) -> Option<&mut crate::vfs::VirtualFileSystem> {
         Some(&mut self.vfs)
+    }
+
+    fn set_mmap_base(&mut self, base: GuestAddr) {
+        self.mmap_current = base;
     }
 }
 
@@ -498,6 +570,11 @@ impl<M: Memory> DbtEngine<M> {
     /// Access the Virtual File System (VFS) of the engine mutably
     pub fn vfs_mut(&mut self) -> Option<&mut crate::vfs::VirtualFileSystem> {
         self.syscall_handler.vfs_mut()
+    }
+
+    /// Sets the dynamic virtual base address for anonymous mmap allocations
+    pub fn set_mmap_base(&mut self, base: GuestAddr) {
+        self.syscall_handler.set_mmap_base(base);
     }
 
     /// Captures a structured Android Tombstone crash dump from current CPU and memory state

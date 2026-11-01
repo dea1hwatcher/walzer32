@@ -4,7 +4,7 @@ use thiserror::Error;
 use transd_apk::{ApkError, ApkPackage};
 use transd_bridge::{
     invoke_guest_extended, invoke_jni_onload, AssetBridge, AudioBridge, BionicBridge, GlesBridge,
-    JniBridge, KeyEvent, RegisteredNativeMethod, SurfaceBridge, TouchEvent,
+    HardwareBufferBridge, JniBridge, KeyEvent, RegisteredNativeMethod, SurfaceBridge, TouchEvent,
 };
 use transd_core::{FlatMemory, GuestAddr};
 use transd_elf::{CompositeResolver, ElfLoader, LoadedLibrary, LoaderError, SymbolResolver};
@@ -37,6 +37,7 @@ pub struct TransdSession {
     pub surface: SurfaceBridge,
     pub audio: AudioBridge,
     pub asset: AssetBridge,
+    pub hardware_buffer: HardwareBufferBridge,
     pub aot_cache_dir: Option<std::path::PathBuf>,
     pub apk_bytes: Option<Vec<u8>>,
     pub loaded_libraries: HashMap<String, LoadedLibrary>,
@@ -56,7 +57,9 @@ impl TransdSession {
         // arena_base + 0x0060_0000: JNIEnv & JavaVM tables (0x100_000)
         // arena_base + 0x0070_0000: Audio stubs (0x100_000)
         // arena_base + 0x0080_0000: AssetManager stubs & heap (0x100_000)
-        // arena_base + 0x0090_0000: Stack region (0x100_000) -> SP top at +0x00A0_0000
+        // arena_base + 0x0090_0000: HardwareBuffer stubs & heap (0x100_000)
+        // arena_base + 0x00A0_0000: Stack region (0x100_000) -> SP top at +0x00B0_0000
+        // arena_base + 0x00C0_0000: Anonymous mmap dynamic heap (0x400_000)
         // arena_base + 0x0100_0000: Dynamic library loading arena
         let bionic_stubs = arena_base;
         let bionic_heap = arena_base.add(0x100_000);
@@ -65,7 +68,9 @@ impl TransdSession {
         let jni_base = arena_base.add(0x600_000);
         let audio_stubs = arena_base.add(0x700_000);
         let asset_stubs = arena_base.add(0x800_000);
-        let stack_top = arena_base.add(0xA00_000);
+        let hw_buffer_stubs = arena_base.add(0x900_000);
+        let stack_top = arena_base.add(0xB00_000);
+        let mmap_base = arena_base.add(0xC00_000);
         let lib_load_base = arena_base.add(0x100_0000);
 
         let bionic = BionicBridge::new(bionic_stubs, bionic_heap, 0x400_000);
@@ -83,10 +88,14 @@ impl TransdSession {
         let asset = AssetBridge::new(asset_stubs, asset_stubs.add(0x1000), 0xF_F000);
         asset.install_stubs(&mut mem)?;
 
+        let hardware_buffer = HardwareBufferBridge::with_stub_base(hw_buffer_stubs);
+        hardware_buffer.install_stubs(&mut mem)?;
+
         let surface = SurfaceBridge::new();
 
         let mut engine = DbtEngine::new(mem);
         engine.cpu.set_sp(stack_top.as_u32() - 0x1000);
+        engine.set_mmap_base(mmap_base);
 
         Ok(Self {
             engine,
@@ -96,6 +105,7 @@ impl TransdSession {
             surface,
             audio,
             asset,
+            hardware_buffer,
             aot_cache_dir: None,
             apk_bytes: None,
             loaded_libraries: HashMap::new(),
@@ -136,12 +146,13 @@ impl TransdSession {
     pub fn load_library_bytes(&mut self, name: &str, elf_bytes: &[u8]) -> Result<LoadedLibrary, SessionError> {
         let load_addr = self.next_load_addr;
 
-        // Create composite resolver combining Bionic, GLES, Audio, AssetManager, and previously loaded libraries
+        // Create composite resolver combining Bionic, GLES, Audio, AssetManager, HardwareBuffer, and previously loaded libraries
         let mut composite = CompositeResolver::new();
         composite.add(&self.bionic);
         composite.add(&self.gles);
         composite.add(&self.audio);
         composite.add(&self.asset);
+        composite.add(&self.hardware_buffer);
 
         struct LoadedMapResolver<'a>(&'a HashMap<String, LoadedLibrary>);
         impl<'a> SymbolResolver for LoadedMapResolver<'a> {
@@ -215,6 +226,7 @@ impl TransdSession {
             Some(&mut self.gles),
             Some(&mut self.audio),
             Some(&mut self.asset),
+            Some(&mut self.hardware_buffer),
             fn_addr,
             args,
         )?;

@@ -4,6 +4,7 @@ use crate::asset::AssetBridge;
 use crate::audio::AudioBridge;
 use crate::bionic::BionicBridge;
 use crate::gles::GlesBridge;
+use crate::hardware_buffer::HardwareBufferBridge;
 use crate::jni::JniBridge;
 
 pub const SENTINEL_RETURN_ADDR: u32 = 0xDEAD_BEE0;
@@ -16,7 +17,7 @@ pub fn invoke_guest<M: Memory>(
     func_addr: GuestAddr,
     args: &[u32],
 ) -> Result<u32, EngineError> {
-    invoke_guest_extended(engine, bionic, jni, None, None, None, func_addr, args)
+    invoke_guest_extended(engine, bionic, jni, None, None, None, None, func_addr, args)
 }
 
 /// Invokes a 32-bit guest function with optional GLES passthrough support
@@ -28,10 +29,10 @@ pub fn invoke_guest_full<M: Memory>(
     func_addr: GuestAddr,
     args: &[u32],
 ) -> Result<u32, EngineError> {
-    invoke_guest_extended(engine, bionic, jni, gles, None, None, func_addr, args)
+    invoke_guest_extended(engine, bionic, jni, gles, None, None, None, func_addr, args)
 }
 
-/// Invokes a 32-bit guest function with optional GLES, Audio, and Asset passthrough support
+/// Invokes a 32-bit guest function with optional GLES, Audio, Asset, and HardwareBuffer passthrough support
 pub fn invoke_guest_extended<M: Memory>(
     engine: &mut DbtEngine<M>,
     bionic: &mut BionicBridge,
@@ -39,6 +40,7 @@ pub fn invoke_guest_extended<M: Memory>(
     mut gles: Option<&mut GlesBridge>,
     mut audio: Option<&mut AudioBridge>,
     mut asset: Option<&mut AssetBridge>,
+    mut hw_buffer: Option<&mut HardwareBufferBridge>,
     func_addr: GuestAddr,
     args: &[u32],
 ) -> Result<u32, EngineError> {
@@ -118,6 +120,14 @@ pub fn invoke_guest_extended<M: Memory>(
                 // Try Asset SVC
                 if let Some(ref mut ast) = asset {
                     if ast.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+                        let next_pc = pc.add(4);
+                        engine.cpu.set_pc(next_pc);
+                        continue;
+                    }
+                }
+                // Try HardwareBuffer SVC
+                if let Some(ref mut hb) = hw_buffer {
+                    if hb.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
                         let next_pc = pc.add(4);
                         engine.cpu.set_pc(next_pc);
                         continue;

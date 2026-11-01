@@ -103,6 +103,16 @@ pub struct OpenFile {
     pub flags: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct AshmemRegion {
+    pub fd: u32,
+    pub name: String,
+    pub size: usize,
+    pub prot_mask: u32,
+    pub is_initialized: bool,
+    pub data: Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
 /// Virtual File System for Android environment virtualization and Bionic path redirection
 #[derive(Debug, Clone)]
 pub struct VirtualFileSystem {
@@ -112,6 +122,8 @@ pub struct VirtualFileSystem {
     pub redirects: Vec<(String, String)>,
     /// Open file descriptors (starting from fd 3)
     pub open_fds: HashMap<u32, OpenFile>,
+    /// Open Ashmem / Memfd shared memory regions
+    pub ashmem_regions: HashMap<u32, AshmemRegion>,
     next_fd: u32,
 }
 
@@ -128,6 +140,7 @@ impl VirtualFileSystem {
             virtual_files: HashMap::new(),
             redirects: Vec::new(),
             open_fds: HashMap::new(),
+            ashmem_regions: HashMap::new(),
             next_fd: 3,
         };
 
@@ -255,6 +268,25 @@ ro.product.manufacturer=Transd
     /// Opens a virtual file by path, returning a guest file descriptor (>= 3) or -errno
     pub fn open(&mut self, raw_path: &str, flags: u32) -> Result<u32, i32> {
         let resolved = self.resolve_path(raw_path);
+
+        // Special handling for Android /dev/ashmem anonymous shared memory device
+        if resolved == "/dev/ashmem" {
+            let fd = self.next_fd;
+            self.next_fd += 1;
+            self.ashmem_regions.insert(
+                fd,
+                AshmemRegion {
+                    fd,
+                    name: "dev/ashmem".to_string(),
+                    size: 0,
+                    prot_mask: 0x7,
+                    is_initialized: false,
+                    data: Arc::new(std::sync::Mutex::new(Vec::new())),
+                },
+            );
+            return Ok(fd);
+        }
+
         if let Some(content) = self.virtual_files.get(&resolved).cloned() {
             let fd = self.next_fd;
             self.next_fd += 1;
@@ -272,9 +304,27 @@ ro.product.manufacturer=Transd
         }
     }
 
+    /// Creates a memory-backed anonymous file (memfd)
+    pub fn create_memfd(&mut self, name: &str, _flags: u32) -> Result<u32, i32> {
+        let fd = self.next_fd;
+        self.next_fd += 1;
+        self.ashmem_regions.insert(
+            fd,
+            AshmemRegion {
+                fd,
+                name: name.to_string(),
+                size: 0,
+                prot_mask: 0x7,
+                is_initialized: true,
+                data: Arc::new(std::sync::Mutex::new(Vec::new())),
+            },
+        );
+        Ok(fd)
+    }
+
     /// Closes an open guest file descriptor
     pub fn close(&mut self, fd: u32) -> Result<(), i32> {
-        if self.open_fds.remove(&fd).is_some() {
+        if self.open_fds.remove(&fd).is_some() || self.ashmem_regions.remove(&fd).is_some() {
             Ok(())
         } else {
             Err(EBADF)
@@ -283,6 +333,14 @@ ro.product.manufacturer=Transd
 
     /// Reads bytes from an open guest file descriptor into a buffer
     pub fn read(&mut self, fd: u32, buf: &mut [u8]) -> Result<usize, i32> {
+        if let Some(ashmem) = self.ashmem_regions.get(&fd) {
+            if let Ok(lock) = ashmem.data.lock() {
+                let available = lock.len().min(buf.len());
+                buf[..available].copy_from_slice(&lock[..available]);
+                return Ok(available);
+            }
+        }
+
         let file = self.open_fds.get_mut(&fd).ok_or(EBADF)?;
         if file.cursor >= file.content.len() {
             return Ok(0); // EOF
@@ -293,6 +351,81 @@ ro.product.manufacturer=Transd
         buf[..to_read].copy_from_slice(&file.content[file.cursor..file.cursor + to_read]);
         file.cursor += to_read;
         Ok(to_read)
+    }
+
+    /// Writes bytes to an open guest file descriptor (e.g. ashmem / memfd)
+    pub fn write(&mut self, fd: u32, buf: &[u8]) -> Result<usize, i32> {
+        if let Some(ashmem) = self.ashmem_regions.get_mut(&fd) {
+            if let Ok(mut lock) = ashmem.data.lock() {
+                let count = buf.len();
+                if lock.len() < count {
+                    lock.resize(count, 0);
+                }
+                lock[..count].copy_from_slice(buf);
+                return Ok(count);
+            }
+        }
+        Err(EBADF)
+    }
+
+    /// Handles IOCTL commands (specifically Android ashmem ioctls)
+    pub fn ioctl(
+        &mut self,
+        fd: u32,
+        cmd: u32,
+        arg: u32,
+        mem: &mut dyn Memory,
+    ) -> Result<u32, i32> {
+        if let Some(ashmem) = self.ashmem_regions.get_mut(&fd) {
+            match cmd {
+                crate::syscall::ashmem_cmd::ASHMEM_SET_NAME => {
+                    let name_addr = GuestAddr::new(arg);
+                    if let Ok(name) = read_cstring_from_mem(mem, name_addr, 256) {
+                        ashmem.name = name;
+                        Ok(0)
+                    } else {
+                        Err(14) // -EFAULT
+                    }
+                }
+                crate::syscall::ashmem_cmd::ASHMEM_GET_NAME => {
+                    let name_addr = GuestAddr::new(arg);
+                    let mut bytes = ashmem.name.as_bytes().to_vec();
+                    bytes.push(0);
+                    if mem.write_bytes(name_addr, &bytes).is_ok() {
+                        Ok(0)
+                    } else {
+                        Err(14) // -EFAULT
+                    }
+                }
+                crate::syscall::ashmem_cmd::ASHMEM_SET_SIZE
+                | crate::syscall::ashmem_cmd::ASHMEM_SET_SIZE_64 => {
+                    let size = arg as usize;
+                    ashmem.size = size;
+                    if let Ok(mut lock) = ashmem.data.lock() {
+                        lock.resize(size, 0);
+                    }
+                    ashmem.is_initialized = true;
+                    Ok(0)
+                }
+                crate::syscall::ashmem_cmd::ASHMEM_GET_SIZE => {
+                    Ok(ashmem.size as u32)
+                }
+                crate::syscall::ashmem_cmd::ASHMEM_SET_PROT_MASK
+                | crate::syscall::ashmem_cmd::ASHMEM_SET_PROT_MASK_64 => {
+                    ashmem.prot_mask = arg;
+                    Ok(0)
+                }
+                crate::syscall::ashmem_cmd::ASHMEM_GET_PROT_MASK => {
+                    Ok(ashmem.prot_mask)
+                }
+                crate::syscall::ashmem_cmd::ASHMEM_IS_INITIALIZED => {
+                    Ok(if ashmem.is_initialized { 1 } else { 0 })
+                }
+                _ => Err(22), // -EINVAL
+            }
+        } else {
+            Err(EBADF)
+        }
     }
 
     /// Adjusts file cursor using standard whence options (SEEK_SET, SEEK_CUR, SEEK_END)
