@@ -712,6 +712,24 @@ pub enum BionicFuncId {
     APerformanceHintReportActualWorkDuration    = 1089,
     APerformanceHintCloseSession                = 1090,
 
+    // Android Looper & Choreographer NDK APIs (Stage 94)
+    ALooperForThread                            = 1100,
+    ALooperPrepare                              = 1101,
+    ALooperAcquire                              = 1102,
+    ALooperRelease                              = 1103,
+    ALooperPollOnce                             = 1104,
+    ALooperPollAll                              = 1105,
+    ALooperWake                                 = 1106,
+    ALooperAddFd                                = 1107,
+    ALooperRemoveFd                             = 1108,
+    AChoreographerGetInstance                   = 1110,
+    AChoreographerPostFrameCallback             = 1111,
+    AChoreographerPostFrameCallbackDelayed      = 1112,
+    AChoreographerPostFrameCallback64           = 1113,
+    AChoreographerPostFrameCallbackDelayed64    = 1114,
+    AChoreographerRegisterRefreshRateCallback   = 1115,
+    AChoreographerUnregisterRefreshRateCallback = 1116,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1404,9 +1422,51 @@ impl BionicFuncId {
             1088 => Some(Self::APerformanceHintUpdateTargetWorkDuration),
             1089 => Some(Self::APerformanceHintReportActualWorkDuration),
             1090 => Some(Self::APerformanceHintCloseSession),
+            1100 => Some(Self::ALooperForThread),
+            1101 => Some(Self::ALooperPrepare),
+            1102 => Some(Self::ALooperAcquire),
+            1103 => Some(Self::ALooperRelease),
+            1104 => Some(Self::ALooperPollOnce),
+            1105 => Some(Self::ALooperPollAll),
+            1106 => Some(Self::ALooperWake),
+            1107 => Some(Self::ALooperAddFd),
+            1108 => Some(Self::ALooperRemoveFd),
+            1110 => Some(Self::AChoreographerGetInstance),
+            1111 => Some(Self::AChoreographerPostFrameCallback),
+            1112 => Some(Self::AChoreographerPostFrameCallbackDelayed),
+            1113 => Some(Self::AChoreographerPostFrameCallback64),
+            1114 => Some(Self::AChoreographerPostFrameCallbackDelayed64),
+            1115 => Some(Self::AChoreographerRegisterRefreshRateCallback),
+            1116 => Some(Self::AChoreographerUnregisterRefreshRateCallback),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct LooperFdRegistration {
+    pub fd: i32,
+    pub ident: i32,
+    pub events: i32,
+    pub callback: u32,
+    pub data: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct AndroidLooper {
+    pub handle: u32,
+    pub refcount: u32,
+    pub allow_non_callbacks: bool,
+    pub woken: bool,
+    pub fds: HashMap<i32, LooperFdRegistration>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChoreographerFrameCallback {
+    pub callback: u32,
+    pub data: u32,
+    pub delay_ms: u32,
+    pub is_64: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1532,6 +1592,11 @@ pub struct BionicBridge {
     pub thermal_listeners: Vec<(u32, u32)>,
     pub perf_sessions: HashMap<u32, PerfHintSession>,
     pub next_perf_session_id: u32,
+    // Android Looper & Choreographer NDK APIs (Stage 94)
+    pub loopers: HashMap<u32, AndroidLooper>,
+    pub choreo_callbacks: Vec<ChoreographerFrameCallback>,
+    pub choreo_refresh_callbacks: Vec<(u32, u32)>,
+    pub vsync_period_ns: i64,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1616,6 +1681,10 @@ impl BionicBridge {
             thermal_listeners: Vec::new(),
             perf_sessions: HashMap::new(),
             next_perf_session_id: 950,
+            loopers: HashMap::new(),
+            choreo_callbacks: Vec::new(),
+            choreo_refresh_callbacks: Vec::new(),
+            vsync_period_ns: 16_666_667,
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -2372,6 +2441,22 @@ impl BionicBridge {
             ("APerformanceHint_updateTargetWorkDuration", BionicFuncId::APerformanceHintUpdateTargetWorkDuration),
             ("APerformanceHint_reportActualWorkDuration", BionicFuncId::APerformanceHintReportActualWorkDuration),
             ("APerformanceHint_closeSession",    BionicFuncId::APerformanceHintCloseSession),
+            ("ALooper_forThread",                BionicFuncId::ALooperForThread),
+            ("ALooper_prepare",                  BionicFuncId::ALooperPrepare),
+            ("ALooper_acquire",                  BionicFuncId::ALooperAcquire),
+            ("ALooper_release",                  BionicFuncId::ALooperRelease),
+            ("ALooper_pollOnce",                 BionicFuncId::ALooperPollOnce),
+            ("ALooper_pollAll",                  BionicFuncId::ALooperPollAll),
+            ("ALooper_wake",                     BionicFuncId::ALooperWake),
+            ("ALooper_addFd",                    BionicFuncId::ALooperAddFd),
+            ("ALooper_removeFd",                 BionicFuncId::ALooperRemoveFd),
+            ("AChoreographer_getInstance",       BionicFuncId::AChoreographerGetInstance),
+            ("AChoreographer_postFrameCallback", BionicFuncId::AChoreographerPostFrameCallback),
+            ("AChoreographer_postFrameCallbackDelayed", BionicFuncId::AChoreographerPostFrameCallbackDelayed),
+            ("AChoreographer_postFrameCallback64", BionicFuncId::AChoreographerPostFrameCallback64),
+            ("AChoreographer_postFrameCallbackDelayed64", BionicFuncId::AChoreographerPostFrameCallbackDelayed64),
+            ("AChoreographer_registerRefreshRateCallback", BionicFuncId::AChoreographerRegisterRefreshRateCallback),
+            ("AChoreographer_unregisterRefreshRateCallback", BionicFuncId::AChoreographerUnregisterRefreshRateCallback),
         ];
 
         for (name, id) in funcs {
@@ -3018,6 +3103,22 @@ impl BionicBridge {
             BionicFuncId::APerformanceHintUpdateTargetWorkDuration,
             BionicFuncId::APerformanceHintReportActualWorkDuration,
             BionicFuncId::APerformanceHintCloseSession,
+            BionicFuncId::ALooperForThread,
+            BionicFuncId::ALooperPrepare,
+            BionicFuncId::ALooperAcquire,
+            BionicFuncId::ALooperRelease,
+            BionicFuncId::ALooperPollOnce,
+            BionicFuncId::ALooperPollAll,
+            BionicFuncId::ALooperWake,
+            BionicFuncId::ALooperAddFd,
+            BionicFuncId::ALooperRemoveFd,
+            BionicFuncId::AChoreographerGetInstance,
+            BionicFuncId::AChoreographerPostFrameCallback,
+            BionicFuncId::AChoreographerPostFrameCallbackDelayed,
+            BionicFuncId::AChoreographerPostFrameCallback64,
+            BionicFuncId::AChoreographerPostFrameCallbackDelayed64,
+            BionicFuncId::AChoreographerRegisterRefreshRateCallback,
+            BionicFuncId::AChoreographerUnregisterRefreshRateCallback,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -7169,6 +7270,209 @@ impl BionicBridge {
                 self.perf_sessions.remove(&sid);
                 cpu.set_reg(Reg::R0, 0);
             }
+
+            // Android Looper & Choreographer NDK APIs (Stage 94)
+            BionicFuncId::ALooperForThread => {
+                let tid = self.current_thread_id;
+                if let Some(looper) = self.loopers.get(&tid) {
+                    cpu.set_reg(Reg::R0, looper.handle);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::ALooperPrepare => {
+                let opts = cpu.reg(Reg::R0);
+                let tid = self.current_thread_id;
+                let handle = 0x7100_0000 | tid;
+                let allow_non = (opts & 1) != 0;
+                self.loopers.entry(tid).or_insert(AndroidLooper {
+                    handle,
+                    refcount: 1,
+                    allow_non_callbacks: allow_non,
+                    woken: false,
+                    fds: HashMap::new(),
+                });
+                cpu.set_reg(Reg::R0, handle);
+            }
+            BionicFuncId::ALooperAcquire => {
+                let handle = cpu.reg(Reg::R0);
+                for looper in self.loopers.values_mut() {
+                    if looper.handle == handle {
+                        looper.refcount += 1;
+                        break;
+                    }
+                }
+            }
+            BionicFuncId::ALooperRelease => {
+                let handle = cpu.reg(Reg::R0);
+                let mut to_remove = None;
+                for (tid, looper) in self.loopers.iter_mut() {
+                    if looper.handle == handle {
+                        if looper.refcount > 0 {
+                            looper.refcount -= 1;
+                        }
+                        if looper.refcount == 0 {
+                            to_remove = Some(*tid);
+                        }
+                        break;
+                    }
+                }
+                if let Some(tid) = to_remove {
+                    self.loopers.remove(&tid);
+                }
+            }
+            BionicFuncId::ALooperWake => {
+                let handle = cpu.reg(Reg::R0);
+                for looper in self.loopers.values_mut() {
+                    if looper.handle == handle {
+                        looper.woken = true;
+                        break;
+                    }
+                }
+            }
+            BionicFuncId::ALooperAddFd => {
+                let handle = cpu.reg(Reg::R0);
+                let fd = cpu.reg(Reg::R1) as i32;
+                let ident = cpu.reg(Reg::R2) as i32;
+                let events = cpu.reg(Reg::R3) as i32;
+
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let callback = if sp.as_u32() != 0 { mem.read_u32(sp).unwrap_or(0) } else { 0 };
+                let data = if sp.as_u32() != 0 { mem.read_u32(sp.add(4)).unwrap_or(0) } else { 0 };
+
+                let mut success = false;
+                for looper in self.loopers.values_mut() {
+                    if looper.handle == handle {
+                        looper.fds.insert(fd, LooperFdRegistration {
+                            fd,
+                            ident,
+                            events,
+                            callback,
+                            data,
+                        });
+                        success = true;
+                        break;
+                    }
+                }
+                cpu.set_reg(Reg::R0, if success { 1 } else { u32::MAX });
+            }
+            BionicFuncId::ALooperRemoveFd => {
+                let handle = cpu.reg(Reg::R0);
+                let fd = cpu.reg(Reg::R1) as i32;
+                let mut res = 0i32;
+                for looper in self.loopers.values_mut() {
+                    if looper.handle == handle {
+                        if looper.fds.remove(&fd).is_some() {
+                            res = 1;
+                        }
+                        break;
+                    }
+                }
+                cpu.set_reg(Reg::R0, res as u32);
+            }
+            BionicFuncId::ALooperPollOnce | BionicFuncId::ALooperPollAll => {
+                let timeout_millis = cpu.reg(Reg::R0) as i32;
+                let out_fd_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let out_events_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let out_data_ptr = GuestAddr::new(cpu.reg(Reg::R3));
+
+                let tid = self.current_thread_id;
+                let ret = if let Some(looper) = self.loopers.get_mut(&tid) {
+                    if looper.woken {
+                        looper.woken = false;
+                        -1 // ALOOPER_POLL_WAKE
+                    } else if timeout_millis == 0 {
+                        -3 // ALOOPER_POLL_TIMEOUT
+                    } else if let Some((&fd, reg)) = looper.fds.iter().next() {
+                        if out_fd_ptr.as_u32() != 0 {
+                            let _ = mem.write_u32(out_fd_ptr, fd as u32);
+                        }
+                        if out_events_ptr.as_u32() != 0 {
+                            let _ = mem.write_u32(out_events_ptr, reg.events as u32);
+                        }
+                        if out_data_ptr.as_u32() != 0 {
+                            let _ = mem.write_u32(out_data_ptr, reg.data);
+                        }
+                        if reg.callback != 0 {
+                            -2 // ALOOPER_POLL_CALLBACK
+                        } else {
+                            reg.ident
+                        }
+                    } else {
+                        -3 // ALOOPER_POLL_TIMEOUT
+                    }
+                } else {
+                    -4 // ALOOPER_POLL_ERROR
+                };
+                cpu.set_reg(Reg::R0, ret as u32);
+            }
+            BionicFuncId::AChoreographerGetInstance => {
+                cpu.set_reg(Reg::R0, 0x7200_0001);
+            }
+            BionicFuncId::AChoreographerPostFrameCallback => {
+                let cb = cpu.reg(Reg::R1);
+                let data = cpu.reg(Reg::R2);
+                if cb != 0 {
+                    self.choreo_callbacks.push(ChoreographerFrameCallback {
+                        callback: cb,
+                        data,
+                        delay_ms: 0,
+                        is_64: false,
+                    });
+                }
+            }
+            BionicFuncId::AChoreographerPostFrameCallbackDelayed => {
+                let cb = cpu.reg(Reg::R1);
+                let data = cpu.reg(Reg::R2);
+                let delay = cpu.reg(Reg::R3);
+                if cb != 0 {
+                    self.choreo_callbacks.push(ChoreographerFrameCallback {
+                        callback: cb,
+                        data,
+                        delay_ms: delay,
+                        is_64: false,
+                    });
+                }
+            }
+            BionicFuncId::AChoreographerPostFrameCallback64 => {
+                let cb = cpu.reg(Reg::R1);
+                let data = cpu.reg(Reg::R2);
+                if cb != 0 {
+                    self.choreo_callbacks.push(ChoreographerFrameCallback {
+                        callback: cb,
+                        data,
+                        delay_ms: 0,
+                        is_64: true,
+                    });
+                }
+            }
+            BionicFuncId::AChoreographerPostFrameCallbackDelayed64 => {
+                let cb = cpu.reg(Reg::R1);
+                let data = cpu.reg(Reg::R2);
+                let delay = cpu.reg(Reg::R3);
+                if cb != 0 {
+                    self.choreo_callbacks.push(ChoreographerFrameCallback {
+                        callback: cb,
+                        data,
+                        delay_ms: delay,
+                        is_64: true,
+                    });
+                }
+            }
+            BionicFuncId::AChoreographerRegisterRefreshRateCallback => {
+                let cb = cpu.reg(Reg::R1);
+                let data = cpu.reg(Reg::R2);
+                if cb != 0 && !self.choreo_refresh_callbacks.iter().any(|&(c, d)| c == cb && d == data) {
+                    self.choreo_refresh_callbacks.push((cb, data));
+                }
+            }
+            BionicFuncId::AChoreographerUnregisterRefreshRateCallback => {
+                let cb = cpu.reg(Reg::R1);
+                let data = cpu.reg(Reg::R2);
+                if let Some(pos) = self.choreo_refresh_callbacks.iter().position(|&(c, d)| c == cb && d == data) {
+                    self.choreo_refresh_callbacks.remove(pos);
+                }
+            }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
                 let src = GuestAddr::new(cpu.reg(Reg::R1));
@@ -10174,6 +10478,14 @@ impl BionicBridge {
 
     pub fn set_thermal_headroom(&mut self, headroom: f32) {
         self.thermal_headroom = headroom;
+    }
+
+    pub fn drain_choreographer_callbacks(&mut self) -> Vec<ChoreographerFrameCallback> {
+        std::mem::take(&mut self.choreo_callbacks)
+    }
+
+    pub fn set_vsync_period_ns(&mut self, period_ns: i64) {
+        self.vsync_period_ns = period_ns;
     }
 
     pub fn register_asset(&mut self, name: &str, data: Vec<u8>) {
