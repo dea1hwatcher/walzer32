@@ -369,6 +369,23 @@ pub enum BionicFuncId {
     AndroidSetAbortMessage   = 558,
     AndroidGetAbortMessage   = 559,
 
+    // Exception Handling & Unwinding (Stage 70)
+    UnwindRaiseException   = 560,
+    UnwindForcedUnwind     = 561,
+    UnwindDeleteException  = 562,
+    UnwindResume           = 563,
+    UnwindGetGR            = 564,
+    UnwindSetGR            = 565,
+    UnwindGetIP            = 566,
+    UnwindSetIP            = 567,
+    AeabiUnwindCppPr0      = 568,
+    AeabiUnwindCppPr1      = 569,
+    AeabiUnwindCppPr2      = 570,
+    CxaBeginCleanup        = 571,
+    CxaEndCleanup          = 572,
+    UnwindBacktrace        = 573,
+    UnwindComplete         = 574,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -767,6 +784,21 @@ impl BionicFuncId {
             557 => Some(Self::SystemPropertyForeach),
             558 => Some(Self::AndroidSetAbortMessage),
             559 => Some(Self::AndroidGetAbortMessage),
+            560 => Some(Self::UnwindRaiseException),
+            561 => Some(Self::UnwindForcedUnwind),
+            562 => Some(Self::UnwindDeleteException),
+            563 => Some(Self::UnwindResume),
+            564 => Some(Self::UnwindGetGR),
+            565 => Some(Self::UnwindSetGR),
+            566 => Some(Self::UnwindGetIP),
+            567 => Some(Self::UnwindSetIP),
+            568 => Some(Self::AeabiUnwindCppPr0),
+            569 => Some(Self::AeabiUnwindCppPr1),
+            570 => Some(Self::AeabiUnwindCppPr2),
+            571 => Some(Self::CxaBeginCleanup),
+            572 => Some(Self::CxaEndCleanup),
+            573 => Some(Self::UnwindBacktrace),
+            574 => Some(Self::UnwindComplete),
             _ => None,
         }
     }
@@ -1284,6 +1316,21 @@ impl BionicBridge {
             ("__system_property_foreach",   BionicFuncId::SystemPropertyForeach),
             ("android_set_abort_message",   BionicFuncId::AndroidSetAbortMessage),
             ("android_get_abort_message",   BionicFuncId::AndroidGetAbortMessage),
+            ("_Unwind_RaiseException",      BionicFuncId::UnwindRaiseException),
+            ("_Unwind_ForcedUnwind",        BionicFuncId::UnwindForcedUnwind),
+            ("_Unwind_DeleteException",     BionicFuncId::UnwindDeleteException),
+            ("_Unwind_Resume",              BionicFuncId::UnwindResume),
+            ("_Unwind_GetGR",               BionicFuncId::UnwindGetGR),
+            ("_Unwind_SetGR",               BionicFuncId::UnwindSetGR),
+            ("_Unwind_GetIP",               BionicFuncId::UnwindGetIP),
+            ("_Unwind_SetIP",               BionicFuncId::UnwindSetIP),
+            ("__aeabi_unwind_cpp_pr0",      BionicFuncId::AeabiUnwindCppPr0),
+            ("__aeabi_unwind_cpp_pr1",      BionicFuncId::AeabiUnwindCppPr1),
+            ("__aeabi_unwind_cpp_pr2",      BionicFuncId::AeabiUnwindCppPr2),
+            ("__cxa_begin_cleanup",         BionicFuncId::CxaBeginCleanup),
+            ("__cxa_end_cleanup",           BionicFuncId::CxaEndCleanup),
+            ("_Unwind_Backtrace",           BionicFuncId::UnwindBacktrace),
+            ("_Unwind_Complete",            BionicFuncId::UnwindComplete),
         ];
 
         for (name, id) in funcs {
@@ -1636,6 +1683,21 @@ impl BionicBridge {
             BionicFuncId::SystemPropertyForeach,
             BionicFuncId::AndroidSetAbortMessage,
             BionicFuncId::AndroidGetAbortMessage,
+            BionicFuncId::UnwindRaiseException,
+            BionicFuncId::UnwindForcedUnwind,
+            BionicFuncId::UnwindDeleteException,
+            BionicFuncId::UnwindResume,
+            BionicFuncId::UnwindGetGR,
+            BionicFuncId::UnwindSetGR,
+            BionicFuncId::UnwindGetIP,
+            BionicFuncId::UnwindSetIP,
+            BionicFuncId::AeabiUnwindCppPr0,
+            BionicFuncId::AeabiUnwindCppPr1,
+            BionicFuncId::AeabiUnwindCppPr2,
+            BionicFuncId::CxaBeginCleanup,
+            BionicFuncId::CxaEndCleanup,
+            BionicFuncId::UnwindBacktrace,
+            BionicFuncId::UnwindComplete,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -2421,6 +2483,72 @@ impl BionicBridge {
                 } else {
                     cpu.set_reg(Reg::R0, 0);
                 }
+            }
+
+            // Exception Handling & Unwinding (Stage 70)
+            BionicFuncId::UnwindRaiseException | BionicFuncId::UnwindForcedUnwind => {
+                // Returns _URC_END_OF_STACK (5) in absence of personality/unwind handler
+                cpu.set_reg(Reg::R0, 5);
+            }
+            BionicFuncId::UnwindDeleteException => {
+                let exc_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                if exc_addr.as_u32() != 0 {
+                    let _ = mem.write_u32(exc_addr.add(8), 0);
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::UnwindResume => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::UnwindGetGR => {
+                let ctx_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let idx = cpu.reg(Reg::R1);
+                if ctx_addr.as_u32() != 0 && idx < 16 {
+                    let val = mem.read_u32(ctx_addr.add(idx * 4)).unwrap_or(0);
+                    cpu.set_reg(Reg::R0, val);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::UnwindSetGR => {
+                let ctx_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let idx = cpu.reg(Reg::R1);
+                let val = cpu.reg(Reg::R2);
+                if ctx_addr.as_u32() != 0 && idx < 16 {
+                    let _ = mem.write_u32(ctx_addr.add(idx * 4), val);
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::UnwindGetIP => {
+                let ctx_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                if ctx_addr.as_u32() != 0 {
+                    let pc = mem.read_u32(ctx_addr.add(15 * 4)).unwrap_or(0);
+                    cpu.set_reg(Reg::R0, pc & !1);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::UnwindSetIP => {
+                let ctx_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val = cpu.reg(Reg::R1);
+                if ctx_addr.as_u32() != 0 {
+                    let _ = mem.write_u32(ctx_addr.add(15 * 4), val);
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AeabiUnwindCppPr0 | BionicFuncId::AeabiUnwindCppPr1 | BionicFuncId::AeabiUnwindCppPr2 => {
+                // Personality routines return _URC_CONTINUE_UNWIND (8)
+                cpu.set_reg(Reg::R0, 8);
+            }
+            BionicFuncId::CxaBeginCleanup | BionicFuncId::CxaEndCleanup => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::UnwindBacktrace => {
+                // Returns _URC_END_OF_STACK (5)
+                cpu.set_reg(Reg::R0, 5);
+            }
+            BionicFuncId::UnwindComplete => {
+                cpu.set_reg(Reg::R0, 0);
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
