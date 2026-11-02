@@ -428,6 +428,32 @@ pub enum BionicFuncId {
     GetNprocsConf        = 629,
     Sysconf              = 630,
 
+    // Extended Filesystem & Path APIs (Stage 74)
+    Symlink              = 640,
+    Symlinkat            = 641,
+    Link                 = 642,
+    Linkat               = 643,
+    Chmod                = 644,
+    Fchmod               = 645,
+    Fchmodat             = 646,
+    Chown                = 647,
+    Fchown               = 648,
+    Lchown               = 649,
+    Fchownat             = 650,
+    Mknod                = 651,
+    Mknodat              = 652,
+    Sync                 = 653,
+    Fsync                = 654,
+    Fdatasync            = 655,
+    Pipe2                = 656,
+    Dup3                 = 657,
+    Statfs               = 658,
+    Statfs64             = 659,
+    Fstatfs              = 660,
+    Fstatfs64            = 661,
+    Statvfs              = 662,
+    Fstatvfs             = 663,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -877,6 +903,30 @@ impl BionicFuncId {
             628 => Some(Self::GetNprocs),
             629 => Some(Self::GetNprocsConf),
             630 => Some(Self::Sysconf),
+            640 => Some(Self::Symlink),
+            641 => Some(Self::Symlinkat),
+            642 => Some(Self::Link),
+            643 => Some(Self::Linkat),
+            644 => Some(Self::Chmod),
+            645 => Some(Self::Fchmod),
+            646 => Some(Self::Fchmodat),
+            647 => Some(Self::Chown),
+            648 => Some(Self::Fchown),
+            649 => Some(Self::Lchown),
+            650 => Some(Self::Fchownat),
+            651 => Some(Self::Mknod),
+            652 => Some(Self::Mknodat),
+            653 => Some(Self::Sync),
+            654 => Some(Self::Fsync),
+            655 => Some(Self::Fdatasync),
+            656 => Some(Self::Pipe2),
+            657 => Some(Self::Dup3),
+            658 => Some(Self::Statfs),
+            659 => Some(Self::Statfs64),
+            660 => Some(Self::Fstatfs),
+            661 => Some(Self::Fstatfs64),
+            662 => Some(Self::Statvfs),
+            663 => Some(Self::Fstatvfs),
             _ => None,
         }
     }
@@ -1484,6 +1534,30 @@ impl BionicBridge {
             ("get_nprocs",                  BionicFuncId::GetNprocs),
             ("get_nprocs_conf",             BionicFuncId::GetNprocsConf),
             ("sysconf",                     BionicFuncId::Sysconf),
+            ("symlink",                     BionicFuncId::Symlink),
+            ("symlinkat",                   BionicFuncId::Symlinkat),
+            ("link",                        BionicFuncId::Link),
+            ("linkat",                      BionicFuncId::Linkat),
+            ("chmod",                       BionicFuncId::Chmod),
+            ("fchmod",                      BionicFuncId::Fchmod),
+            ("fchmodat",                    BionicFuncId::Fchmodat),
+            ("chown",                       BionicFuncId::Chown),
+            ("fchown",                      BionicFuncId::Fchown),
+            ("lchown",                      BionicFuncId::Lchown),
+            ("fchownat",                    BionicFuncId::Fchownat),
+            ("mknod",                       BionicFuncId::Mknod),
+            ("mknodat",                     BionicFuncId::Mknodat),
+            ("sync",                        BionicFuncId::Sync),
+            ("fsync",                       BionicFuncId::Fsync),
+            ("fdatasync",                   BionicFuncId::Fdatasync),
+            ("pipe2",                       BionicFuncId::Pipe2),
+            ("dup3",                        BionicFuncId::Dup3),
+            ("statfs",                      BionicFuncId::Statfs),
+            ("statfs64",                    BionicFuncId::Statfs64),
+            ("fstatfs",                     BionicFuncId::Fstatfs),
+            ("fstatfs64",                   BionicFuncId::Fstatfs64),
+            ("statvfs",                     BionicFuncId::Statvfs),
+            ("fstatvfs",                    BionicFuncId::Fstatvfs),
         ];
 
         for (name, id) in funcs {
@@ -1887,6 +1961,30 @@ impl BionicBridge {
             BionicFuncId::GetNprocs,
             BionicFuncId::GetNprocsConf,
             BionicFuncId::Sysconf,
+            BionicFuncId::Symlink,
+            BionicFuncId::Symlinkat,
+            BionicFuncId::Link,
+            BionicFuncId::Linkat,
+            BionicFuncId::Chmod,
+            BionicFuncId::Fchmod,
+            BionicFuncId::Fchmodat,
+            BionicFuncId::Chown,
+            BionicFuncId::Fchown,
+            BionicFuncId::Lchown,
+            BionicFuncId::Fchownat,
+            BionicFuncId::Mknod,
+            BionicFuncId::Mknodat,
+            BionicFuncId::Sync,
+            BionicFuncId::Fsync,
+            BionicFuncId::Fdatasync,
+            BionicFuncId::Pipe2,
+            BionicFuncId::Dup3,
+            BionicFuncId::Statfs,
+            BionicFuncId::Statfs64,
+            BionicFuncId::Fstatfs,
+            BionicFuncId::Fstatfs64,
+            BionicFuncId::Statvfs,
+            BionicFuncId::Fstatvfs,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -3314,6 +3412,73 @@ impl BionicBridge {
                     _ => 0xFFFF_FFFF,
                 };
                 cpu.set_reg(Reg::R0, val);
+            }
+
+            // Extended Filesystem & Path APIs (Stage 74)
+            BionicFuncId::Symlink | BionicFuncId::Symlinkat |
+            BionicFuncId::Link | BionicFuncId::Linkat |
+            BionicFuncId::Chmod | BionicFuncId::Fchmod | BionicFuncId::Fchmodat |
+            BionicFuncId::Chown | BionicFuncId::Fchown | BionicFuncId::Lchown | BionicFuncId::Fchownat |
+            BionicFuncId::Mknod | BionicFuncId::Mknodat |
+            BionicFuncId::Sync | BionicFuncId::Fsync | BionicFuncId::Fdatasync => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Pipe2 => {
+                let arr_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let _flags = cpu.reg(Reg::R1);
+                let read_fd  = self.next_pipe_fd;
+                let write_fd = self.next_pipe_fd + 1;
+                self.next_pipe_fd += 2;
+                self.pipe_fds.insert(read_fd, (write_fd, Vec::new()));
+                if arr_ptr.as_u32() != 0 {
+                    mem.write_u32(arr_ptr, read_fd)?;
+                    mem.write_u32(arr_ptr.add(4), write_fd)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Dup3 => {
+                let old_fd = cpu.reg(Reg::R0);
+                let new_fd = cpu.reg(Reg::R1);
+                let _flags = cpu.reg(Reg::R2);
+                if old_fd == new_fd {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF); // EINVAL per POSIX
+                } else {
+                    cpu.set_reg(Reg::R0, new_fd);
+                }
+            }
+            BionicFuncId::Statfs | BionicFuncId::Statfs64 | BionicFuncId::Fstatfs | BionicFuncId::Fstatfs64 |
+            BionicFuncId::Statvfs | BionicFuncId::Fstatvfs => {
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if buf_ptr.as_u32() != 0 {
+                    // struct statfs / statvfs:
+                    // 0: f_type (0xEF53 = ext4)
+                    // 4: f_bsize (4096)
+                    // 8: f_blocks (10485760 = 40GB)
+                    // 12: f_bfree (5242880 = 20GB)
+                    // 16: f_bavail (5242880)
+                    // 20: f_files (1000000)
+                    // 24: f_ffree (900000)
+                    // 28: f_fsid.val[0]
+                    // 32: f_fsid.val[1]
+                    // 36: f_namelen (255)
+                    // 40: f_frsize (4096)
+                    // 44: f_flags (0)
+                    mem.write_u32(buf_ptr, 0xEF53)?;
+                    mem.write_u32(buf_ptr.add(4), 4096)?;
+                    mem.write_u32(buf_ptr.add(8), 10_485_760)?;
+                    mem.write_u32(buf_ptr.add(12), 5_242_880)?;
+                    mem.write_u32(buf_ptr.add(16), 5_242_880)?;
+                    mem.write_u32(buf_ptr.add(20), 1_000_000)?;
+                    mem.write_u32(buf_ptr.add(24), 900_000)?;
+                    mem.write_u32(buf_ptr.add(28), 0)?;
+                    mem.write_u32(buf_ptr.add(32), 0)?;
+                    mem.write_u32(buf_ptr.add(36), 255)?;
+                    mem.write_u32(buf_ptr.add(40), 4096)?;
+                    mem.write_u32(buf_ptr.add(44), 0)?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
