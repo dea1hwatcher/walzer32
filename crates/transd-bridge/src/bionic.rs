@@ -454,6 +454,23 @@ pub enum BionicFuncId {
     Statvfs              = 662,
     Fstatvfs             = 663,
 
+    // Terminal / TTY & IOCTL APIs (Stage 75)
+    Isatty               = 670,
+    Ttyname              = 671,
+    TtynameR             = 672,
+    Tcgetattr            = 673,
+    Tcsetattr            = 674,
+    Tcflush              = 675,
+    Tcsendbreak          = 676,
+    Tcdrain              = 677,
+    Tcflow               = 678,
+    Cfgetispeed          = 679,
+    Cfgetospeed          = 680,
+    Cfsetispeed          = 681,
+    Cfsetospeed          = 682,
+    Cfmakeraw            = 683,
+    Ioctl                = 684,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -927,6 +944,21 @@ impl BionicFuncId {
             661 => Some(Self::Fstatfs64),
             662 => Some(Self::Statvfs),
             663 => Some(Self::Fstatvfs),
+            670 => Some(Self::Isatty),
+            671 => Some(Self::Ttyname),
+            672 => Some(Self::TtynameR),
+            673 => Some(Self::Tcgetattr),
+            674 => Some(Self::Tcsetattr),
+            675 => Some(Self::Tcflush),
+            676 => Some(Self::Tcsendbreak),
+            677 => Some(Self::Tcdrain),
+            678 => Some(Self::Tcflow),
+            679 => Some(Self::Cfgetispeed),
+            680 => Some(Self::Cfgetospeed),
+            681 => Some(Self::Cfsetispeed),
+            682 => Some(Self::Cfsetospeed),
+            683 => Some(Self::Cfmakeraw),
+            684 => Some(Self::Ioctl),
             _ => None,
         }
     }
@@ -1005,6 +1037,7 @@ pub struct BionicBridge {
     pub next_socket_fd: u32,
     // Inlined net buffer for inet_ntoa result
     pub inet_ntoa_addr: GuestAddr,
+    pub ttyname_addr: GuestAddr,
     // Pipe descriptor table: guest_read_fd -> guest_write_fd, plus a small in-process buffer
     pub pipe_fds: HashMap<u32, (u32, Vec<u8>)>, // read_fd -> (write_fd, buffer)
     pub next_pipe_fd: u32,
@@ -1074,6 +1107,7 @@ impl BionicBridge {
             },
             next_socket_fd: 10, // Guest FDs start at 10 to avoid clash with 0/1/2
             inet_ntoa_addr: stub_base.add(0xA00),
+            ttyname_addr: stub_base.add(0xC00),
             pipe_fds: HashMap::new(),
             next_pipe_fd: 100, // Guest pipe FDs start at 100
             dir_handles: std::collections::HashMap::new(),
@@ -1558,6 +1592,21 @@ impl BionicBridge {
             ("fstatfs64",                   BionicFuncId::Fstatfs64),
             ("statvfs",                     BionicFuncId::Statvfs),
             ("fstatvfs",                    BionicFuncId::Fstatvfs),
+            ("isatty",                      BionicFuncId::Isatty),
+            ("ttyname",                     BionicFuncId::Ttyname),
+            ("ttyname_r",                   BionicFuncId::TtynameR),
+            ("tcgetattr",                   BionicFuncId::Tcgetattr),
+            ("tcsetattr",                   BionicFuncId::Tcsetattr),
+            ("tcflush",                     BionicFuncId::Tcflush),
+            ("tcsendbreak",                 BionicFuncId::Tcsendbreak),
+            ("tcdrain",                     BionicFuncId::Tcdrain),
+            ("tcflow",                      BionicFuncId::Tcflow),
+            ("cfgetispeed",                 BionicFuncId::Cfgetispeed),
+            ("cfgetospeed",                 BionicFuncId::Cfgetospeed),
+            ("cfsetispeed",                 BionicFuncId::Cfsetispeed),
+            ("cfsetospeed",                 BionicFuncId::Cfsetospeed),
+            ("cfmakeraw",                   BionicFuncId::Cfmakeraw),
+            ("ioctl",                       BionicFuncId::Ioctl),
         ];
 
         for (name, id) in funcs {
@@ -1985,6 +2034,21 @@ impl BionicBridge {
             BionicFuncId::Fstatfs64,
             BionicFuncId::Statvfs,
             BionicFuncId::Fstatvfs,
+            BionicFuncId::Isatty,
+            BionicFuncId::Ttyname,
+            BionicFuncId::TtynameR,
+            BionicFuncId::Tcgetattr,
+            BionicFuncId::Tcsetattr,
+            BionicFuncId::Tcflush,
+            BionicFuncId::Tcsendbreak,
+            BionicFuncId::Tcdrain,
+            BionicFuncId::Tcflow,
+            BionicFuncId::Cfgetispeed,
+            BionicFuncId::Cfgetospeed,
+            BionicFuncId::Cfsetispeed,
+            BionicFuncId::Cfsetospeed,
+            BionicFuncId::Cfmakeraw,
+            BionicFuncId::Ioctl,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -3478,6 +3542,146 @@ impl BionicBridge {
                     cpu.set_reg(Reg::R0, 0);
                 } else {
                     cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            // Terminal / TTY & IOCTL APIs (Stage 75)
+            BionicFuncId::Isatty => {
+                let fd = cpu.reg(Reg::R0);
+                if fd <= 2 {
+                    cpu.set_reg(Reg::R0, 1);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::Ttyname => {
+                let fd = cpu.reg(Reg::R0);
+                if fd <= 2 {
+                    let dev_pts = b"/dev/pts/0\0";
+                    mem.write_bytes(self.ttyname_addr, dev_pts)?;
+                    cpu.set_reg(Reg::R0, self.ttyname_addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::TtynameR => {
+                let fd = cpu.reg(Reg::R0);
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let buflen = cpu.reg(Reg::R2);
+                if fd > 2 {
+                    cpu.set_reg(Reg::R0, 25); // ENOTTY
+                } else if buflen < 11 {
+                    cpu.set_reg(Reg::R0, 34); // ERANGE
+                } else if buf_ptr.as_u32() != 0 {
+                    let dev_pts = b"/dev/pts/0\0";
+                    mem.write_bytes(buf_ptr, dev_pts)?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 14); // EFAULT
+                }
+            }
+            BionicFuncId::Tcgetattr => {
+                let termios_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if termios_ptr.as_u32() != 0 {
+                    // struct termios:
+                    // 0:  c_iflag (ICRNL | IXON = 0x0500)
+                    // 4:  c_oflag (OPOST | ONLCR = 0x0005)
+                    // 8:  c_cflag (B38400 | CS8 | CREAD = 0x00BF)
+                    // 12: c_lflag (ISIG | ICANON | ECHO | ECHOE = 0x8A3B)
+                    // 16: c_line (0)
+                    // 17..48: c_cc (32 bytes control characters)
+                    mem.write_u32(termios_ptr, 0x0500)?;
+                    mem.write_u32(termios_ptr.add(4), 0x0005)?;
+                    mem.write_u32(termios_ptr.add(8), 0x00BF)?;
+                    mem.write_u32(termios_ptr.add(12), 0x8A3B)?;
+                    mem.write_u8(termios_ptr.add(16), 0)?;
+                    let mut cc = [0u8; 32];
+                    cc[5] = 0; // VTIME
+                    cc[6] = 1; // VMIN
+                    mem.write_bytes(termios_ptr.add(17), &cc)?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::Tcsetattr | BionicFuncId::Tcflush | BionicFuncId::Tcsendbreak |
+            BionicFuncId::Tcdrain | BionicFuncId::Tcflow => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Cfgetispeed | BionicFuncId::Cfgetospeed => {
+                let termios_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if termios_ptr.as_u32() != 0 {
+                    let c_cflag = mem.read_u32(termios_ptr.add(8))?;
+                    let speed = c_cflag & 0x100F;
+                    cpu.set_reg(Reg::R0, speed);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::Cfsetispeed | BionicFuncId::Cfsetospeed => {
+                let termios_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let speed = cpu.reg(Reg::R1);
+                if termios_ptr.as_u32() != 0 {
+                    let c_cflag = mem.read_u32(termios_ptr.add(8))?;
+                    let updated = (c_cflag & !0x100F) | (speed & 0x100F);
+                    mem.write_u32(termios_ptr.add(8), updated)?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::Cfmakeraw => {
+                let termios_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if termios_ptr.as_u32() != 0 {
+                    let iflag = mem.read_u32(termios_ptr)?;
+                    let oflag = mem.read_u32(termios_ptr.add(4))?;
+                    let cflag = mem.read_u32(termios_ptr.add(8))?;
+                    let lflag = mem.read_u32(termios_ptr.add(12))?;
+
+                    mem.write_u32(termios_ptr, iflag & !0x05FF)?;
+                    mem.write_u32(termios_ptr.add(4), oflag & !0x0001)?;
+                    mem.write_u32(termios_ptr.add(8), (cflag & !0x0130) | 0x0030)?;
+                    mem.write_u32(termios_ptr.add(12), lflag & !0x804B)?;
+                    mem.write_u8(termios_ptr.add(17 + 5), 0)?;
+                    mem.write_u8(termios_ptr.add(17 + 6), 1)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Ioctl => {
+                let _fd = cpu.reg(Reg::R0);
+                let request = cpu.reg(Reg::R1);
+                let argp = GuestAddr::new(cpu.reg(Reg::R2));
+                match request {
+                    0x5413 => {
+                        // TIOCGWINSZ: struct winsize { ws_row, ws_col, ws_xpixel, ws_ypixel }
+                        if argp.as_u32() != 0 {
+                            mem.write_u16(argp, 24)?;
+                            mem.write_u16(argp.add(2), 80)?;
+                            mem.write_u16(argp.add(4), 0)?;
+                            mem.write_u16(argp.add(6), 0)?;
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    0x541B => {
+                        // FIONREAD
+                        if argp.as_u32() != 0 {
+                            mem.write_u32(argp, 0)?;
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    0x5401 => {
+                        // TCGETS
+                        if argp.as_u32() != 0 {
+                            mem.write_u32(argp, 0x0500)?;
+                            mem.write_u32(argp.add(4), 0x0005)?;
+                            mem.write_u32(argp.add(8), 0x00BF)?;
+                            mem.write_u32(argp.add(12), 0x8A3B)?;
+                            mem.write_u8(argp.add(16), 0)?;
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    _ => {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
                 }
             }
             BionicFuncId::Memmove => {
