@@ -471,6 +471,17 @@ pub enum BionicFuncId {
     Cfmakeraw            = 683,
     Ioctl                = 684,
 
+    // System Event Tracing & Android Trace (Stage 76)
+    AtraceBeginBody         = 690,
+    AtraceEndBody           = 691,
+    AtraceAsyncBeginBody    = 692,
+    AtraceAsyncEndBody      = 693,
+    AtraceSetTracingEnabled = 694,
+    AtraceInit              = 695,
+    AtraceIntBody           = 696,
+    AtraceInt64Body         = 697,
+    AtraceGetEnabledTags    = 698,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -959,6 +970,15 @@ impl BionicFuncId {
             682 => Some(Self::Cfsetospeed),
             683 => Some(Self::Cfmakeraw),
             684 => Some(Self::Ioctl),
+            690 => Some(Self::AtraceBeginBody),
+            691 => Some(Self::AtraceEndBody),
+            692 => Some(Self::AtraceAsyncBeginBody),
+            693 => Some(Self::AtraceAsyncEndBody),
+            694 => Some(Self::AtraceSetTracingEnabled),
+            695 => Some(Self::AtraceInit),
+            696 => Some(Self::AtraceIntBody),
+            697 => Some(Self::AtraceInt64Body),
+            698 => Some(Self::AtraceGetEnabledTags),
             _ => None,
         }
     }
@@ -1000,6 +1020,15 @@ pub struct LogMessage {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtraceEvent {
+    Begin(String),
+    End,
+    AsyncBegin(String, i32),
+    AsyncEnd(String, i32),
+    Counter(String, i64),
+}
+
 /// Provides Bionic C standard library stubs and forwarding for 32-bit guest code
 pub struct BionicBridge {
     pub stub_base: GuestAddr,
@@ -1038,6 +1067,8 @@ pub struct BionicBridge {
     // Inlined net buffer for inet_ntoa result
     pub inet_ntoa_addr: GuestAddr,
     pub ttyname_addr: GuestAddr,
+    pub atrace_enabled: bool,
+    pub atrace_events: Vec<AtraceEvent>,
     // Pipe descriptor table: guest_read_fd -> guest_write_fd, plus a small in-process buffer
     pub pipe_fds: HashMap<u32, (u32, Vec<u8>)>, // read_fd -> (write_fd, buffer)
     pub next_pipe_fd: u32,
@@ -1108,6 +1139,8 @@ impl BionicBridge {
             next_socket_fd: 10, // Guest FDs start at 10 to avoid clash with 0/1/2
             inet_ntoa_addr: stub_base.add(0xA00),
             ttyname_addr: stub_base.add(0xC00),
+            atrace_enabled: false,
+            atrace_events: Vec::new(),
             pipe_fds: HashMap::new(),
             next_pipe_fd: 100, // Guest pipe FDs start at 100
             dir_handles: std::collections::HashMap::new(),
@@ -1607,6 +1640,19 @@ impl BionicBridge {
             ("cfsetospeed",                 BionicFuncId::Cfsetospeed),
             ("cfmakeraw",                   BionicFuncId::Cfmakeraw),
             ("ioctl",                       BionicFuncId::Ioctl),
+            ("atrace_begin_body",           BionicFuncId::AtraceBeginBody),
+            ("atrace_end_body",             BionicFuncId::AtraceEndBody),
+            ("atrace_async_begin_body",     BionicFuncId::AtraceAsyncBeginBody),
+            ("atrace_async_end_body",       BionicFuncId::AtraceAsyncEndBody),
+            ("atrace_set_tracing_enabled",  BionicFuncId::AtraceSetTracingEnabled),
+            ("atrace_init",                 BionicFuncId::AtraceInit),
+            ("atrace_int_body",             BionicFuncId::AtraceIntBody),
+            ("atrace_int64_body",           BionicFuncId::AtraceInt64Body),
+            ("atrace_get_enabled_tags",     BionicFuncId::AtraceGetEnabledTags),
+            ("ATrace_beginSection",         BionicFuncId::AtraceBeginBody),
+            ("ATrace_endSection",           BionicFuncId::AtraceEndBody),
+            ("ATrace_setCounter",           BionicFuncId::AtraceInt64Body),
+            ("ATrace_isEnabled",            BionicFuncId::AtraceGetEnabledTags),
         ];
 
         for (name, id) in funcs {
@@ -2049,6 +2095,15 @@ impl BionicBridge {
             BionicFuncId::Cfsetospeed,
             BionicFuncId::Cfmakeraw,
             BionicFuncId::Ioctl,
+            BionicFuncId::AtraceBeginBody,
+            BionicFuncId::AtraceEndBody,
+            BionicFuncId::AtraceAsyncBeginBody,
+            BionicFuncId::AtraceAsyncEndBody,
+            BionicFuncId::AtraceSetTracingEnabled,
+            BionicFuncId::AtraceInit,
+            BionicFuncId::AtraceIntBody,
+            BionicFuncId::AtraceInt64Body,
+            BionicFuncId::AtraceGetEnabledTags,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -3682,6 +3737,69 @@ impl BionicBridge {
                     _ => {
                         cpu.set_reg(Reg::R0, 0);
                     }
+                }
+            }
+            // System Event Tracing & Android Trace (Stage 76)
+            BionicFuncId::AtraceInit => {
+                // Initialize tracing state, default no-op per Bionic
+            }
+            BionicFuncId::AtraceSetTracingEnabled => {
+                let enabled = cpu.reg(Reg::R0) != 0;
+                self.atrace_enabled = enabled;
+            }
+            BionicFuncId::AtraceGetEnabledTags => {
+                if self.atrace_enabled {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                    cpu.set_reg(Reg::R1, 0xFFFF_FFFF);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                    cpu.set_reg(Reg::R1, 0);
+                }
+            }
+            BionicFuncId::AtraceBeginBody => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if self.atrace_enabled && name_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    self.atrace_events.push(AtraceEvent::Begin(name));
+                }
+            }
+            BionicFuncId::AtraceEndBody => {
+                if self.atrace_enabled {
+                    self.atrace_events.push(AtraceEvent::End);
+                }
+            }
+            BionicFuncId::AtraceAsyncBeginBody => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let cookie = cpu.reg(Reg::R1) as i32;
+                if self.atrace_enabled && name_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    self.atrace_events.push(AtraceEvent::AsyncBegin(name, cookie));
+                }
+            }
+            BionicFuncId::AtraceAsyncEndBody => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let cookie = cpu.reg(Reg::R1) as i32;
+                if self.atrace_enabled && name_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    self.atrace_events.push(AtraceEvent::AsyncEnd(name, cookie));
+                }
+            }
+            BionicFuncId::AtraceIntBody => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let value = cpu.reg(Reg::R1) as i32;
+                if self.atrace_enabled && name_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    self.atrace_events.push(AtraceEvent::Counter(name, value as i64));
+                }
+            }
+            BionicFuncId::AtraceInt64Body => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let low = cpu.reg(Reg::R2) as u64;
+                let high = cpu.reg(Reg::R3) as u64;
+                let value = (high << 32) | low;
+                if self.atrace_enabled && name_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    self.atrace_events.push(AtraceEvent::Counter(name, value as i64));
                 }
             }
             BionicFuncId::Memmove => {
