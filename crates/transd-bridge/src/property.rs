@@ -197,6 +197,73 @@ impl PropertyStore {
 
         Ok(val_len as i32)
     }
+
+    /// Implements `int __system_property_set(const char *key, const char *value)`
+    pub fn system_property_set(
+        &mut self,
+        name: &str,
+        value: &str,
+        mem: &mut (impl Memory + ?Sized),
+    ) -> Result<i32, MemoryError> {
+        self.properties.insert(name.to_string(), value.to_string());
+        if let Some(&slot_addr) = self.prop_addrs.get(name) {
+            let old_serial = mem.read_u32(slot_addr.add(32)).unwrap_or(1);
+            let new_serial = old_serial.wrapping_add(1);
+            mem.write_u32(slot_addr.add(32), new_serial)?;
+
+            let val_bytes = value.as_bytes();
+            let val_len = val_bytes.len().min(PROP_VALUE_MAX - 1);
+            let mut val_buf = [0u8; PROP_VALUE_MAX];
+            val_buf[..val_len].copy_from_slice(&val_bytes[..val_len]);
+            val_buf[val_len] = 0;
+            mem.write_bytes(slot_addr.add(36), &val_buf)?;
+        }
+        Ok(0)
+    }
+
+    /// Implements `int __system_property_update(prop_info *pi, const char *value, unsigned int valuelen)`
+    pub fn system_property_update(
+        &mut self,
+        prop_info_addr: GuestAddr,
+        value: &str,
+        mem: &mut (impl Memory + ?Sized),
+    ) -> Result<i32, MemoryError> {
+        if prop_info_addr.as_u32() == 0 {
+            return Ok(-1);
+        }
+
+        let mut name_buf = [0u8; 32];
+        mem.read_bytes(prop_info_addr, &mut name_buf)?;
+        let name_len = name_buf.iter().position(|&b| b == 0).unwrap_or(31);
+        let name = String::from_utf8_lossy(&name_buf[..name_len]).to_string();
+
+        self.properties.insert(name, value.to_string());
+
+        let old_serial = mem.read_u32(prop_info_addr.add(32)).unwrap_or(1);
+        let new_serial = old_serial.wrapping_add(1);
+        mem.write_u32(prop_info_addr.add(32), new_serial)?;
+
+        let val_bytes = value.as_bytes();
+        let val_len = val_bytes.len().min(PROP_VALUE_MAX - 1);
+        let mut val_buf = [0u8; PROP_VALUE_MAX];
+        val_buf[..val_len].copy_from_slice(&val_bytes[..val_len]);
+        val_buf[val_len] = 0;
+        mem.write_bytes(prop_info_addr.add(36), &val_buf)?;
+
+        Ok(0)
+    }
+
+    /// Implements `uint32_t __system_property_serial(const prop_info *pi)`
+    pub fn system_property_serial(
+        &self,
+        prop_info_addr: GuestAddr,
+        mem: &(impl Memory + ?Sized),
+    ) -> Result<u32, MemoryError> {
+        if prop_info_addr.as_u32() == 0 {
+            return Ok(0);
+        }
+        mem.read_u32(prop_info_addr.add(32))
+    }
 }
 
 #[cfg(test)]

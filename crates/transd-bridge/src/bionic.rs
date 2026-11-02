@@ -357,6 +357,18 @@ pub enum BionicFuncId {
     Assert               = 548,
     Assert2              = 549,
 
+    // Bionic System Properties & Runtime Extensions (Stage 69)
+    SystemPropertySet        = 550,
+    SystemPropertyAreaInit   = 551,
+    SystemPropertyAdd        = 552,
+    SystemPropertyUpdate     = 553,
+    SystemPropertyWait       = 554,
+    SystemPropertyWaitAny    = 555,
+    SystemPropertySerial     = 556,
+    SystemPropertyForeach    = 557,
+    AndroidSetAbortMessage   = 558,
+    AndroidGetAbortMessage   = 559,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -745,6 +757,16 @@ impl BionicFuncId {
             547 => Some(Self::AndroidLogIsLoggable),
             548 => Some(Self::Assert),
             549 => Some(Self::Assert2),
+            550 => Some(Self::SystemPropertySet),
+            551 => Some(Self::SystemPropertyAreaInit),
+            552 => Some(Self::SystemPropertyAdd),
+            553 => Some(Self::SystemPropertyUpdate),
+            554 => Some(Self::SystemPropertyWait),
+            555 => Some(Self::SystemPropertyWaitAny),
+            556 => Some(Self::SystemPropertySerial),
+            557 => Some(Self::SystemPropertyForeach),
+            558 => Some(Self::AndroidSetAbortMessage),
+            559 => Some(Self::AndroidGetAbortMessage),
             _ => None,
         }
     }
@@ -784,6 +806,7 @@ pub struct BionicBridge {
     pub last_dlerror: Option<String>,
     pub dlerror_addr: GuestAddr,
     pub strerror_addr: GuestAddr,
+    pub abort_message: Option<String>,
     pub signal_state: transd_rt::signals::SignalState,
     pub properties: crate::property::PropertyStore,
     pub stack_chk_guard_addr: GuestAddr,
@@ -829,6 +852,7 @@ impl BionicBridge {
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
             strerror_addr: stub_base.add(0x900),
+            abort_message: None,
             signal_state: transd_rt::signals::SignalState::new(),
             properties: crate::property::PropertyStore::new(stub_base.add(0x1000), 0x4000),
             stack_chk_guard_addr: stub_base.add(0x700),
@@ -1250,6 +1274,16 @@ impl BionicBridge {
             ("__android_log_is_loggable", BionicFuncId::AndroidLogIsLoggable),
             ("__assert",                  BionicFuncId::Assert),
             ("__assert2",                 BionicFuncId::Assert2),
+            ("__system_property_set",       BionicFuncId::SystemPropertySet),
+            ("__system_property_area_init", BionicFuncId::SystemPropertyAreaInit),
+            ("__system_property_add",       BionicFuncId::SystemPropertyAdd),
+            ("__system_property_update",    BionicFuncId::SystemPropertyUpdate),
+            ("__system_property_wait",      BionicFuncId::SystemPropertyWait),
+            ("__system_property_wait_any",  BionicFuncId::SystemPropertyWaitAny),
+            ("__system_property_serial",    BionicFuncId::SystemPropertySerial),
+            ("__system_property_foreach",   BionicFuncId::SystemPropertyForeach),
+            ("android_set_abort_message",   BionicFuncId::AndroidSetAbortMessage),
+            ("android_get_abort_message",   BionicFuncId::AndroidGetAbortMessage),
         ];
 
         for (name, id) in funcs {
@@ -1592,6 +1626,16 @@ impl BionicBridge {
             BionicFuncId::AndroidLogIsLoggable,
             BionicFuncId::Assert,
             BionicFuncId::Assert2,
+            BionicFuncId::SystemPropertySet,
+            BionicFuncId::SystemPropertyAreaInit,
+            BionicFuncId::SystemPropertyAdd,
+            BionicFuncId::SystemPropertyUpdate,
+            BionicFuncId::SystemPropertyWait,
+            BionicFuncId::SystemPropertyWaitAny,
+            BionicFuncId::SystemPropertySerial,
+            BionicFuncId::SystemPropertyForeach,
+            BionicFuncId::AndroidSetAbortMessage,
+            BionicFuncId::AndroidGetAbortMessage,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -2275,6 +2319,108 @@ impl BionicBridge {
                 let val_out = GuestAddr::new(cpu.reg(Reg::R2));
                 let len = self.properties.system_property_read(pi_addr, name_out, val_out, mem)?;
                 cpu.set_reg(Reg::R0, len as u32);
+            }
+            BionicFuncId::SystemPropertySet => {
+                let name_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let name = Self::read_c_string(mem, name_addr)?;
+                let val = Self::read_c_string(mem, val_addr)?;
+                let res = self.properties.system_property_set(&name, &val, mem)?;
+                cpu.set_reg(Reg::R0, res as u32);
+            }
+            BionicFuncId::SystemPropertyAreaInit => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::SystemPropertyAdd => {
+                let name_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let namelen = cpu.reg(Reg::R1) as usize;
+                let val_addr = GuestAddr::new(cpu.reg(Reg::R2));
+                let valuelen = cpu.reg(Reg::R3) as usize;
+
+                let mut name_bytes = vec![0u8; namelen.min(32)];
+                mem.read_bytes(name_addr, &mut name_bytes)?;
+                let name = String::from_utf8_lossy(&name_bytes).trim_end_matches('\0').to_string();
+
+                let mut val_bytes = vec![0u8; valuelen.min(92)];
+                mem.read_bytes(val_addr, &mut val_bytes)?;
+                let val = String::from_utf8_lossy(&val_bytes).trim_end_matches('\0').to_string();
+
+                let res = self.properties.system_property_set(&name, &val, mem)?;
+                cpu.set_reg(Reg::R0, res as u32);
+            }
+            BionicFuncId::SystemPropertyUpdate => {
+                let pi_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let val_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let val = Self::read_c_string(mem, val_addr)?;
+                let res = self.properties.system_property_update(pi_addr, &val, mem)?;
+                cpu.set_reg(Reg::R0, res as u32);
+            }
+            BionicFuncId::SystemPropertyWait | BionicFuncId::SystemPropertyWaitAny => {
+                let pi_addr = if func_id == BionicFuncId::SystemPropertyWait {
+                    GuestAddr::new(cpu.reg(Reg::R0))
+                } else {
+                    GuestAddr::new(0)
+                };
+                let seq_addr = if func_id == BionicFuncId::SystemPropertyWait {
+                    GuestAddr::new(cpu.reg(Reg::R1))
+                } else {
+                    GuestAddr::new(cpu.reg(Reg::R0))
+                };
+                let new_seq_addr = if func_id == BionicFuncId::SystemPropertyWait {
+                    GuestAddr::new(cpu.reg(Reg::R2))
+                } else {
+                    GuestAddr::new(cpu.reg(Reg::R1))
+                };
+
+                let old_seq = if seq_addr.as_u32() != 0 {
+                    mem.read_u32(seq_addr).unwrap_or(0)
+                } else {
+                    0
+                };
+                let next_seq = if pi_addr.as_u32() != 0 {
+                    let cur = mem.read_u32(pi_addr.add(32)).unwrap_or(1);
+                    if cur == old_seq { cur.wrapping_add(1) } else { cur }
+                } else {
+                    old_seq.wrapping_add(1)
+                };
+                if new_seq_addr.as_u32() != 0 {
+                    mem.write_u32(new_seq_addr, next_seq)?;
+                }
+                cpu.set_reg(Reg::R0, 1);
+            }
+            BionicFuncId::SystemPropertySerial => {
+                let pi_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let serial = self.properties.system_property_serial(pi_addr, mem)?;
+                cpu.set_reg(Reg::R0, serial);
+            }
+            BionicFuncId::SystemPropertyForeach => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AndroidSetAbortMessage => {
+                let msg_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                if msg_addr.as_u32() != 0 {
+                    let msg = Self::read_c_string(mem, msg_addr).unwrap_or_default();
+                    let abort_buf = self.stub_base.add(0xF00);
+                    let bytes = msg.as_bytes();
+                    let len = bytes.len().min(240);
+                    mem.write_u32(abort_buf, len as u32)?;
+                    mem.write_bytes(abort_buf.add(4), &bytes[..len])?;
+                    mem.write_u8(abort_buf.add(4 + len as u32), 0)?;
+                    self.abort_message = Some(msg.clone());
+                    self.logs.push(LogMessage {
+                        priority: 7, // ANDROID_LOG_FATAL
+                        tag: "abort".to_string(),
+                        text: msg,
+                    });
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AndroidGetAbortMessage => {
+                if self.abort_message.is_some() {
+                    cpu.set_reg(Reg::R0, self.stub_base.add(0xF00).as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
