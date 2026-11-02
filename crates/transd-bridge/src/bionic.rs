@@ -4494,6 +4494,8 @@ impl BionicBridge {
 
                 if res_ptr.as_u32() == 0 {
                     cpu.set_reg(Reg::R0, 3); // EAI_BADFLAGS
+                } else if node_ptr.as_u32() == 0 && serv_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, 11); // EAI_AGAIN (both node and serv NULL)
                 } else {
                     let node = if node_ptr.as_u32() != 0 {
                         Self::read_c_string(mem, node_ptr).unwrap_or_default()
