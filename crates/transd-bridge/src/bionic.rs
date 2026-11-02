@@ -505,6 +505,18 @@ pub enum BionicFuncId {
     Setreuid             = 738,
     Setregid             = 739,
 
+    // CPU Affinity & Multi-core Thread Scheduling APIs (Stage 79)
+    SchedSetaffinity    = 750,
+    SchedGetaffinity    = 751,
+    SchedGetcpu         = 752,
+    SchedSetscheduler   = 753,
+    SchedGetscheduler   = 754,
+    SchedSetparam       = 755,
+    SchedGetparam       = 756,
+    SchedGetPriorityMin = 757,
+    SchedGetPriorityMax = 758,
+    SchedRrGetInterval  = 759,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1021,6 +1033,16 @@ impl BionicFuncId {
             737 => Some(Self::Setresgid),
             738 => Some(Self::Setreuid),
             739 => Some(Self::Setregid),
+            750 => Some(Self::SchedSetaffinity),
+            751 => Some(Self::SchedGetaffinity),
+            752 => Some(Self::SchedGetcpu),
+            753 => Some(Self::SchedSetscheduler),
+            754 => Some(Self::SchedGetscheduler),
+            755 => Some(Self::SchedSetparam),
+            756 => Some(Self::SchedGetparam),
+            757 => Some(Self::SchedGetPriorityMin),
+            758 => Some(Self::SchedGetPriorityMax),
+            759 => Some(Self::SchedRrGetInterval),
             _ => None,
         }
     }
@@ -1719,6 +1741,16 @@ impl BionicBridge {
             ("setresgid",                   BionicFuncId::Setresgid),
             ("setreuid",                    BionicFuncId::Setreuid),
             ("setregid",                    BionicFuncId::Setregid),
+            ("sched_setaffinity",           BionicFuncId::SchedSetaffinity),
+            ("sched_getaffinity",           BionicFuncId::SchedGetaffinity),
+            ("sched_getcpu",                BionicFuncId::SchedGetcpu),
+            ("sched_setscheduler",          BionicFuncId::SchedSetscheduler),
+            ("sched_getscheduler",          BionicFuncId::SchedGetscheduler),
+            ("sched_setparam",              BionicFuncId::SchedSetparam),
+            ("sched_getparam",              BionicFuncId::SchedGetparam),
+            ("sched_get_priority_min",      BionicFuncId::SchedGetPriorityMin),
+            ("sched_get_priority_max",      BionicFuncId::SchedGetPriorityMax),
+            ("sched_rr_get_interval",       BionicFuncId::SchedRrGetInterval),
         ];
 
         for (name, id) in funcs {
@@ -2189,6 +2221,16 @@ impl BionicBridge {
             BionicFuncId::Setresgid,
             BionicFuncId::Setreuid,
             BionicFuncId::Setregid,
+            BionicFuncId::SchedSetaffinity,
+            BionicFuncId::SchedGetaffinity,
+            BionicFuncId::SchedGetcpu,
+            BionicFuncId::SchedSetscheduler,
+            BionicFuncId::SchedGetscheduler,
+            BionicFuncId::SchedSetparam,
+            BionicFuncId::SchedGetparam,
+            BionicFuncId::SchedGetPriorityMin,
+            BionicFuncId::SchedGetPriorityMax,
+            BionicFuncId::SchedRrGetInterval,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -3999,6 +4041,62 @@ impl BionicBridge {
                 }
                 if s_ptr.as_u32() != 0 {
                     mem.write_u32(s_ptr, 10000)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            // CPU Affinity & Multi-core Thread Scheduling APIs (Stage 79)
+            BionicFuncId::SchedSetaffinity => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::SchedGetaffinity => {
+                let _pid = cpu.reg(Reg::R0);
+                let cpusetsize = cpu.reg(Reg::R1) as usize;
+                let mask_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                if mask_ptr.as_u32() != 0 {
+                    let nprocs = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
+                    let mask = if nprocs >= 32 { 0xFFFF_FFFF } else { (1u32 << nprocs) - 1 };
+                    mem.write_u32(mask_ptr, mask)?;
+                    if cpusetsize > 4 {
+                        for i in 4..cpusetsize {
+                            mem.write_u8(mask_ptr.add(i as u32), 0)?;
+                        }
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::SchedGetcpu => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::SchedGetscheduler => {
+                cpu.set_reg(Reg::R0, 0); // SCHED_OTHER (0)
+            }
+            BionicFuncId::SchedSetscheduler | BionicFuncId::SchedSetparam => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::SchedGetparam => {
+                let param_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if param_ptr.as_u32() != 0 {
+                    mem.write_u32(param_ptr, 0)?; // sched_priority = 0
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::SchedGetPriorityMin => {
+                let policy = cpu.reg(Reg::R0);
+                let min_pri = if policy == 1 || policy == 2 { 1 } else { 0 };
+                cpu.set_reg(Reg::R0, min_pri);
+            }
+            BionicFuncId::SchedGetPriorityMax => {
+                let policy = cpu.reg(Reg::R0);
+                let max_pri = if policy == 1 || policy == 2 { 99 } else { 0 };
+                cpu.set_reg(Reg::R0, max_pri);
+            }
+            BionicFuncId::SchedRrGetInterval => {
+                let tp_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if tp_ptr.as_u32() != 0 {
+                    mem.write_u32(tp_ptr, 0)?; // tv_sec = 0
+                    mem.write_u32(tp_ptr.add(4), 10_000_000)?; // tv_nsec = 10ms
                 }
                 cpu.set_reg(Reg::R0, 0);
             }
