@@ -493,6 +493,18 @@ pub enum BionicFuncId {
     AioSuspend           = 717,
     AioCancel            = 718,
 
+    // POSIX Extended Capabilities & Credentials (Stage 78)
+    Capget               = 730,
+    Capset               = 731,
+    Getgroups            = 732,
+    Setgroups            = 733,
+    Getresuid            = 734,
+    Getresgid            = 735,
+    Setresuid            = 736,
+    Setresgid            = 737,
+    Setreuid             = 738,
+    Setregid             = 739,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -999,6 +1011,16 @@ impl BionicFuncId {
             716 => Some(Self::AioReturn),
             717 => Some(Self::AioSuspend),
             718 => Some(Self::AioCancel),
+            730 => Some(Self::Capget),
+            731 => Some(Self::Capset),
+            732 => Some(Self::Getgroups),
+            733 => Some(Self::Setgroups),
+            734 => Some(Self::Getresuid),
+            735 => Some(Self::Getresgid),
+            736 => Some(Self::Setresuid),
+            737 => Some(Self::Setresgid),
+            738 => Some(Self::Setreuid),
+            739 => Some(Self::Setregid),
             _ => None,
         }
     }
@@ -1687,6 +1709,16 @@ impl BionicBridge {
             ("aio_return",                  BionicFuncId::AioReturn),
             ("aio_suspend",                 BionicFuncId::AioSuspend),
             ("aio_cancel",                  BionicFuncId::AioCancel),
+            ("capget",                      BionicFuncId::Capget),
+            ("capset",                      BionicFuncId::Capset),
+            ("getgroups",                   BionicFuncId::Getgroups),
+            ("setgroups",                   BionicFuncId::Setgroups),
+            ("getresuid",                   BionicFuncId::Getresuid),
+            ("getresgid",                   BionicFuncId::Getresgid),
+            ("setresuid",                   BionicFuncId::Setresuid),
+            ("setresgid",                   BionicFuncId::Setresgid),
+            ("setreuid",                    BionicFuncId::Setreuid),
+            ("setregid",                    BionicFuncId::Setregid),
         ];
 
         for (name, id) in funcs {
@@ -2147,6 +2179,16 @@ impl BionicBridge {
             BionicFuncId::AioReturn,
             BionicFuncId::AioSuspend,
             BionicFuncId::AioCancel,
+            BionicFuncId::Capget,
+            BionicFuncId::Capset,
+            BionicFuncId::Getgroups,
+            BionicFuncId::Setgroups,
+            BionicFuncId::Getresuid,
+            BionicFuncId::Getresgid,
+            BionicFuncId::Setresuid,
+            BionicFuncId::Setresgid,
+            BionicFuncId::Setreuid,
+            BionicFuncId::Setregid,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -3910,6 +3952,55 @@ impl BionicBridge {
             }
             BionicFuncId::AioCancel => {
                 cpu.set_reg(Reg::R0, 2); // AIO_ALLDONE
+            }
+            // POSIX Extended Capabilities & Credentials (Stage 78)
+            BionicFuncId::Capget => {
+                let hdrp = GuestAddr::new(cpu.reg(Reg::R0));
+                let datap = GuestAddr::new(cpu.reg(Reg::R1));
+                if hdrp.as_u32() != 0 {
+                    mem.write_u32(hdrp, 0x2008_0522)?; // _LINUX_CAPABILITY_VERSION_3
+                }
+                if datap.as_u32() != 0 {
+                    mem.write_u32(datap, 0)?;
+                    mem.write_u32(datap.add(4), 0)?;
+                    mem.write_u32(datap.add(8), 0)?;
+                    mem.write_u32(datap.add(12), 0)?;
+                    mem.write_u32(datap.add(16), 0)?;
+                    mem.write_u32(datap.add(20), 0)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Capset | BionicFuncId::Setgroups |
+            BionicFuncId::Setresuid | BionicFuncId::Setresgid |
+            BionicFuncId::Setreuid | BionicFuncId::Setregid => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Getgroups => {
+                let size = cpu.reg(Reg::R0) as usize;
+                let list_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if size == 0 {
+                    cpu.set_reg(Reg::R0, 1);
+                } else if list_ptr.as_u32() != 0 {
+                    mem.write_u32(list_ptr, 10000)?; // AID_APP_START
+                    cpu.set_reg(Reg::R0, 1);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::Getresuid | BionicFuncId::Getresgid => {
+                let r_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let e_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let s_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                if r_ptr.as_u32() != 0 {
+                    mem.write_u32(r_ptr, 10000)?;
+                }
+                if e_ptr.as_u32() != 0 {
+                    mem.write_u32(e_ptr, 10000)?;
+                }
+                if s_ptr.as_u32() != 0 {
+                    mem.write_u32(s_ptr, 10000)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
