@@ -386,6 +386,23 @@ pub enum BionicFuncId {
     UnwindBacktrace        = 573,
     UnwindComplete         = 574,
 
+    // POSIX Network & Socket Extensions (Stage 71)
+    InetNtop               = 580,
+    InetPton               = 581,
+    GaiStrerror            = 582,
+    Getservbyname          = 583,
+    Getservbyport          = 584,
+    Getprotobyname         = 585,
+    Getprotobynumber       = 586,
+    Socketpair             = 587,
+    EpollCreate            = 588,
+    EpollCreate1           = 589,
+    EpollCtl               = 590,
+    EpollWait              = 591,
+    EpollPwait             = 592,
+    Pselect                = 593,
+    Ppoll                  = 594,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -799,6 +816,21 @@ impl BionicFuncId {
             572 => Some(Self::CxaEndCleanup),
             573 => Some(Self::UnwindBacktrace),
             574 => Some(Self::UnwindComplete),
+            580 => Some(Self::InetNtop),
+            581 => Some(Self::InetPton),
+            582 => Some(Self::GaiStrerror),
+            583 => Some(Self::Getservbyname),
+            584 => Some(Self::Getservbyport),
+            585 => Some(Self::Getprotobyname),
+            586 => Some(Self::Getprotobynumber),
+            587 => Some(Self::Socketpair),
+            588 => Some(Self::EpollCreate),
+            589 => Some(Self::EpollCreate1),
+            590 => Some(Self::EpollCtl),
+            591 => Some(Self::EpollWait),
+            592 => Some(Self::EpollPwait),
+            593 => Some(Self::Pselect),
+            594 => Some(Self::Ppoll),
             _ => None,
         }
     }
@@ -813,6 +845,13 @@ pub struct ThreadDescriptor {
     pub tls_ptr: GuestAddr,
     pub retval: Option<u32>,
     pub joined: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct EpollRegistration {
+    pub fd: u32,
+    pub events: u32,
+    pub data: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -852,6 +891,7 @@ pub struct BionicBridge {
     pub pid: u32,
     // Socket descriptor table: guest_fd -> (host_family, host_type, is_connected)
     pub socket_fds: HashMap<u32, (i32, i32, bool)>,
+    pub epoll_fds: HashMap<u32, Vec<EpollRegistration>>,
     pub next_socket_fd: u32,
     // Inlined net buffer for inet_ntoa result
     pub inet_ntoa_addr: GuestAddr,
@@ -905,6 +945,7 @@ impl BionicBridge {
             env_addrs: HashMap::new(),
             pid: 1000,
             socket_fds: HashMap::new(),
+            epoll_fds: HashMap::new(),
             next_socket_fd: 10, // Guest FDs start at 10 to avoid clash with 0/1/2
             inet_ntoa_addr: stub_base.add(0xA00),
             pipe_fds: HashMap::new(),
@@ -1331,6 +1372,21 @@ impl BionicBridge {
             ("__cxa_end_cleanup",           BionicFuncId::CxaEndCleanup),
             ("_Unwind_Backtrace",           BionicFuncId::UnwindBacktrace),
             ("_Unwind_Complete",            BionicFuncId::UnwindComplete),
+            ("inet_ntop",                   BionicFuncId::InetNtop),
+            ("inet_pton",                   BionicFuncId::InetPton),
+            ("gai_strerror",                BionicFuncId::GaiStrerror),
+            ("getservbyname",               BionicFuncId::Getservbyname),
+            ("getservbyport",               BionicFuncId::Getservbyport),
+            ("getprotobyname",              BionicFuncId::Getprotobyname),
+            ("getprotobynumber",            BionicFuncId::Getprotobynumber),
+            ("socketpair",                  BionicFuncId::Socketpair),
+            ("epoll_create",                BionicFuncId::EpollCreate),
+            ("epoll_create1",               BionicFuncId::EpollCreate1),
+            ("epoll_ctl",                   BionicFuncId::EpollCtl),
+            ("epoll_wait",                  BionicFuncId::EpollWait),
+            ("epoll_pwait",                 BionicFuncId::EpollPwait),
+            ("pselect",                     BionicFuncId::Pselect),
+            ("ppoll",                       BionicFuncId::Ppoll),
         ];
 
         for (name, id) in funcs {
@@ -1698,6 +1754,21 @@ impl BionicBridge {
             BionicFuncId::CxaEndCleanup,
             BionicFuncId::UnwindBacktrace,
             BionicFuncId::UnwindComplete,
+            BionicFuncId::InetNtop,
+            BionicFuncId::InetPton,
+            BionicFuncId::GaiStrerror,
+            BionicFuncId::Getservbyname,
+            BionicFuncId::Getservbyport,
+            BionicFuncId::Getprotobyname,
+            BionicFuncId::Getprotobynumber,
+            BionicFuncId::Socketpair,
+            BionicFuncId::EpollCreate,
+            BionicFuncId::EpollCreate1,
+            BionicFuncId::EpollCtl,
+            BionicFuncId::EpollWait,
+            BionicFuncId::EpollPwait,
+            BionicFuncId::Pselect,
+            BionicFuncId::Ppoll,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -2550,6 +2621,307 @@ impl BionicBridge {
             BionicFuncId::UnwindComplete => {
                 cpu.set_reg(Reg::R0, 0);
             }
+
+            // POSIX Network & Socket Extensions (Stage 71)
+            BionicFuncId::InetNtop => {
+                let af = cpu.reg(Reg::R0) as i32;
+                let src_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let dst_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let size = cpu.reg(Reg::R3);
+
+                if af == 2 && src_ptr.as_u32() != 0 && dst_ptr.as_u32() != 0 {
+                    let mut b = [0u8; 4];
+                    mem.read_bytes(src_ptr, &mut b)?;
+                    let s = format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3]);
+                    let bytes = s.as_bytes();
+                    if (bytes.len() + 1) as u32 <= size {
+                        mem.write_bytes(dst_ptr, bytes)?;
+                        mem.write_u8(dst_ptr.add(bytes.len() as u32), 0)?;
+                        cpu.set_reg(Reg::R0, dst_ptr.as_u32());
+                    } else {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::InetPton => {
+                let af = cpu.reg(Reg::R0) as i32;
+                let src_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let dst_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                if af == 2 && src_ptr.as_u32() != 0 && dst_ptr.as_u32() != 0 {
+                    let s = Self::read_c_string(mem, src_ptr).unwrap_or_default();
+                    if let Ok(addr) = s.parse::<std::net::Ipv4Addr>() {
+                        mem.write_bytes(dst_ptr, &addr.octets())?;
+                        cpu.set_reg(Reg::R0, 1);
+                    } else {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::GaiStrerror => {
+                let errcode = cpu.reg(Reg::R0);
+                let msg = match errcode {
+                    0 => "Success",
+                    1 => "Address family for hostname not supported",
+                    2 => "Temporary failure in name resolution",
+                    3 => "Bad value for ai_flags",
+                    4 => "Non-recoverable failure in name resolution",
+                    5 => "ai_family not supported",
+                    6 => "Memory allocation failure",
+                    7 => "No address associated with hostname",
+                    8 => "hostname nor servname provided, or not known",
+                    9 => "servname not supported for ai_socktype",
+                    10 => "ai_socktype not supported",
+                    11 => "System error returned in errno",
+                    _ => "Unknown error",
+                };
+                let bytes = msg.as_bytes();
+                mem.write_bytes(self.strerror_addr, bytes)?;
+                mem.write_u8(self.strerror_addr.add(bytes.len() as u32), 0)?;
+                cpu.set_reg(Reg::R0, self.strerror_addr.as_u32());
+            }
+            BionicFuncId::Getservbyname => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let name = if name_ptr.as_u32() != 0 {
+                    Self::read_c_string(mem, name_ptr).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                let port_opt = match name.as_str() {
+                    "http" => Some(80u16),
+                    "https" => Some(443u16),
+                    "ftp" => Some(21u16),
+                    "ssh" => Some(22u16),
+                    "domain" | "dns" => Some(53u16),
+                    "smtp" => Some(25u16),
+                    "ntp" => Some(123u16),
+                    _ => None,
+                };
+
+                if let Some(port) = port_opt {
+                    let s_addr = self.stub_base.add(0xF40);
+                    let name_buf = self.stub_base.add(0xF60);
+                    let proto_buf = self.stub_base.add(0xF70);
+
+                    let mut nb = name.as_bytes().to_vec();
+                    nb.push(0);
+                    mem.write_bytes(name_buf, &nb)?;
+                    mem.write_bytes(proto_buf, b"tcp\0")?;
+
+                    mem.write_u32(s_addr, name_buf.as_u32())?;
+                    mem.write_u32(s_addr.add(4), 0)?;
+                    mem.write_u32(s_addr.add(8), (port.to_be() as i32) as u32)?;
+                    mem.write_u32(s_addr.add(12), proto_buf.as_u32())?;
+
+                    cpu.set_reg(Reg::R0, s_addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::Getservbyport => {
+                let raw_port = cpu.reg(Reg::R0) as u16;
+                let host_port = u16::from_be(raw_port);
+
+                let name_opt = match host_port {
+                    80 => Some("http"),
+                    443 => Some("https"),
+                    21 => Some("ftp"),
+                    22 => Some("ssh"),
+                    53 => Some("domain"),
+                    25 => Some("smtp"),
+                    123 => Some("ntp"),
+                    _ => None,
+                };
+
+                if let Some(name) = name_opt {
+                    let s_addr = self.stub_base.add(0xF40);
+                    let name_buf = self.stub_base.add(0xF60);
+                    let proto_buf = self.stub_base.add(0xF70);
+
+                    let mut nb = name.as_bytes().to_vec();
+                    nb.push(0);
+                    mem.write_bytes(name_buf, &nb)?;
+                    mem.write_bytes(proto_buf, b"tcp\0")?;
+
+                    mem.write_u32(s_addr, name_buf.as_u32())?;
+                    mem.write_u32(s_addr.add(4), 0)?;
+                    mem.write_u32(s_addr.add(8), (raw_port as i32) as u32)?;
+                    mem.write_u32(s_addr.add(12), proto_buf.as_u32())?;
+
+                    cpu.set_reg(Reg::R0, s_addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::Getprotobyname => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let name = if name_ptr.as_u32() != 0 {
+                    Self::read_c_string(mem, name_ptr).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                let proto_opt = match name.as_str() {
+                    "ip" => Some(0u32),
+                    "icmp" => Some(1u32),
+                    "tcp" => Some(6u32),
+                    "udp" => Some(17u32),
+                    "ipv6" => Some(41u32),
+                    _ => None,
+                };
+
+                if let Some(proto) = proto_opt {
+                    let p_addr = self.stub_base.add(0xF80);
+                    let name_buf = self.stub_base.add(0xFA0);
+
+                    let mut nb = name.as_bytes().to_vec();
+                    nb.push(0);
+                    mem.write_bytes(name_buf, &nb)?;
+
+                    mem.write_u32(p_addr, name_buf.as_u32())?;
+                    mem.write_u32(p_addr.add(4), 0)?;
+                    mem.write_u32(p_addr.add(8), proto)?;
+
+                    cpu.set_reg(Reg::R0, p_addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::Getprotobynumber => {
+                let proto = cpu.reg(Reg::R0);
+                let name_opt = match proto {
+                    0 => Some("ip"),
+                    1 => Some("icmp"),
+                    6 => Some("tcp"),
+                    17 => Some("udp"),
+                    41 => Some("ipv6"),
+                    _ => None,
+                };
+
+                if let Some(name) = name_opt {
+                    let p_addr = self.stub_base.add(0xF80);
+                    let name_buf = self.stub_base.add(0xFA0);
+
+                    let mut nb = name.as_bytes().to_vec();
+                    nb.push(0);
+                    mem.write_bytes(name_buf, &nb)?;
+
+                    mem.write_u32(p_addr, name_buf.as_u32())?;
+                    mem.write_u32(p_addr.add(4), 0)?;
+                    mem.write_u32(p_addr.add(8), proto)?;
+
+                    cpu.set_reg(Reg::R0, p_addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::Socketpair => {
+                let domain = cpu.reg(Reg::R0) as i32;
+                let sock_type = cpu.reg(Reg::R1) as i32;
+                let _proto = cpu.reg(Reg::R2);
+                let sv_ptr = GuestAddr::new(cpu.reg(Reg::R3));
+
+                if sv_ptr.as_u32() != 0 {
+                    let fd1 = self.next_socket_fd;
+                    self.next_socket_fd += 1;
+                    let fd2 = self.next_socket_fd;
+                    self.next_socket_fd += 1;
+
+                    self.socket_fds.insert(fd1, (domain, sock_type, true));
+                    self.socket_fds.insert(fd2, (domain, sock_type, true));
+
+                    mem.write_u32(sv_ptr, fd1)?;
+                    mem.write_u32(sv_ptr.add(4), fd2)?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::EpollCreate | BionicFuncId::EpollCreate1 => {
+                let epfd = self.next_socket_fd;
+                self.next_socket_fd += 1;
+                self.epoll_fds.insert(epfd, Vec::new());
+                cpu.set_reg(Reg::R0, epfd);
+            }
+            BionicFuncId::EpollCtl => {
+                let epfd = cpu.reg(Reg::R0);
+                let op = cpu.reg(Reg::R1);
+                let target_fd = cpu.reg(Reg::R2);
+                let event_ptr = GuestAddr::new(cpu.reg(Reg::R3));
+
+                if let Some(regs) = self.epoll_fds.get_mut(&epfd) {
+                    match op {
+                        1 => { // EPOLL_CTL_ADD
+                            let events = if event_ptr.as_u32() != 0 {
+                                mem.read_u32(event_ptr).unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            let data = if event_ptr.as_u32() != 0 {
+                                (mem.read_u32(event_ptr.add(4)).unwrap_or(0) as u64)
+                                    | ((mem.read_u32(event_ptr.add(8)).unwrap_or(0) as u64) << 32)
+                            } else {
+                                0
+                            };
+                            regs.retain(|r| r.fd != target_fd);
+                            regs.push(EpollRegistration {
+                                fd: target_fd,
+                                events,
+                                data,
+                            });
+                            cpu.set_reg(Reg::R0, 0);
+                        }
+                        2 => { // EPOLL_CTL_DEL
+                            regs.retain(|r| r.fd != target_fd);
+                            cpu.set_reg(Reg::R0, 0);
+                        }
+                        3 => { // EPOLL_CTL_MOD
+                            if let Some(r) = regs.iter_mut().find(|r| r.fd == target_fd) {
+                                if event_ptr.as_u32() != 0 {
+                                    r.events = mem.read_u32(event_ptr).unwrap_or(0);
+                                    r.data = (mem.read_u32(event_ptr.add(4)).unwrap_or(0) as u64)
+                                        | ((mem.read_u32(event_ptr.add(8)).unwrap_or(0) as u64) << 32);
+                                }
+                                cpu.set_reg(Reg::R0, 0);
+                            } else {
+                                cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                            }
+                        }
+                        _ => cpu.set_reg(Reg::R0, 0xFFFF_FFFF),
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::EpollWait | BionicFuncId::EpollPwait => {
+                let epfd = cpu.reg(Reg::R0);
+                let events_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let maxevents = cpu.reg(Reg::R2);
+
+                if let Some(regs) = self.epoll_fds.get(&epfd) {
+                    let count = regs.len().min(maxevents as usize);
+                    for (i, r) in regs.iter().take(count).enumerate() {
+                        let slot = events_ptr.add((i as u32) * 12);
+                        mem.write_u32(slot, r.events)?;
+                        mem.write_u32(slot.add(4), r.data as u32)?;
+                        mem.write_u32(slot.add(8), (r.data >> 32) as u32)?;
+                    }
+                    cpu.set_reg(Reg::R0, count as u32);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::Pselect => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Ppoll => {
+                cpu.set_reg(Reg::R0, 0);
+            }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
                 let src = GuestAddr::new(cpu.reg(Reg::R1));
@@ -3374,6 +3746,7 @@ impl BionicBridge {
                 // close(fd) -> 0 or -1
                 let fd = cpu.reg(Reg::R0);
                 if self.socket_fds.remove(&fd).is_some()
+                    || self.epoll_fds.remove(&fd).is_some()
                     || self.pipe_fds.remove(&fd).is_some()
                     || self.vfs.close(fd).is_ok()
                 {
@@ -3721,9 +4094,62 @@ impl BionicBridge {
 
             // ── Stage 60: name/address resolution ─────────────────────────
             BionicFuncId::Getaddrinfo => {
-                // getaddrinfo(node, service, hints, res) -> EAI_AGAIN (11) stub
-                // We don't resolve names; return EAI_AGAIN so callers can retry or skip.
-                cpu.set_reg(Reg::R0, 11); // EAI_AGAIN
+                let node_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let serv_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let hints_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let res_ptr = GuestAddr::new(cpu.reg(Reg::R3));
+
+                if res_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, 3); // EAI_BADFLAGS
+                } else {
+                    let node = if node_ptr.as_u32() != 0 {
+                        Self::read_c_string(mem, node_ptr).unwrap_or_default()
+                    } else {
+                        "127.0.0.1".to_string()
+                    };
+                    let serv = if serv_ptr.as_u32() != 0 {
+                        Self::read_c_string(mem, serv_ptr).unwrap_or_default()
+                    } else {
+                        "80".to_string()
+                    };
+
+                    let port: u16 = serv.parse().unwrap_or(80);
+                    let mut ip_bytes = [127u8, 0, 0, 1];
+                    if let Ok(addr) = node.parse::<std::net::Ipv4Addr>() {
+                        ip_bytes = addr.octets();
+                    }
+
+                    let socktype = if hints_ptr.as_u32() != 0 {
+                        mem.read_u32(hints_ptr.add(8)).unwrap_or(1) // SOCK_STREAM = 1
+                    } else {
+                        1
+                    };
+
+                    let alloc_addr = self.heap_alloc(48);
+                    if alloc_addr.as_u32() != 0 {
+                        let ai_addr = alloc_addr.add(32);
+                        // struct addrinfo (32 bytes)
+                        mem.write_u32(alloc_addr, 0)?; // ai_flags
+                        mem.write_u32(alloc_addr.add(4), 2)?; // ai_family = AF_INET (2)
+                        mem.write_u32(alloc_addr.add(8), socktype)?; // ai_socktype
+                        mem.write_u32(alloc_addr.add(12), 6)?; // ai_protocol = IPPROTO_TCP (6)
+                        mem.write_u32(alloc_addr.add(16), 16)?; // ai_addrlen = 16
+                        mem.write_u32(alloc_addr.add(20), ai_addr.as_u32())?; // ai_addr
+                        mem.write_u32(alloc_addr.add(24), 0)?; // ai_canonname
+                        mem.write_u32(alloc_addr.add(28), 0)?; // ai_next
+
+                        // struct sockaddr_in (16 bytes) at ai_addr
+                        mem.write_u16(ai_addr, 2)?; // sin_family = AF_INET (2)
+                        mem.write_u16(ai_addr.add(2), port.to_be())?; // sin_port (network byte order)
+                        mem.write_bytes(ai_addr.add(4), &ip_bytes)?; // sin_addr
+                        mem.write_bytes(ai_addr.add(8), &[0u8; 8])?; // sin_zero
+
+                        mem.write_u32(res_ptr, alloc_addr.as_u32())?;
+                        cpu.set_reg(Reg::R0, 0); // Success!
+                    } else {
+                        cpu.set_reg(Reg::R0, 6); // EAI_MEMORY
+                    }
+                }
             }
 
             BionicFuncId::Freeaddrinfo => {
