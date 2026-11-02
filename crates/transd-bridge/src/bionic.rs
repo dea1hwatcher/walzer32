@@ -785,6 +785,16 @@ pub enum BionicFuncId {
     Lremovexattr                            = 1210,
     Fremovexattr                            = 1211,
 
+    // Android Native Hardware Buffer NDK APIs (Stage 99)
+    AHardwareBufferAllocate                 = 1220,
+    AHardwareBufferAcquire                  = 1221,
+    AHardwareBufferRelease                  = 1222,
+    AHardwareBufferDescribe                 = 1223,
+    AHardwareBufferLock                     = 1224,
+    AHardwareBufferUnlock                   = 1225,
+    AHardwareBufferIsSupported              = 1226,
+    AHardwareBufferLockPlanes               = 1227,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1540,9 +1550,32 @@ impl BionicFuncId {
             1209 => Some(Self::Removexattr),
             1210 => Some(Self::Lremovexattr),
             1211 => Some(Self::Fremovexattr),
+            1220 => Some(Self::AHardwareBufferAllocate),
+            1221 => Some(Self::AHardwareBufferAcquire),
+            1222 => Some(Self::AHardwareBufferRelease),
+            1223 => Some(Self::AHardwareBufferDescribe),
+            1224 => Some(Self::AHardwareBufferLock),
+            1225 => Some(Self::AHardwareBufferUnlock),
+            1226 => Some(Self::AHardwareBufferIsSupported),
+            1227 => Some(Self::AHardwareBufferLockPlanes),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct HardwareBufferData {
+    pub handle: u32,
+    pub refcount: u32,
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub format: u32,
+    pub usage: u64,
+    pub stride: u32,
+    pub data_addr: GuestAddr,
+    pub byte_size: usize,
+    pub is_locked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1764,6 +1797,9 @@ pub struct BionicBridge {
     pub next_sensor_queue_id: u32,
     // Linux Extended Attributes Subsystem (Stage 98)
     pub xattrs: HashMap<String, HashMap<String, Vec<u8>>>,
+    // Android Hardware Buffer Subsystem (Stage 99)
+    pub hw_buffers: HashMap<u32, HardwareBufferData>,
+    pub next_hwbuffer_id: u32,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1911,6 +1947,8 @@ impl BionicBridge {
             sensor_queues: HashMap::new(),
             next_sensor_queue_id: 750,
             xattrs: HashMap::new(),
+            hw_buffers: HashMap::new(),
+            next_hwbuffer_id: 850,
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -2730,6 +2768,14 @@ impl BionicBridge {
             ("removexattr",                          BionicFuncId::Removexattr),
             ("lremovexattr",                         BionicFuncId::Lremovexattr),
             ("fremovexattr",                         BionicFuncId::Fremovexattr),
+            ("AHardwareBuffer_allocate",             BionicFuncId::AHardwareBufferAllocate),
+            ("AHardwareBuffer_acquire",              BionicFuncId::AHardwareBufferAcquire),
+            ("AHardwareBuffer_release",              BionicFuncId::AHardwareBufferRelease),
+            ("AHardwareBuffer_describe",             BionicFuncId::AHardwareBufferDescribe),
+            ("AHardwareBuffer_lock",                 BionicFuncId::AHardwareBufferLock),
+            ("AHardwareBuffer_unlock",               BionicFuncId::AHardwareBufferUnlock),
+            ("AHardwareBuffer_isSupported",          BionicFuncId::AHardwareBufferIsSupported),
+            ("AHardwareBuffer_lockPlanes",           BionicFuncId::AHardwareBufferLockPlanes),
         ];
 
         for (name, id) in funcs {
@@ -3439,6 +3485,14 @@ impl BionicBridge {
             BionicFuncId::Removexattr,
             BionicFuncId::Lremovexattr,
             BionicFuncId::Fremovexattr,
+            BionicFuncId::AHardwareBufferAllocate,
+            BionicFuncId::AHardwareBufferAcquire,
+            BionicFuncId::AHardwareBufferRelease,
+            BionicFuncId::AHardwareBufferDescribe,
+            BionicFuncId::AHardwareBufferLock,
+            BionicFuncId::AHardwareBufferUnlock,
+            BionicFuncId::AHardwareBufferIsSupported,
+            BionicFuncId::AHardwareBufferLockPlanes,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -8610,6 +8664,186 @@ impl BionicBridge {
                     } else {
                         cpu.set_reg(Reg::R0, u32::MAX);
                     }
+                }
+            }
+
+            // Android Native Hardware Buffer NDK APIs (Stage 99)
+            BionicFuncId::AHardwareBufferAllocate => {
+                let desc_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let out_buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+
+                if desc_ptr.as_u32() == 0 || out_buf_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, (-22i32) as u32); // -EINVAL
+                } else {
+                    let width = mem.read_u32(desc_ptr).unwrap_or(0);
+                    let height = mem.read_u32(desc_ptr.add(4)).unwrap_or(0);
+                    let layers = mem.read_u32(desc_ptr.add(8)).unwrap_or(1).max(1);
+                    let format = mem.read_u32(desc_ptr.add(12)).unwrap_or(1);
+                    let usage_low = mem.read_u32(desc_ptr.add(16)).unwrap_or(0) as u64;
+                    let usage_high = mem.read_u32(desc_ptr.add(20)).unwrap_or(0) as u64;
+                    let usage = usage_low | (usage_high << 32);
+
+                    if width == 0 || height == 0 {
+                        cpu.set_reg(Reg::R0, (-22i32) as u32);
+                    } else {
+                        let bpp = match format {
+                            1 | 2 => 4usize, // RGBA_8888, RGBX_8888
+                            3 => 3usize,     // RGB_888
+                            4 => 2usize,     // RGB_565
+                            0x16 => 8usize,  // RGBA_16F
+                            0x21 => 1usize,  // BLOB
+                            _ => 4usize,
+                        };
+                        let stride = width;
+                        let byte_size = (stride as usize) * (height as usize) * (layers as usize) * bpp;
+                        let data_addr = self.heap_alloc(byte_size as u32);
+
+                        // Zero buffer memory
+                        let zero_chunk = vec![0u8; 1024];
+                        let mut rem = byte_size;
+                        let mut off = 0u32;
+                        while rem > 0 {
+                            let sz = rem.min(1024);
+                            let _ = mem.write_bytes(data_addr.add(off), &zero_chunk[..sz]);
+                            rem -= sz;
+                            off += sz as u32;
+                        }
+
+                        let handle = self.next_hwbuffer_id;
+                        self.next_hwbuffer_id += 1;
+                        self.hw_buffers.insert(handle, HardwareBufferData {
+                            handle,
+                            refcount: 1,
+                            width,
+                            height,
+                            layers,
+                            format,
+                            usage,
+                            stride,
+                            data_addr,
+                            byte_size,
+                            is_locked: false,
+                        });
+
+                        mem.write_u32(out_buf_ptr, handle)?;
+                        cpu.set_reg(Reg::R0, 0); // OK
+                    }
+                }
+            }
+            BionicFuncId::AHardwareBufferAcquire => {
+                let handle = cpu.reg(Reg::R0);
+                if let Some(buf) = self.hw_buffers.get_mut(&handle) {
+                    buf.refcount += 1;
+                }
+            }
+            BionicFuncId::AHardwareBufferRelease => {
+                let handle = cpu.reg(Reg::R0);
+                let mut should_remove = false;
+                if let Some(buf) = self.hw_buffers.get_mut(&handle) {
+                    if buf.refcount > 0 {
+                        buf.refcount -= 1;
+                    }
+                    if buf.refcount == 0 {
+                        should_remove = true;
+                    }
+                }
+                if should_remove {
+                    self.hw_buffers.remove(&handle);
+                }
+            }
+            BionicFuncId::AHardwareBufferDescribe => {
+                let handle = cpu.reg(Reg::R0);
+                let out_desc = GuestAddr::new(cpu.reg(Reg::R1));
+                if out_desc.as_u32() != 0 {
+                    if let Some(buf) = self.hw_buffers.get(&handle) {
+                        mem.write_u32(out_desc, buf.width)?;
+                        mem.write_u32(out_desc.add(4), buf.height)?;
+                        mem.write_u32(out_desc.add(8), buf.layers)?;
+                        mem.write_u32(out_desc.add(12), buf.format)?;
+                        mem.write_u32(out_desc.add(16), buf.usage as u32)?;
+                        mem.write_u32(out_desc.add(20), (buf.usage >> 32) as u32)?;
+                        mem.write_u32(out_desc.add(24), buf.stride)?;
+                        mem.write_u32(out_desc.add(28), 0)?; // rfu0
+                        mem.write_u32(out_desc.add(32), 0)?; // rfu1 low
+                        mem.write_u32(out_desc.add(36), 0)?; // rfu1 high
+                    }
+                }
+            }
+            BionicFuncId::AHardwareBufferLock => {
+                let handle = cpu.reg(Reg::R0);
+                // AAPCS: R0=buffer, R1=padding, R2:R3=usage(64), [SP]=fence, [SP+4]=rect, [SP+8]=outVirtualAddress
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let out_vaddr_ptr = if sp.as_u32() != 0 {
+                    GuestAddr::new(mem.read_u32(sp.add(8)).unwrap_or(0))
+                } else {
+                    GuestAddr::new(0)
+                };
+
+                if let Some(buf) = self.hw_buffers.get_mut(&handle) {
+                    buf.is_locked = true;
+                    if out_vaddr_ptr.as_u32() != 0 {
+                        mem.write_u32(out_vaddr_ptr, buf.data_addr.as_u32())?;
+                    }
+                    cpu.set_reg(Reg::R0, 0); // OK
+                } else {
+                    cpu.set_reg(Reg::R0, (-22i32) as u32); // -EINVAL
+                }
+            }
+            BionicFuncId::AHardwareBufferUnlock => {
+                let handle = cpu.reg(Reg::R0);
+                let fence_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+
+                if let Some(buf) = self.hw_buffers.get_mut(&handle) {
+                    buf.is_locked = false;
+                    if fence_ptr.as_u32() != 0 {
+                        mem.write_u32(fence_ptr, (-1i32) as u32)?;
+                    }
+                    cpu.set_reg(Reg::R0, 0); // OK
+                } else {
+                    cpu.set_reg(Reg::R0, (-22i32) as u32);
+                }
+            }
+            BionicFuncId::AHardwareBufferIsSupported => {
+                let desc_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if desc_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    let width = mem.read_u32(desc_ptr).unwrap_or(0);
+                    let height = mem.read_u32(desc_ptr.add(4)).unwrap_or(0);
+                    let format = mem.read_u32(desc_ptr.add(12)).unwrap_or(0);
+                    let supported = width > 0 && width <= 8192 && height > 0 && height <= 8192 && (format == 1 || format == 2 || format == 3 || format == 4 || format == 0x16 || format == 0x21);
+                    cpu.set_reg(Reg::R0, if supported { 1 } else { 0 });
+                }
+            }
+            BionicFuncId::AHardwareBufferLockPlanes => {
+                let handle = cpu.reg(Reg::R0);
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let out_planes_ptr = if sp.as_u32() != 0 {
+                    GuestAddr::new(mem.read_u32(sp.add(8)).unwrap_or(0))
+                } else {
+                    GuestAddr::new(0)
+                };
+
+                if let Some(buf) = self.hw_buffers.get_mut(&handle) {
+                    buf.is_locked = true;
+                    if out_planes_ptr.as_u32() != 0 {
+                        // struct AHardwareBuffer_Planes { uint32_t planeCount; AHardwareBuffer_Plane planes[4]; }
+                        // struct AHardwareBuffer_Plane { void* data; uint32_t pixelStride; uint32_t rowStride; }
+                        mem.write_u32(out_planes_ptr, 1)?; // planeCount = 1
+                        let bpp = match buf.format {
+                            1 | 2 => 4u32,
+                            3 => 3u32,
+                            4 => 2u32,
+                            0x16 => 8u32,
+                            _ => 1u32,
+                        };
+                        mem.write_u32(out_planes_ptr.add(4), buf.data_addr.as_u32())?; // data
+                        mem.write_u32(out_planes_ptr.add(8), bpp)?; // pixelStride
+                        mem.write_u32(out_planes_ptr.add(12), buf.stride * bpp)?; // rowStride
+                    }
+                    cpu.set_reg(Reg::R0, 0); // OK
+                } else {
+                    cpu.set_reg(Reg::R0, (-22i32) as u32);
                 }
             }
             BionicFuncId::Memmove => {
