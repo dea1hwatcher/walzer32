@@ -415,6 +415,19 @@ pub enum BionicFuncId {
     Sigtimedwait         = 608,
     Sigwaitinfo          = 609,
 
+    // Process Resource Limits & System Info (Stage 73)
+    Getrlimit            = 620,
+    Getrlimit64          = 621,
+    Setrlimit            = 622,
+    Setrlimit64          = 623,
+    Prlimit              = 624,
+    Prlimit64            = 625,
+    Sysinfo              = 626,
+    Getpagesize          = 627,
+    GetNprocs            = 628,
+    GetNprocsConf        = 629,
+    Sysconf              = 630,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -853,6 +866,17 @@ impl BionicFuncId {
             607 => Some(Self::Sigwait),
             608 => Some(Self::Sigtimedwait),
             609 => Some(Self::Sigwaitinfo),
+            620 => Some(Self::Getrlimit),
+            621 => Some(Self::Getrlimit64),
+            622 => Some(Self::Setrlimit),
+            623 => Some(Self::Setrlimit64),
+            624 => Some(Self::Prlimit),
+            625 => Some(Self::Prlimit64),
+            626 => Some(Self::Sysinfo),
+            627 => Some(Self::Getpagesize),
+            628 => Some(Self::GetNprocs),
+            629 => Some(Self::GetNprocsConf),
+            630 => Some(Self::Sysconf),
             _ => None,
         }
     }
@@ -927,6 +951,7 @@ pub struct BionicBridge {
     pub epoll_fds: HashMap<u32, Vec<EpollRegistration>>,
     pub timers: HashMap<u32, PosixTimer>,
     pub next_timer_id: u32,
+    pub rlimits: HashMap<u32, (u64, u64)>,
     pub next_socket_fd: u32,
     // Inlined net buffer for inet_ntoa result
     pub inet_ntoa_addr: GuestAddr,
@@ -983,6 +1008,20 @@ impl BionicBridge {
             epoll_fds: HashMap::new(),
             timers: HashMap::new(),
             next_timer_id: 1,
+            rlimits: {
+                let mut m = HashMap::new();
+                m.insert(0, (u64::MAX, u64::MAX)); // RLIMIT_CPU
+                m.insert(1, (u64::MAX, u64::MAX)); // RLIMIT_FSIZE
+                m.insert(2, (u64::MAX, u64::MAX)); // RLIMIT_DATA
+                m.insert(3, (8 * 1024 * 1024, 8 * 1024 * 1024)); // RLIMIT_STACK (8 MB)
+                m.insert(4, (0, u64::MAX)); // RLIMIT_CORE
+                m.insert(5, (u64::MAX, u64::MAX)); // RLIMIT_RSS
+                m.insert(6, (1024, 1024)); // RLIMIT_NPROC
+                m.insert(7, (1024, 4096)); // RLIMIT_NOFILE
+                m.insert(8, (65536, 65536)); // RLIMIT_MEMLOCK
+                m.insert(9, (u64::MAX, u64::MAX)); // RLIMIT_AS
+                m
+            },
             next_socket_fd: 10, // Guest FDs start at 10 to avoid clash with 0/1/2
             inet_ntoa_addr: stub_base.add(0xA00),
             pipe_fds: HashMap::new(),
@@ -1434,6 +1473,17 @@ impl BionicBridge {
             ("sigwait",                     BionicFuncId::Sigwait),
             ("sigtimedwait",                BionicFuncId::Sigtimedwait),
             ("sigwaitinfo",                 BionicFuncId::Sigwaitinfo),
+            ("getrlimit",                   BionicFuncId::Getrlimit),
+            ("getrlimit64",                 BionicFuncId::Getrlimit64),
+            ("setrlimit",                   BionicFuncId::Setrlimit),
+            ("setrlimit64",                 BionicFuncId::Setrlimit64),
+            ("prlimit",                     BionicFuncId::Prlimit),
+            ("prlimit64",                   BionicFuncId::Prlimit64),
+            ("sysinfo",                     BionicFuncId::Sysinfo),
+            ("getpagesize",                 BionicFuncId::Getpagesize),
+            ("get_nprocs",                  BionicFuncId::GetNprocs),
+            ("get_nprocs_conf",             BionicFuncId::GetNprocsConf),
+            ("sysconf",                     BionicFuncId::Sysconf),
         ];
 
         for (name, id) in funcs {
@@ -1826,6 +1876,17 @@ impl BionicBridge {
             BionicFuncId::Sigwait,
             BionicFuncId::Sigtimedwait,
             BionicFuncId::Sigwaitinfo,
+            BionicFuncId::Getrlimit,
+            BionicFuncId::Getrlimit64,
+            BionicFuncId::Setrlimit,
+            BionicFuncId::Setrlimit64,
+            BionicFuncId::Prlimit,
+            BionicFuncId::Prlimit64,
+            BionicFuncId::Sysinfo,
+            BionicFuncId::Getpagesize,
+            BionicFuncId::GetNprocs,
+            BionicFuncId::GetNprocsConf,
+            BionicFuncId::Sysconf,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -3120,6 +3181,139 @@ impl BionicBridge {
                 } else {
                     cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
                 }
+            }
+
+            // Process Resource Limits & System Info (Stage 73)
+            BionicFuncId::Getrlimit | BionicFuncId::Getrlimit64 => {
+                let res = cpu.reg(Reg::R0);
+                let rlp = GuestAddr::new(cpu.reg(Reg::R1));
+                let (cur, max) = self.rlimits.get(&res).copied().unwrap_or((u64::MAX, u64::MAX));
+
+                if rlp.as_u32() != 0 {
+                    if func_id == BionicFuncId::Getrlimit {
+                        let cur32 = if cur > u32::MAX as u64 { u32::MAX } else { cur as u32 };
+                        let max32 = if max > u32::MAX as u64 { u32::MAX } else { max as u32 };
+                        mem.write_u32(rlp, cur32)?;
+                        mem.write_u32(rlp.add(4), max32)?;
+                    } else {
+                        mem.write_u32(rlp, cur as u32)?;
+                        mem.write_u32(rlp.add(4), (cur >> 32) as u32)?;
+                        mem.write_u32(rlp.add(8), max as u32)?;
+                        mem.write_u32(rlp.add(12), (max >> 32) as u32)?;
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::Setrlimit | BionicFuncId::Setrlimit64 => {
+                let res = cpu.reg(Reg::R0);
+                let rlp = GuestAddr::new(cpu.reg(Reg::R1));
+
+                if rlp.as_u32() != 0 {
+                    let (cur, max) = if func_id == BionicFuncId::Setrlimit {
+                        let c = mem.read_u32(rlp).unwrap_or(0) as u64;
+                        let m = mem.read_u32(rlp.add(4)).unwrap_or(0) as u64;
+                        (c, m)
+                    } else {
+                        let c = (mem.read_u32(rlp).unwrap_or(0) as u64)
+                            | ((mem.read_u32(rlp.add(4)).unwrap_or(0) as u64) << 32);
+                        let m = (mem.read_u32(rlp.add(8)).unwrap_or(0) as u64)
+                            | ((mem.read_u32(rlp.add(12)).unwrap_or(0) as u64) << 32);
+                        (c, m)
+                    };
+                    self.rlimits.insert(res, (cur, max));
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::Prlimit | BionicFuncId::Prlimit64 => {
+                let _pid = cpu.reg(Reg::R0);
+                let res = cpu.reg(Reg::R1);
+                let new_lim = GuestAddr::new(cpu.reg(Reg::R2));
+                let old_lim = GuestAddr::new(cpu.reg(Reg::R3));
+
+                let (cur, max) = self.rlimits.get(&res).copied().unwrap_or((u64::MAX, u64::MAX));
+
+                if old_lim.as_u32() != 0 {
+                    if func_id == BionicFuncId::Prlimit {
+                        let cur32 = if cur > u32::MAX as u64 { u32::MAX } else { cur as u32 };
+                        let max32 = if max > u32::MAX as u64 { u32::MAX } else { max as u32 };
+                        mem.write_u32(old_lim, cur32)?;
+                        mem.write_u32(old_lim.add(4), max32)?;
+                    } else {
+                        mem.write_u32(old_lim, cur as u32)?;
+                        mem.write_u32(old_lim.add(4), (cur >> 32) as u32)?;
+                        mem.write_u32(old_lim.add(8), max as u32)?;
+                        mem.write_u32(old_lim.add(12), (max >> 32) as u32)?;
+                    }
+                }
+
+                if new_lim.as_u32() != 0 {
+                    let (nc, nm) = if func_id == BionicFuncId::Prlimit {
+                        let c = mem.read_u32(new_lim).unwrap_or(0) as u64;
+                        let m = mem.read_u32(new_lim.add(4)).unwrap_or(0) as u64;
+                        (c, m)
+                    } else {
+                        let c = (mem.read_u32(new_lim).unwrap_or(0) as u64)
+                            | ((mem.read_u32(new_lim.add(4)).unwrap_or(0) as u64) << 32);
+                        let m = (mem.read_u32(new_lim.add(8)).unwrap_or(0) as u64)
+                            | ((mem.read_u32(new_lim.add(12)).unwrap_or(0) as u64) << 32);
+                        (c, m)
+                    };
+                    self.rlimits.insert(res, (nc, nm));
+                }
+
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Sysinfo => {
+                let info_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if info_ptr.as_u32() != 0 {
+                    mem.write_u32(info_ptr, 3600)?; // uptime = 1 hour
+                    mem.write_u32(info_ptr.add(4), 65536)?; // loads[0]
+                    mem.write_u32(info_ptr.add(8), 65536)?; // loads[1]
+                    mem.write_u32(info_ptr.add(12), 65536)?; // loads[2]
+                    mem.write_u32(info_ptr.add(16), 0x8000_0000)?; // totalram = 2 GB
+                    mem.write_u32(info_ptr.add(20), 0x4000_0000)?; // freeram = 1 GB
+                    mem.write_u32(info_ptr.add(24), 0)?; // sharedram
+                    mem.write_u32(info_ptr.add(28), 0)?; // bufferram
+                    mem.write_u32(info_ptr.add(32), 0)?; // totalswap
+                    mem.write_u32(info_ptr.add(36), 0)?; // freeswap
+                    mem.write_u16(info_ptr.add(40), 42)?; // procs
+                    mem.write_u16(info_ptr.add(42), 0)?; // pad
+                    mem.write_u32(info_ptr.add(44), 0)?; // totalhigh
+                    mem.write_u32(info_ptr.add(48), 0)?; // freehigh
+                    mem.write_u32(info_ptr.add(52), 1)?; // mem_unit = 1 byte
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::Getpagesize => {
+                cpu.set_reg(Reg::R0, 4096);
+            }
+            BionicFuncId::GetNprocs | BionicFuncId::GetNprocsConf => {
+                let nprocs = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
+                cpu.set_reg(Reg::R0, nprocs);
+            }
+            BionicFuncId::Sysconf => {
+                let name = cpu.reg(Reg::R0);
+                let nprocs = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
+                let val = match name {
+                    0 => 131072,   // _SC_ARG_MAX
+                    1 => 1024,     // _SC_CHILD_MAX
+                    2 | 6 => 100,  // _SC_CLK_TCK
+                    3 => 65536,    // _SC_NGROUPS_MAX
+                    4 | 5 => 1024, // _SC_OPEN_MAX
+                    29 | 30 | 39 | 40 => 4096, // _SC_PAGESIZE / _SC_PAGE_SIZE
+                    85 => 1048576, // _SC_PHYS_PAGES (4GB / 4KB)
+                    86 => 524288,  // _SC_AVPHYS_PAGES (2GB / 4KB)
+                    96 => nprocs,  // _SC_NPROCESSORS_CONF
+                    97 => nprocs,  // _SC_NPROCESSORS_ONLN
+                    _ => 0xFFFF_FFFF,
+                };
+                cpu.set_reg(Reg::R0, val);
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
