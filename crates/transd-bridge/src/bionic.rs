@@ -683,6 +683,22 @@ pub enum BionicFuncId {
     Scalblnf                        = 1036,
     Scalbln                         = 1037,
 
+    // Extended Multibyte & Wide Character POSIX APIs (Stage 92)
+    Mbrtowc                         = 1050,
+    Wcrtomb                         = 1051,
+    Mbsrtowcs                       = 1052,
+    Wcsrtombs                       = 1053,
+    Wcsncmp                         = 1054,
+    Wcsncpy                         = 1055,
+    Wmemcpy                         = 1056,
+    Wmemset                         = 1057,
+    Wmemmove                        = 1058,
+    Wmemchr                         = 1059,
+    Wcscat                          = 1060,
+    Wcsncat                         = 1061,
+    Wcschr                          = 1062,
+    Wcsrchr                         = 1063,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1350,6 +1366,20 @@ impl BionicFuncId {
             1035 => Some(Self::Scalbn),
             1036 => Some(Self::Scalblnf),
             1037 => Some(Self::Scalbln),
+            1050 => Some(Self::Mbrtowc),
+            1051 => Some(Self::Wcrtomb),
+            1052 => Some(Self::Mbsrtowcs),
+            1053 => Some(Self::Wcsrtombs),
+            1054 => Some(Self::Wcsncmp),
+            1055 => Some(Self::Wcsncpy),
+            1056 => Some(Self::Wmemcpy),
+            1057 => Some(Self::Wmemset),
+            1058 => Some(Self::Wmemmove),
+            1059 => Some(Self::Wmemchr),
+            1060 => Some(Self::Wcscat),
+            1061 => Some(Self::Wcsncat),
+            1062 => Some(Self::Wcschr),
+            1063 => Some(Self::Wcsrchr),
             _ => None,
         }
     }
@@ -2273,6 +2303,20 @@ impl BionicBridge {
             ("scalbn",                           BionicFuncId::Scalbn),
             ("scalblnf",                         BionicFuncId::Scalblnf),
             ("scalbln",                          BionicFuncId::Scalbln),
+            ("mbrtowc",                          BionicFuncId::Mbrtowc),
+            ("wcrtomb",                          BionicFuncId::Wcrtomb),
+            ("mbsrtowcs",                        BionicFuncId::Mbsrtowcs),
+            ("wcsrtombs",                        BionicFuncId::Wcsrtombs),
+            ("wcsncmp",                          BionicFuncId::Wcsncmp),
+            ("wcsncpy",                          BionicFuncId::Wcsncpy),
+            ("wmemcpy",                          BionicFuncId::Wmemcpy),
+            ("wmemset",                          BionicFuncId::Wmemset),
+            ("wmemmove",                         BionicFuncId::Wmemmove),
+            ("wmemchr",                          BionicFuncId::Wmemchr),
+            ("wcscat",                           BionicFuncId::Wcscat),
+            ("wcsncat",                          BionicFuncId::Wcsncat),
+            ("wcschr",                           BionicFuncId::Wcschr),
+            ("wcsrchr",                          BionicFuncId::Wcsrchr),
         ];
 
         for (name, id) in funcs {
@@ -2894,6 +2938,20 @@ impl BionicBridge {
             BionicFuncId::Scalbn,
             BionicFuncId::Scalblnf,
             BionicFuncId::Scalbln,
+            BionicFuncId::Mbrtowc,
+            BionicFuncId::Wcrtomb,
+            BionicFuncId::Mbsrtowcs,
+            BionicFuncId::Wcsrtombs,
+            BionicFuncId::Wcsncmp,
+            BionicFuncId::Wcsncpy,
+            BionicFuncId::Wmemcpy,
+            BionicFuncId::Wmemset,
+            BionicFuncId::Wmemmove,
+            BionicFuncId::Wmemchr,
+            BionicFuncId::Wcscat,
+            BionicFuncId::Wcsncat,
+            BionicFuncId::Wcschr,
+            BionicFuncId::Wcsrchr,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -6541,6 +6599,379 @@ impl BionicBridge {
                 cpu.set_reg(Reg::R0, res_bits as u32);
                 cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
                 cpu.set_d_reg(0, res);
+            }
+            // Extended Multibyte & Wide Character POSIX APIs (Stage 92)
+            BionicFuncId::Mbrtowc => {
+                // size_t mbrtowc(wchar_t *pwc, const char *s, size_t n, mbstate_t *ps)
+                let pwc_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let s_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let n = cpu.reg(Reg::R2) as usize;
+
+                if s_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, 0);
+                } else if n == 0 {
+                    cpu.set_reg(Reg::R0, u32::MAX - 1); // (size_t)-2
+                } else {
+                    let b0 = mem.read_u8(s_ptr)?;
+                    if b0 == 0 {
+                        if pwc_ptr.as_u32() != 0 {
+                            mem.write_u32(pwc_ptr, 0)?;
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    } else if (b0 & 0x80) == 0 {
+                        // 1 byte
+                        if pwc_ptr.as_u32() != 0 {
+                            mem.write_u32(pwc_ptr, b0 as u32)?;
+                        }
+                        cpu.set_reg(Reg::R0, 1);
+                    } else if (b0 & 0xE0) == 0xC0 {
+                        // 2 bytes
+                        if n < 2 {
+                            cpu.set_reg(Reg::R0, u32::MAX - 1);
+                        } else {
+                            let b1 = mem.read_u8(s_ptr.add(1))?;
+                            let cp = (((b0 & 0x1F) as u32) << 6) | ((b1 & 0x3F) as u32);
+                            if pwc_ptr.as_u32() != 0 {
+                                mem.write_u32(pwc_ptr, cp)?;
+                            }
+                            cpu.set_reg(Reg::R0, 2);
+                        }
+                    } else if (b0 & 0xF0) == 0xE0 {
+                        // 3 bytes
+                        if n < 3 {
+                            cpu.set_reg(Reg::R0, u32::MAX - 1);
+                        } else {
+                            let b1 = mem.read_u8(s_ptr.add(1))?;
+                            let b2 = mem.read_u8(s_ptr.add(2))?;
+                            let cp = (((b0 & 0x0F) as u32) << 12) | (((b1 & 0x3F) as u32) << 6) | ((b2 & 0x3F) as u32);
+                            if pwc_ptr.as_u32() != 0 {
+                                mem.write_u32(pwc_ptr, cp)?;
+                            }
+                            cpu.set_reg(Reg::R0, 3);
+                        }
+                    } else if (b0 & 0xF8) == 0xF0 {
+                        // 4 bytes
+                        if n < 4 {
+                            cpu.set_reg(Reg::R0, u32::MAX - 1);
+                        } else {
+                            let b1 = mem.read_u8(s_ptr.add(1))?;
+                            let b2 = mem.read_u8(s_ptr.add(2))?;
+                            let b3 = mem.read_u8(s_ptr.add(3))?;
+                            let cp = (((b0 & 0x07) as u32) << 18) | (((b1 & 0x3F) as u32) << 12) | (((b2 & 0x3F) as u32) << 6) | ((b3 & 0x3F) as u32);
+                            if pwc_ptr.as_u32() != 0 {
+                                mem.write_u32(pwc_ptr, cp)?;
+                            }
+                            cpu.set_reg(Reg::R0, 4);
+                        }
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX); // -1 (EILSEQ)
+                    }
+                }
+            }
+            BionicFuncId::Wcrtomb => {
+                // size_t wcrtomb(char *s, wchar_t wc, mbstate_t *ps)
+                let s_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let wc = cpu.reg(Reg::R1);
+
+                if s_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, 1);
+                } else if wc <= 0x7F {
+                    mem.write_u8(s_ptr, wc as u8)?;
+                    cpu.set_reg(Reg::R0, 1);
+                } else if wc <= 0x7FF {
+                    mem.write_u8(s_ptr, (0xC0 | ((wc >> 6) & 0x1F)) as u8)?;
+                    mem.write_u8(s_ptr.add(1), (0x80 | (wc & 0x3F)) as u8)?;
+                    cpu.set_reg(Reg::R0, 2);
+                } else if wc <= 0xFFFF {
+                    mem.write_u8(s_ptr, (0xE0 | ((wc >> 12) & 0x0F)) as u8)?;
+                    mem.write_u8(s_ptr.add(1), (0x80 | ((wc >> 6) & 0x3F)) as u8)?;
+                    mem.write_u8(s_ptr.add(2), (0x80 | (wc & 0x3F)) as u8)?;
+                    cpu.set_reg(Reg::R0, 3);
+                } else if wc <= 0x10FFFF {
+                    mem.write_u8(s_ptr, (0xF0 | ((wc >> 18) & 0x07)) as u8)?;
+                    mem.write_u8(s_ptr.add(1), (0x80 | ((wc >> 12) & 0x3F)) as u8)?;
+                    mem.write_u8(s_ptr.add(2), (0x80 | ((wc >> 6) & 0x3F)) as u8)?;
+                    mem.write_u8(s_ptr.add(3), (0x80 | (wc & 0x3F)) as u8)?;
+                    cpu.set_reg(Reg::R0, 4);
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+            BionicFuncId::Mbsrtowcs => {
+                // size_t mbsrtowcs(wchar_t *dest, const char **src, size_t len, mbstate_t *ps)
+                let dest_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let src_pptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let len = cpu.reg(Reg::R2) as usize;
+
+                let mut written = 0usize;
+                if src_pptr.as_u32() != 0 {
+                    let mut src_ptr = GuestAddr::new(mem.read_u32(src_pptr).unwrap_or(0));
+                    if src_ptr.as_u32() != 0 {
+                        loop {
+                            let b0 = mem.read_u8(src_ptr)?;
+                            if b0 == 0 {
+                                if dest_ptr.as_u32() != 0 && written < len {
+                                    mem.write_u32(dest_ptr.add((written * 4) as u32), 0)?;
+                                }
+                                let _ = mem.write_u32(src_pptr, 0); // null out *src
+                                break;
+                            }
+                            let (cp, consumed) = if (b0 & 0x80) == 0 {
+                                (b0 as u32, 1u32)
+                            } else if (b0 & 0xE0) == 0xC0 {
+                                let b1 = mem.read_u8(src_ptr.add(1))?;
+                                ((((b0 & 0x1F) as u32) << 6) | ((b1 & 0x3F) as u32), 2u32)
+                            } else if (b0 & 0xF0) == 0xE0 {
+                                let b1 = mem.read_u8(src_ptr.add(1))?;
+                                let b2 = mem.read_u8(src_ptr.add(2))?;
+                                ((((b0 & 0x0F) as u32) << 12) | (((b1 & 0x3F) as u32) << 6) | ((b2 & 0x3F) as u32), 3u32)
+                            } else {
+                                let b1 = mem.read_u8(src_ptr.add(1))?;
+                                let b2 = mem.read_u8(src_ptr.add(2))?;
+                                let b3 = mem.read_u8(src_ptr.add(3))?;
+                                ((((b0 & 0x07) as u32) << 18) | (((b1 & 0x3F) as u32) << 12) | (((b2 & 0x3F) as u32) << 6) | ((b3 & 0x3F) as u32), 4u32)
+                            };
+
+                            if dest_ptr.as_u32() != 0 {
+                                if written >= len {
+                                    let _ = mem.write_u32(src_pptr, src_ptr.as_u32());
+                                    break;
+                                }
+                                mem.write_u32(dest_ptr.add((written * 4) as u32), cp)?;
+                            }
+                            written += 1;
+                            src_ptr = src_ptr.add(consumed);
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, written as u32);
+            }
+            BionicFuncId::Wcsrtombs => {
+                // size_t wcsrtombs(char *dest, const wchar_t **src, size_t len, mbstate_t *ps)
+                let dest_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let src_pptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let len = cpu.reg(Reg::R2) as usize;
+
+                let mut written = 0usize;
+                if src_pptr.as_u32() != 0 {
+                    let mut src_ptr = GuestAddr::new(mem.read_u32(src_pptr).unwrap_or(0));
+                    if src_ptr.as_u32() != 0 {
+                        loop {
+                            let wc = mem.read_u32(src_ptr)?;
+                            if wc == 0 {
+                                if dest_ptr.as_u32() != 0 && written < len {
+                                    mem.write_u8(dest_ptr.add(written as u32), 0)?;
+                                }
+                                let _ = mem.write_u32(src_pptr, 0);
+                                break;
+                            }
+                            let mut buf = [0u8; 4];
+                            let clen = if wc <= 0x7F {
+                                buf[0] = wc as u8;
+                                1
+                            } else if wc <= 0x7FF {
+                                buf[0] = (0xC0 | ((wc >> 6) & 0x1F)) as u8;
+                                buf[1] = (0x80 | (wc & 0x3F)) as u8;
+                                2
+                            } else if wc <= 0xFFFF {
+                                buf[0] = (0xE0 | ((wc >> 12) & 0x0F)) as u8;
+                                buf[1] = (0x80 | ((wc >> 6) & 0x3F)) as u8;
+                                buf[2] = (0x80 | (wc & 0x3F)) as u8;
+                                3
+                            } else {
+                                buf[0] = (0xF0 | ((wc >> 18) & 0x07)) as u8;
+                                buf[1] = (0x80 | ((wc >> 12) & 0x3F)) as u8;
+                                buf[2] = (0x80 | ((wc >> 6) & 0x3F)) as u8;
+                                buf[3] = (0x80 | (wc & 0x3F)) as u8;
+                                4
+                            };
+
+                            if dest_ptr.as_u32() != 0 {
+                                if written + clen > len {
+                                    let _ = mem.write_u32(src_pptr, src_ptr.as_u32());
+                                    break;
+                                }
+                                for i in 0..clen {
+                                    mem.write_u8(dest_ptr.add((written + i) as u32), buf[i])?;
+                                }
+                            }
+                            written += clen;
+                            src_ptr = src_ptr.add(4);
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, written as u32);
+            }
+            BionicFuncId::Wcsncmp => {
+                let s1_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let s2_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let n = cpu.reg(Reg::R2) as usize;
+
+                let mut diff = 0i32;
+                for i in 0..n {
+                    let w1 = mem.read_u32(s1_ptr.add((i * 4) as u32)).unwrap_or(0);
+                    let w2 = mem.read_u32(s2_ptr.add((i * 4) as u32)).unwrap_or(0);
+                    if w1 != w2 {
+                        diff = if w1 < w2 { -1 } else { 1 };
+                        break;
+                    }
+                    if w1 == 0 {
+                        break;
+                    }
+                }
+                cpu.set_reg(Reg::R0, diff as u32);
+            }
+            BionicFuncId::Wcsncpy => {
+                let dest_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let src_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let n = cpu.reg(Reg::R2) as usize;
+
+                let mut null_seen = false;
+                for i in 0..n {
+                    let off = (i * 4) as u32;
+                    let wc = if null_seen {
+                        0
+                    } else {
+                        let val = mem.read_u32(src_ptr.add(off)).unwrap_or(0);
+                        if val == 0 {
+                            null_seen = true;
+                        }
+                        val
+                    };
+                    mem.write_u32(dest_ptr.add(off), wc)?;
+                }
+                cpu.set_reg(Reg::R0, dest_ptr.as_u32());
+            }
+            BionicFuncId::Wmemcpy => {
+                let dest_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let src_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let n = cpu.reg(Reg::R2) as usize;
+
+                for i in 0..n {
+                    let off = (i * 4) as u32;
+                    let val = mem.read_u32(src_ptr.add(off))?;
+                    mem.write_u32(dest_ptr.add(off), val)?;
+                }
+                cpu.set_reg(Reg::R0, dest_ptr.as_u32());
+            }
+            BionicFuncId::Wmemset => {
+                let dest_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let wc = cpu.reg(Reg::R1);
+                let n = cpu.reg(Reg::R2) as usize;
+
+                for i in 0..n {
+                    mem.write_u32(dest_ptr.add((i * 4) as u32), wc)?;
+                }
+                cpu.set_reg(Reg::R0, dest_ptr.as_u32());
+            }
+            BionicFuncId::Wmemmove => {
+                let dest_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let src_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let n = cpu.reg(Reg::R2) as usize;
+
+                let mut vals = Vec::with_capacity(n);
+                for i in 0..n {
+                    vals.push(mem.read_u32(src_ptr.add((i * 4) as u32))?);
+                }
+                for i in 0..n {
+                    mem.write_u32(dest_ptr.add((i * 4) as u32), vals[i])?;
+                }
+                cpu.set_reg(Reg::R0, dest_ptr.as_u32());
+            }
+            BionicFuncId::Wmemchr => {
+                let s_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let c = cpu.reg(Reg::R1);
+                let n = cpu.reg(Reg::R2) as usize;
+
+                let mut found_addr = 0u32;
+                for i in 0..n {
+                    let cur = s_ptr.add((i * 4) as u32);
+                    if let Ok(val) = mem.read_u32(cur) {
+                        if val == c {
+                            found_addr = cur.as_u32();
+                            break;
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, found_addr);
+            }
+            BionicFuncId::Wcscat => {
+                let dest_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let src_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+
+                // Find end of dest
+                let mut d_len = 0u32;
+                while mem.read_u32(dest_ptr.add(d_len * 4)).unwrap_or(0) != 0 {
+                    d_len += 1;
+                }
+                let mut s_idx = 0u32;
+                loop {
+                    let wc = mem.read_u32(src_ptr.add(s_idx * 4)).unwrap_or(0);
+                    mem.write_u32(dest_ptr.add((d_len + s_idx) * 4), wc)?;
+                    if wc == 0 {
+                        break;
+                    }
+                    s_idx += 1;
+                }
+                cpu.set_reg(Reg::R0, dest_ptr.as_u32());
+            }
+            BionicFuncId::Wcsncat => {
+                let dest_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let src_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let n = cpu.reg(Reg::R2) as usize;
+
+                let mut d_len = 0u32;
+                while mem.read_u32(dest_ptr.add(d_len * 4)).unwrap_or(0) != 0 {
+                    d_len += 1;
+                }
+                for i in 0..n {
+                    let wc = mem.read_u32(src_ptr.add((i * 4) as u32)).unwrap_or(0);
+                    mem.write_u32(dest_ptr.add((d_len + i as u32) * 4), wc)?;
+                    if wc == 0 {
+                        break;
+                    }
+                }
+                mem.write_u32(dest_ptr.add((d_len + n as u32) * 4), 0)?;
+                cpu.set_reg(Reg::R0, dest_ptr.as_u32());
+            }
+            BionicFuncId::Wcschr => {
+                let wcs_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let wc = cpu.reg(Reg::R1);
+
+                let mut found = 0u32;
+                let mut i = 0u32;
+                loop {
+                    let cur = wcs_ptr.add(i * 4);
+                    let val = mem.read_u32(cur).unwrap_or(0);
+                    if val == wc {
+                        found = cur.as_u32();
+                        break;
+                    }
+                    if val == 0 {
+                        break;
+                    }
+                    i += 1;
+                }
+                cpu.set_reg(Reg::R0, found);
+            }
+            BionicFuncId::Wcsrchr => {
+                let wcs_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let wc = cpu.reg(Reg::R1);
+
+                let mut found = 0u32;
+                let mut i = 0u32;
+                loop {
+                    let cur = wcs_ptr.add(i * 4);
+                    let val = mem.read_u32(cur).unwrap_or(0);
+                    if val == wc {
+                        found = cur.as_u32();
+                    }
+                    if val == 0 {
+                        break;
+                    }
+                    i += 1;
+                }
+                cpu.set_reg(Reg::R0, found);
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
