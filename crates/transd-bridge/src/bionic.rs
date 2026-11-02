@@ -556,6 +556,12 @@ pub enum BionicFuncId {
     MqGetattr      = 837,
     MqSetattr      = 838,
 
+    // Extended Network Interface Discovery (Stage 84)
+    IfNametoindex   = 850,
+    IfIndextoname   = 851,
+    IfNameindex     = 852,
+    IfFreenameindex = 853,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1113,6 +1119,10 @@ impl BionicFuncId {
             836 => Some(Self::MqTimedreceive),
             837 => Some(Self::MqGetattr),
             838 => Some(Self::MqSetattr),
+            850 => Some(Self::IfNametoindex),
+            851 => Some(Self::IfIndextoname),
+            852 => Some(Self::IfNameindex),
+            853 => Some(Self::IfFreenameindex),
             _ => None,
         }
     }
@@ -1859,6 +1869,10 @@ impl BionicBridge {
             ("mq_timedreceive",              BionicFuncId::MqTimedreceive),
             ("mq_getattr",                   BionicFuncId::MqGetattr),
             ("mq_setattr",                   BionicFuncId::MqSetattr),
+            ("if_nametoindex",               BionicFuncId::IfNametoindex),
+            ("if_indextoname",               BionicFuncId::IfIndextoname),
+            ("if_nameindex",                 BionicFuncId::IfNameindex),
+            ("if_freenameindex",             BionicFuncId::IfFreenameindex),
         ];
 
         for (name, id) in funcs {
@@ -2370,6 +2384,10 @@ impl BionicBridge {
             BionicFuncId::MqTimedreceive,
             BionicFuncId::MqGetattr,
             BionicFuncId::MqSetattr,
+            BionicFuncId::IfNametoindex,
+            BionicFuncId::IfIndextoname,
+            BionicFuncId::IfNameindex,
+            BionicFuncId::IfFreenameindex,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -4491,6 +4509,74 @@ impl BionicBridge {
                 }
             }
             BionicFuncId::MqSetattr => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            // Extended Network Interface Discovery (Stage 84)
+            BionicFuncId::IfNametoindex => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let idx = if name_ptr.as_u32() != 0 {
+                    if let Ok(name) = Self::read_c_string(mem, name_ptr) {
+                        match name.as_str() {
+                            "lo" => 1,
+                            "wlan0" => 2,
+                            "rmnet0" => 3,
+                            "eth0" => 4,
+                            _ => 0,
+                        }
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                cpu.set_reg(Reg::R0, idx);
+            }
+            BionicFuncId::IfIndextoname => {
+                let ifindex = cpu.reg(Reg::R0);
+                let ifname_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let name_opt: Option<&[u8]> = match ifindex {
+                    1 => Some(b"lo\0"),
+                    2 => Some(b"wlan0\0"),
+                    3 => Some(b"rmnet0\0"),
+                    4 => Some(b"eth0\0"),
+                    _ => None,
+                };
+                if let Some(bytes) = name_opt {
+                    if ifname_ptr.as_u32() != 0 {
+                        mem.write_bytes(ifname_ptr, bytes)?;
+                        cpu.set_reg(Reg::R0, ifname_ptr.as_u32());
+                    } else {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::IfNameindex => {
+                let base = self.stub_base.add(0xD00);
+                // struct if_nameindex { unsigned int if_index; char *if_name; };
+                // 1: lo
+                mem.write_u32(base, 1)?;
+                mem.write_u32(base.add(4), base.add(0x40).as_u32())?;
+                mem.write_bytes(base.add(0x40), b"lo\0")?;
+
+                // 2: wlan0
+                mem.write_u32(base.add(8), 2)?;
+                mem.write_u32(base.add(12), base.add(0x50).as_u32())?;
+                mem.write_bytes(base.add(0x50), b"wlan0\0")?;
+
+                // 3: rmnet0
+                mem.write_u32(base.add(16), 3)?;
+                mem.write_u32(base.add(20), base.add(0x60).as_u32())?;
+                mem.write_bytes(base.add(0x60), b"rmnet0\0")?;
+
+                // Terminator { 0, NULL }
+                mem.write_u32(base.add(24), 0)?;
+                mem.write_u32(base.add(28), 0)?;
+
+                cpu.set_reg(Reg::R0, base.as_u32());
+            }
+            BionicFuncId::IfFreenameindex => {
                 cpu.set_reg(Reg::R0, 0);
             }
             BionicFuncId::Memmove => {
