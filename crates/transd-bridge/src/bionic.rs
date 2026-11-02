@@ -622,6 +622,21 @@ pub enum BionicFuncId {
     Wordexp                         = 947,
     Wordfree                        = 948,
 
+    // POSIX File Tree Walk, Directory Scanning & Standard Sorting APIs (Stage 88)
+    Scandir                         = 960,
+    Scandir64                       = 961,
+    Scandirat                       = 962,
+    Alphasort                       = 963,
+    Alphasort64                     = 964,
+    Versionsort                     = 965,
+    Versionsort64                   = 966,
+    Ftw                             = 967,
+    Ftw64                           = 968,
+    Nftw                            = 969,
+    Nftw64                          = 970,
+    Qsort                           = 971,
+    Bsearch                         = 972,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1236,6 +1251,19 @@ impl BionicFuncId {
             946 => Some(Self::Globfree),
             947 => Some(Self::Wordexp),
             948 => Some(Self::Wordfree),
+            960 => Some(Self::Scandir),
+            961 => Some(Self::Scandir64),
+            962 => Some(Self::Scandirat),
+            963 => Some(Self::Alphasort),
+            964 => Some(Self::Alphasort64),
+            965 => Some(Self::Versionsort),
+            966 => Some(Self::Versionsort64),
+            967 => Some(Self::Ftw),
+            968 => Some(Self::Ftw64),
+            969 => Some(Self::Nftw),
+            970 => Some(Self::Nftw64),
+            971 => Some(Self::Qsort),
+            972 => Some(Self::Bsearch),
             _ => None,
         }
     }
@@ -2092,6 +2120,19 @@ impl BionicBridge {
             ("globfree",                         BionicFuncId::Globfree),
             ("wordexp",                          BionicFuncId::Wordexp),
             ("wordfree",                         BionicFuncId::Wordfree),
+            ("scandir",                          BionicFuncId::Scandir),
+            ("scandir64",                        BionicFuncId::Scandir64),
+            ("scandirat",                        BionicFuncId::Scandirat),
+            ("alphasort",                        BionicFuncId::Alphasort),
+            ("alphasort64",                      BionicFuncId::Alphasort64),
+            ("versionsort",                      BionicFuncId::Versionsort),
+            ("versionsort64",                    BionicFuncId::Versionsort64),
+            ("ftw",                              BionicFuncId::Ftw),
+            ("ftw64",                            BionicFuncId::Ftw64),
+            ("nftw",                             BionicFuncId::Nftw),
+            ("nftw64",                           BionicFuncId::Nftw64),
+            ("qsort",                            BionicFuncId::Qsort),
+            ("bsearch",                          BionicFuncId::Bsearch),
         ];
 
         for (name, id) in funcs {
@@ -2660,6 +2701,19 @@ impl BionicBridge {
             BionicFuncId::Globfree,
             BionicFuncId::Wordexp,
             BionicFuncId::Wordfree,
+            BionicFuncId::Scandir,
+            BionicFuncId::Scandir64,
+            BionicFuncId::Scandirat,
+            BionicFuncId::Alphasort,
+            BionicFuncId::Alphasort64,
+            BionicFuncId::Versionsort,
+            BionicFuncId::Versionsort64,
+            BionicFuncId::Ftw,
+            BionicFuncId::Ftw64,
+            BionicFuncId::Nftw,
+            BionicFuncId::Nftw64,
+            BionicFuncId::Qsort,
+            BionicFuncId::Bsearch,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -5518,6 +5572,257 @@ impl BionicBridge {
                     let _ = mem.write_u32(pwordexp_ptr.add(4), 0);
                 }
                 cpu.set_reg(Reg::R0, 0);
+            }
+            // POSIX File Tree Walk, Directory Scanning & Standard Sorting APIs (Stage 88)
+            BionicFuncId::Scandir | BionicFuncId::Scandir64 => {
+                // int scandir(const char *dirp, struct dirent ***namelist, filter, compar)
+                let dirp_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let namelist_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let mut count = -1i32;
+
+                if dirp_ptr.as_u32() != 0 {
+                    if let Ok(dir_path) = Self::read_c_string(mem, dirp_ptr) {
+                        let norm = if dir_path.ends_with('/') { dir_path.clone() } else { format!("{}/", dir_path) };
+                        let mut entries_opt = self.vfs.list_dir(&dir_path).or_else(|| self.vfs.list_dir(&norm));
+                        if entries_opt.is_none() {
+                            let mut set = std::collections::BTreeSet::new();
+                            let prefix = norm.trim_start_matches('/');
+                            for k in self.asset_store.keys() {
+                                let clean = k.trim_start_matches('/');
+                                if clean.starts_with(prefix) {
+                                    let rest = &clean[prefix.len()..];
+                                    let comp = rest.split('/').next().unwrap_or("");
+                                    if !comp.is_empty() {
+                                        set.insert(comp.to_string());
+                                    }
+                                }
+                            }
+                            if !set.is_empty() {
+                                entries_opt = Some(set.into_iter().collect());
+                            } else if dir_path == "/" || dir_path == "/proc" || dir_path == "/sys" || dir_path == "/data" {
+                                entries_opt = Some(Vec::new());
+                            }
+                        }
+
+                        if let Some(mut entries) = entries_opt {
+                            entries.sort();
+                            let mut ptrs = Vec::new();
+                            for (idx, name) in entries.iter().enumerate() {
+                                let align_size = 280u32;
+                                if self.heap_current.add(align_size) <= self.heap_limit {
+                                    let d_addr = self.heap_current;
+                                    self.heap_current = self.heap_current.add(align_size);
+
+                                    let ino = (idx + 1) as u64;
+                                    mem.write_u32(d_addr, ino as u32)?;
+                                    mem.write_u32(d_addr.add(4), (ino >> 32) as u32)?;
+                                    mem.write_u32(d_addr.add(8), 0)?;
+                                    mem.write_u32(d_addr.add(12), 0)?;
+                                    mem.write_u16(d_addr.add(16), 280u16)?;
+                                    mem.write_u8(d_addr.add(18), 8u8)?; // DT_REG
+
+                                    let name_bytes = name.as_bytes();
+                                    let len = name_bytes.len().min(255);
+                                    mem.write_bytes(d_addr.add(19), &name_bytes[..len])?;
+                                    mem.write_u8(d_addr.add(19 + len as u32), 0)?;
+
+                                    ptrs.push(d_addr.as_u32());
+                                }
+                            }
+
+                            if namelist_ptr.as_u32() != 0 {
+                                let array_len = ((ptrs.len() + 1) * 4) as u32;
+                                if self.heap_current.add(array_len) <= self.heap_limit {
+                                    let array_addr = self.heap_current;
+                                    self.heap_current = self.heap_current.add(array_len);
+
+                                    for (i, &p) in ptrs.iter().enumerate() {
+                                        mem.write_u32(array_addr.add((i * 4) as u32), p)?;
+                                    }
+                                    mem.write_u32(array_addr.add((ptrs.len() * 4) as u32), 0)?;
+
+                                    mem.write_u32(namelist_ptr, array_addr.as_u32())?;
+                                    count = ptrs.len() as i32;
+                                }
+                            } else {
+                                count = ptrs.len() as i32;
+                            }
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, count as u32);
+            }
+            BionicFuncId::Scandirat => {
+                let dirfd = cpu.reg(Reg::R0);
+                let dirp_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let namelist_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                let mut resolved_path = String::new();
+                if dirp_ptr.as_u32() != 0 {
+                    if let Ok(rel) = Self::read_c_string(mem, dirp_ptr) {
+                        if rel.starts_with('/') {
+                            resolved_path = rel;
+                        } else {
+                            let base = self.vfs.fd_path(dirfd).unwrap_or_else(|| "/".to_string());
+                            resolved_path = if base.ends_with('/') {
+                                format!("{}{}", base, rel)
+                            } else {
+                                format!("{}/{}", base, rel)
+                            };
+                        }
+                    }
+                }
+
+                let mut count = -1i32;
+                if !resolved_path.is_empty() {
+                    if let Some(mut entries) = self.vfs.list_dir(&resolved_path) {
+                        entries.sort();
+                        let mut ptrs = Vec::new();
+                        for (idx, name) in entries.iter().enumerate() {
+                            let align_size = 280u32;
+                            if self.heap_current.add(align_size) <= self.heap_limit {
+                                let d_addr = self.heap_current;
+                                self.heap_current = self.heap_current.add(align_size);
+
+                                let ino = (idx + 1) as u64;
+                                mem.write_u32(d_addr, ino as u32)?;
+                                mem.write_u32(d_addr.add(4), (ino >> 32) as u32)?;
+                                mem.write_u32(d_addr.add(8), 0)?;
+                                mem.write_u32(d_addr.add(12), 0)?;
+                                mem.write_u16(d_addr.add(16), 280u16)?;
+                                mem.write_u8(d_addr.add(18), 8u8)?;
+
+                                let name_bytes = name.as_bytes();
+                                let len = name_bytes.len().min(255);
+                                mem.write_bytes(d_addr.add(19), &name_bytes[..len])?;
+                                mem.write_u8(d_addr.add(19 + len as u32), 0)?;
+
+                                ptrs.push(d_addr.as_u32());
+                            }
+                        }
+
+                        if namelist_ptr.as_u32() != 0 {
+                            let array_len = ((ptrs.len() + 1) * 4) as u32;
+                            if self.heap_current.add(array_len) <= self.heap_limit {
+                                let array_addr = self.heap_current;
+                                self.heap_current = self.heap_current.add(array_len);
+
+                                for (i, &p) in ptrs.iter().enumerate() {
+                                    mem.write_u32(array_addr.add((i * 4) as u32), p)?;
+                                }
+                                mem.write_u32(array_addr.add((ptrs.len() * 4) as u32), 0)?;
+
+                                mem.write_u32(namelist_ptr, array_addr.as_u32())?;
+                                count = ptrs.len() as i32;
+                            }
+                        } else {
+                            count = ptrs.len() as i32;
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, count as u32);
+            }
+            BionicFuncId::Alphasort | BionicFuncId::Alphasort64 => {
+                let a_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let b_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let mut cmp_res = 0i32;
+
+                if a_ptr.as_u32() != 0 && b_ptr.as_u32() != 0 {
+                    if let (Ok(d1_addr_raw), Ok(d2_addr_raw)) = (mem.read_u32(a_ptr), mem.read_u32(b_ptr)) {
+                        let d1_name = GuestAddr::new(d1_addr_raw).add(19);
+                        let d2_name = GuestAddr::new(d2_addr_raw).add(19);
+                        if let (Ok(s1), Ok(s2)) = (Self::read_c_string(mem, d1_name), Self::read_c_string(mem, d2_name)) {
+                            cmp_res = match s1.cmp(&s2) {
+                                std::cmp::Ordering::Less => -1,
+                                std::cmp::Ordering::Equal => 0,
+                                std::cmp::Ordering::Greater => 1,
+                            };
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, cmp_res as u32);
+            }
+            BionicFuncId::Versionsort | BionicFuncId::Versionsort64 => {
+                let a_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let b_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let mut cmp_res = 0i32;
+
+                if a_ptr.as_u32() != 0 && b_ptr.as_u32() != 0 {
+                    if let (Ok(d1_addr_raw), Ok(d2_addr_raw)) = (mem.read_u32(a_ptr), mem.read_u32(b_ptr)) {
+                        let d1_name = GuestAddr::new(d1_addr_raw).add(19);
+                        let d2_name = GuestAddr::new(d2_addr_raw).add(19);
+                        if let (Ok(s1), Ok(s2)) = (Self::read_c_string(mem, d1_name), Self::read_c_string(mem, d2_name)) {
+                            cmp_res = Self::version_compare(&s1, &s2);
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, cmp_res as u32);
+            }
+            BionicFuncId::Ftw | BionicFuncId::Ftw64 | BionicFuncId::Nftw | BionicFuncId::Nftw64 => {
+                let dirpath_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let mut ret = -1i32;
+
+                if dirpath_ptr.as_u32() != 0 {
+                    if let Ok(dir_path) = Self::read_c_string(mem, dirpath_ptr) {
+                        let norm = if dir_path.ends_with('/') { dir_path.clone() } else { format!("{}/", dir_path) };
+                        let exists = self.vfs.list_dir(&dir_path).is_some()
+                            || self.vfs.list_dir(&norm).is_some()
+                            || self.vfs.get_file(&dir_path).is_some()
+                            || dir_path == "/" || dir_path == "/proc" || dir_path == "/sys" || dir_path == "/data";
+
+                        if exists {
+                            ret = 0;
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, ret as u32);
+            }
+            BionicFuncId::Qsort => {
+                let base_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let nmemb = cpu.reg(Reg::R1) as usize;
+                let size = cpu.reg(Reg::R2) as usize;
+                let _compar = cpu.reg(Reg::R3);
+
+                if base_ptr.as_u32() != 0 && nmemb > 1 && size > 0 {
+                    let total_bytes = nmemb.saturating_mul(size);
+                    let mut buf = vec![0u8; total_bytes];
+                    if mem.read_bytes(base_ptr, &mut buf).is_ok() {
+                        let mut chunks: Vec<Vec<u8>> = buf.chunks(size).map(|c| c.to_vec()).collect();
+                        if size == 4 {
+                            chunks.sort_by_key(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+                        } else {
+                            chunks.sort();
+                        }
+                        let mut offset = 0;
+                        for chunk in chunks {
+                            let _ = mem.write_bytes(base_ptr.add(offset as u32), &chunk);
+                            offset += size;
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Bsearch => {
+                let key_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let base_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let nmemb = cpu.reg(Reg::R2) as usize;
+                let size = cpu.reg(Reg::R3) as usize;
+
+                let mut found_addr = 0u32;
+                if key_ptr.as_u32() != 0 && base_ptr.as_u32() != 0 && nmemb > 0 && size > 0 {
+                    let mut key_buf = vec![0u8; size];
+                    if mem.read_bytes(key_ptr, &mut key_buf).is_ok() {
+                        for i in 0..nmemb {
+                            let elem_addr = base_ptr.add((i * size) as u32);
+                            let mut elem_buf = vec![0u8; size];
+                            if mem.read_bytes(elem_addr, &mut elem_buf).is_ok() && elem_buf == key_buf {
+                                found_addr = elem_addr.as_u32();
+                                break;
+                            }
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, found_addr);
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
@@ -8510,6 +8815,41 @@ impl BionicBridge {
 
     pub fn register_asset(&mut self, name: &str, data: Vec<u8>) {
         self.asset_store.insert(name.to_string(), data);
+    }
+
+    fn version_compare(a: &str, b: &str) -> i32 {
+        let a_bytes = a.as_bytes();
+        let b_bytes = b.as_bytes();
+        let mut i = 0;
+        let mut j = 0;
+        while i < a_bytes.len() && j < b_bytes.len() {
+            if a_bytes[i].is_ascii_digit() && b_bytes[j].is_ascii_digit() {
+                let mut num_a: u64 = 0;
+                while i < a_bytes.len() && a_bytes[i].is_ascii_digit() {
+                    num_a = num_a.saturating_mul(10).saturating_add((a_bytes[i] - b'0') as u64);
+                    i += 1;
+                }
+                let mut num_b: u64 = 0;
+                while j < b_bytes.len() && b_bytes[j].is_ascii_digit() {
+                    num_b = num_b.saturating_mul(10).saturating_add((b_bytes[j] - b'0') as u64);
+                    j += 1;
+                }
+                if num_a != num_b {
+                    return if num_a < num_b { -1 } else { 1 };
+                }
+            } else {
+                if a_bytes[i] != b_bytes[j] {
+                    return if a_bytes[i] < b_bytes[j] { -1 } else { 1 };
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+        match a_bytes.len().cmp(&b_bytes.len()) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
     }
 
     fn read_c_string(mem: &(impl Memory + ?Sized), addr: GuestAddr) -> Result<String, MemoryError> {
