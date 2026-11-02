@@ -699,6 +699,19 @@ pub enum BionicFuncId {
     Wcschr                          = 1062,
     Wcsrchr                         = 1063,
 
+    // Android Thermal & Performance Management NDK APIs (Stage 93)
+    AThermalAcquireManager                      = 1080,
+    AThermalReleaseManager                      = 1081,
+    AThermalGetCurrentThermalStatus             = 1082,
+    AThermalRegisterThermalStatusListener       = 1083,
+    AThermalUnregisterThermalStatusListener     = 1084,
+    AThermalGetThermalHeadroom                  = 1085,
+    APerformanceHintGetManager                  = 1086,
+    APerformanceHintCreateSession               = 1087,
+    APerformanceHintUpdateTargetWorkDuration    = 1088,
+    APerformanceHintReportActualWorkDuration    = 1089,
+    APerformanceHintCloseSession                = 1090,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1380,9 +1393,27 @@ impl BionicFuncId {
             1061 => Some(Self::Wcsncat),
             1062 => Some(Self::Wcschr),
             1063 => Some(Self::Wcsrchr),
+            1080 => Some(Self::AThermalAcquireManager),
+            1081 => Some(Self::AThermalReleaseManager),
+            1082 => Some(Self::AThermalGetCurrentThermalStatus),
+            1083 => Some(Self::AThermalRegisterThermalStatusListener),
+            1084 => Some(Self::AThermalUnregisterThermalStatusListener),
+            1085 => Some(Self::AThermalGetThermalHeadroom),
+            1086 => Some(Self::APerformanceHintGetManager),
+            1087 => Some(Self::APerformanceHintCreateSession),
+            1088 => Some(Self::APerformanceHintUpdateTargetWorkDuration),
+            1089 => Some(Self::APerformanceHintReportActualWorkDuration),
+            1090 => Some(Self::APerformanceHintCloseSession),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct PerfHintSession {
+    pub thread_ids: Vec<i32>,
+    pub target_duration_ns: i64,
+    pub actual_duration_ns: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -1494,6 +1525,13 @@ pub struct BionicBridge {
     pub timerfd_table: HashMap<u32, (u32, u32, u32, u32, u32, u64)>,
     pub next_timerfd: u32,
     pub alarm_remaining: u32,
+    // Android Thermal & Performance NDK APIs (Stage 93)
+    pub thermal_manager_refcount: u32,
+    pub thermal_status: i32,
+    pub thermal_headroom: f32,
+    pub thermal_listeners: Vec<(u32, u32)>,
+    pub perf_sessions: HashMap<u32, PerfHintSession>,
+    pub next_perf_session_id: u32,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1572,6 +1610,12 @@ impl BionicBridge {
             timerfd_table: HashMap::new(),
             next_timerfd: 350,
             alarm_remaining: 0,
+            thermal_manager_refcount: 0,
+            thermal_status: 0,
+            thermal_headroom: 0.0,
+            thermal_listeners: Vec::new(),
+            perf_sessions: HashMap::new(),
+            next_perf_session_id: 950,
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -2317,6 +2361,17 @@ impl BionicBridge {
             ("wcsncat",                          BionicFuncId::Wcsncat),
             ("wcschr",                           BionicFuncId::Wcschr),
             ("wcsrchr",                          BionicFuncId::Wcsrchr),
+            ("AThermal_acquireManager",          BionicFuncId::AThermalAcquireManager),
+            ("AThermal_releaseManager",          BionicFuncId::AThermalReleaseManager),
+            ("AThermal_getCurrentThermalStatus", BionicFuncId::AThermalGetCurrentThermalStatus),
+            ("AThermal_registerThermalStatusListener", BionicFuncId::AThermalRegisterThermalStatusListener),
+            ("AThermal_unregisterThermalStatusListener", BionicFuncId::AThermalUnregisterThermalStatusListener),
+            ("AThermal_getThermalHeadroom",      BionicFuncId::AThermalGetThermalHeadroom),
+            ("APerformanceHint_getManager",      BionicFuncId::APerformanceHintGetManager),
+            ("APerformanceHint_createSession",   BionicFuncId::APerformanceHintCreateSession),
+            ("APerformanceHint_updateTargetWorkDuration", BionicFuncId::APerformanceHintUpdateTargetWorkDuration),
+            ("APerformanceHint_reportActualWorkDuration", BionicFuncId::APerformanceHintReportActualWorkDuration),
+            ("APerformanceHint_closeSession",    BionicFuncId::APerformanceHintCloseSession),
         ];
 
         for (name, id) in funcs {
@@ -2952,6 +3007,17 @@ impl BionicBridge {
             BionicFuncId::Wcsncat,
             BionicFuncId::Wcschr,
             BionicFuncId::Wcsrchr,
+            BionicFuncId::AThermalAcquireManager,
+            BionicFuncId::AThermalReleaseManager,
+            BionicFuncId::AThermalGetCurrentThermalStatus,
+            BionicFuncId::AThermalRegisterThermalStatusListener,
+            BionicFuncId::AThermalUnregisterThermalStatusListener,
+            BionicFuncId::AThermalGetThermalHeadroom,
+            BionicFuncId::APerformanceHintGetManager,
+            BionicFuncId::APerformanceHintCreateSession,
+            BionicFuncId::APerformanceHintUpdateTargetWorkDuration,
+            BionicFuncId::APerformanceHintReportActualWorkDuration,
+            BionicFuncId::APerformanceHintCloseSession,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -6973,6 +7039,136 @@ impl BionicBridge {
                 }
                 cpu.set_reg(Reg::R0, found);
             }
+
+            // Android Thermal & Performance NDK APIs (Stage 93)
+            BionicFuncId::AThermalAcquireManager => {
+                self.thermal_manager_refcount += 1;
+                cpu.set_reg(Reg::R0, 0x7000_1000);
+            }
+            BionicFuncId::AThermalReleaseManager => {
+                let mgr = cpu.reg(Reg::R0);
+                if mgr == 0x7000_1000 && self.thermal_manager_refcount > 0 {
+                    self.thermal_manager_refcount -= 1;
+                }
+            }
+            BionicFuncId::AThermalGetCurrentThermalStatus => {
+                let mgr = cpu.reg(Reg::R0);
+                if mgr == 0 || self.thermal_manager_refcount == 0 {
+                    cpu.set_reg(Reg::R0, (-1i32) as u32); // ATHERMAL_STATUS_ERROR
+                } else {
+                    cpu.set_reg(Reg::R0, self.thermal_status as u32);
+                }
+            }
+            BionicFuncId::AThermalRegisterThermalStatusListener => {
+                let mgr = cpu.reg(Reg::R0);
+                let cb = cpu.reg(Reg::R1);
+                let data = cpu.reg(Reg::R2);
+                if mgr == 0 || cb == 0 || self.thermal_manager_refcount == 0 {
+                    cpu.set_reg(Reg::R0, (-22i32) as u32); // -EINVAL
+                } else {
+                    if !self.thermal_listeners.iter().any(|&(c, d)| c == cb && d == data) {
+                        self.thermal_listeners.push((cb, data));
+                    }
+                    cpu.set_reg(Reg::R0, 0); // OK
+                }
+            }
+            BionicFuncId::AThermalUnregisterThermalStatusListener => {
+                let mgr = cpu.reg(Reg::R0);
+                let cb = cpu.reg(Reg::R1);
+                let data = cpu.reg(Reg::R2);
+                if mgr == 0 || cb == 0 || self.thermal_manager_refcount == 0 {
+                    cpu.set_reg(Reg::R0, (-22i32) as u32); // -EINVAL
+                } else if let Some(pos) = self.thermal_listeners.iter().position(|&(c, d)| c == cb && d == data) {
+                    self.thermal_listeners.remove(pos);
+                    cpu.set_reg(Reg::R0, 0); // OK
+                } else {
+                    cpu.set_reg(Reg::R0, (-22i32) as u32); // -EINVAL
+                }
+            }
+            BionicFuncId::AThermalGetThermalHeadroom => {
+                let mgr = cpu.reg(Reg::R0);
+                let forecast = cpu.reg(Reg::R1) as i32;
+                if mgr == 0 || self.thermal_manager_refcount == 0 || !(0..=60).contains(&forecast) {
+                    let nan = f32::NAN;
+                    cpu.set_reg(Reg::R0, nan.to_bits());
+                    cpu.set_s_reg(0, nan);
+                } else {
+                    let val = self.thermal_headroom;
+                    cpu.set_reg(Reg::R0, val.to_bits());
+                    cpu.set_s_reg(0, val);
+                }
+            }
+            BionicFuncId::APerformanceHintGetManager => {
+                cpu.set_reg(Reg::R0, 0x7000_2000);
+            }
+            BionicFuncId::APerformanceHintCreateSession => {
+                let mgr = cpu.reg(Reg::R0);
+                let tids_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let size = cpu.reg(Reg::R2) as usize;
+
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let target_duration_ns = if sp.as_u32() != 0 {
+                    let low = mem.read_u32(sp).unwrap_or(0) as u64;
+                    let high = mem.read_u32(sp.add(4)).unwrap_or(0) as u64;
+                    let val = (low | (high << 32)) as i64;
+                    if val != 0 { val } else { cpu.reg(Reg::R3) as i64 }
+                } else {
+                    cpu.reg(Reg::R3) as i64
+                };
+
+                if mgr == 0 || size == 0 {
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    let mut thread_ids = Vec::with_capacity(size);
+                    for i in 0..size {
+                        let tid = mem.read_u32(tids_ptr.add((i * 4) as u32)).unwrap_or(0) as i32;
+                        thread_ids.push(tid);
+                    }
+                    let sid = self.next_perf_session_id;
+                    self.next_perf_session_id += 1;
+                    self.perf_sessions.insert(sid, PerfHintSession {
+                        thread_ids,
+                        target_duration_ns,
+                        actual_duration_ns: 0,
+                    });
+                    cpu.set_reg(Reg::R0, sid);
+                }
+            }
+            BionicFuncId::APerformanceHintUpdateTargetWorkDuration => {
+                let sid = cpu.reg(Reg::R0);
+                let low = cpu.reg(Reg::R2) as u64;
+                let high = cpu.reg(Reg::R3) as u64;
+                let duration = (low | (high << 32)) as i64;
+
+                if duration <= 0 {
+                    cpu.set_reg(Reg::R0, (-22i32) as u32);
+                } else if let Some(session) = self.perf_sessions.get_mut(&sid) {
+                    session.target_duration_ns = duration;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, (-22i32) as u32);
+                }
+            }
+            BionicFuncId::APerformanceHintReportActualWorkDuration => {
+                let sid = cpu.reg(Reg::R0);
+                let low = cpu.reg(Reg::R2) as u64;
+                let high = cpu.reg(Reg::R3) as u64;
+                let duration = (low | (high << 32)) as i64;
+
+                if duration <= 0 {
+                    cpu.set_reg(Reg::R0, (-22i32) as u32);
+                } else if let Some(session) = self.perf_sessions.get_mut(&sid) {
+                    session.actual_duration_ns = duration;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, (-22i32) as u32);
+                }
+            }
+            BionicFuncId::APerformanceHintCloseSession => {
+                let sid = cpu.reg(Reg::R0);
+                self.perf_sessions.remove(&sid);
+                cpu.set_reg(Reg::R0, 0);
+            }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
                 let src = GuestAddr::new(cpu.reg(Reg::R1));
@@ -9970,6 +10166,14 @@ impl BionicBridge {
             22 => "Invalid argument",
             _ => "Unknown error",
         }
+    }
+
+    pub fn set_thermal_status(&mut self, status: i32) {
+        self.thermal_status = status;
+    }
+
+    pub fn set_thermal_headroom(&mut self, headroom: f32) {
+        self.thermal_headroom = headroom;
     }
 
     pub fn register_asset(&mut self, name: &str, data: Vec<u8>) {
