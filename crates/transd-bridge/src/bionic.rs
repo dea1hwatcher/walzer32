@@ -403,6 +403,18 @@ pub enum BionicFuncId {
     Pselect                = 593,
     Ppoll                  = 594,
 
+    // High-Resolution Timers & POSIX Signals Extensions (Stage 72)
+    TimerCreate          = 600,
+    TimerSettime         = 601,
+    TimerGettime         = 602,
+    TimerGetoverrun      = 603,
+    TimerDelete          = 604,
+    Sigpending           = 605,
+    Sigsuspend           = 606,
+    Sigwait              = 607,
+    Sigtimedwait         = 608,
+    Sigwaitinfo          = 609,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -831,6 +843,16 @@ impl BionicFuncId {
             592 => Some(Self::EpollPwait),
             593 => Some(Self::Pselect),
             594 => Some(Self::Ppoll),
+            600 => Some(Self::TimerCreate),
+            601 => Some(Self::TimerSettime),
+            602 => Some(Self::TimerGettime),
+            603 => Some(Self::TimerGetoverrun),
+            604 => Some(Self::TimerDelete),
+            605 => Some(Self::Sigpending),
+            606 => Some(Self::Sigsuspend),
+            607 => Some(Self::Sigwait),
+            608 => Some(Self::Sigtimedwait),
+            609 => Some(Self::Sigwaitinfo),
             _ => None,
         }
     }
@@ -845,6 +867,17 @@ pub struct ThreadDescriptor {
     pub tls_ptr: GuestAddr,
     pub retval: Option<u32>,
     pub joined: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PosixTimer {
+    pub clockid: u32,
+    pub sigev_signo: u32,
+    pub interval_sec: u32,
+    pub interval_nsec: u32,
+    pub value_sec: u32,
+    pub value_nsec: u32,
+    pub overrun_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -892,6 +925,8 @@ pub struct BionicBridge {
     // Socket descriptor table: guest_fd -> (host_family, host_type, is_connected)
     pub socket_fds: HashMap<u32, (i32, i32, bool)>,
     pub epoll_fds: HashMap<u32, Vec<EpollRegistration>>,
+    pub timers: HashMap<u32, PosixTimer>,
+    pub next_timer_id: u32,
     pub next_socket_fd: u32,
     // Inlined net buffer for inet_ntoa result
     pub inet_ntoa_addr: GuestAddr,
@@ -946,6 +981,8 @@ impl BionicBridge {
             pid: 1000,
             socket_fds: HashMap::new(),
             epoll_fds: HashMap::new(),
+            timers: HashMap::new(),
+            next_timer_id: 1,
             next_socket_fd: 10, // Guest FDs start at 10 to avoid clash with 0/1/2
             inet_ntoa_addr: stub_base.add(0xA00),
             pipe_fds: HashMap::new(),
@@ -1387,6 +1424,16 @@ impl BionicBridge {
             ("epoll_pwait",                 BionicFuncId::EpollPwait),
             ("pselect",                     BionicFuncId::Pselect),
             ("ppoll",                       BionicFuncId::Ppoll),
+            ("timer_create",                BionicFuncId::TimerCreate),
+            ("timer_settime",               BionicFuncId::TimerSettime),
+            ("timer_gettime",               BionicFuncId::TimerGettime),
+            ("timer_getoverrun",            BionicFuncId::TimerGetoverrun),
+            ("timer_delete",                BionicFuncId::TimerDelete),
+            ("sigpending",                  BionicFuncId::Sigpending),
+            ("sigsuspend",                  BionicFuncId::Sigsuspend),
+            ("sigwait",                     BionicFuncId::Sigwait),
+            ("sigtimedwait",                BionicFuncId::Sigtimedwait),
+            ("sigwaitinfo",                 BionicFuncId::Sigwaitinfo),
         ];
 
         for (name, id) in funcs {
@@ -1769,6 +1816,16 @@ impl BionicBridge {
             BionicFuncId::EpollPwait,
             BionicFuncId::Pselect,
             BionicFuncId::Ppoll,
+            BionicFuncId::TimerCreate,
+            BionicFuncId::TimerSettime,
+            BionicFuncId::TimerGettime,
+            BionicFuncId::TimerGetoverrun,
+            BionicFuncId::TimerDelete,
+            BionicFuncId::Sigpending,
+            BionicFuncId::Sigsuspend,
+            BionicFuncId::Sigwait,
+            BionicFuncId::Sigtimedwait,
+            BionicFuncId::Sigwaitinfo,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -2921,6 +2978,148 @@ impl BionicBridge {
             }
             BionicFuncId::Ppoll => {
                 cpu.set_reg(Reg::R0, 0);
+            }
+
+            // High-Resolution Timers & POSIX Signals Extensions (Stage 72)
+            BionicFuncId::TimerCreate => {
+                let clockid = cpu.reg(Reg::R0);
+                let sevp = GuestAddr::new(cpu.reg(Reg::R1));
+                let timerid_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                let sigev_signo = if sevp.as_u32() != 0 {
+                    mem.read_u32(sevp.add(4)).unwrap_or(14) // default SIGALRM = 14
+                } else {
+                    14
+                };
+
+                let timerid = self.next_timer_id;
+                self.next_timer_id += 1;
+
+                self.timers.insert(timerid, PosixTimer {
+                    clockid,
+                    sigev_signo,
+                    interval_sec: 0,
+                    interval_nsec: 0,
+                    value_sec: 0,
+                    value_nsec: 0,
+                    overrun_count: 0,
+                });
+
+                if timerid_ptr.as_u32() != 0 {
+                    mem.write_u32(timerid_ptr, timerid)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::TimerSettime => {
+                let timerid = cpu.reg(Reg::R0);
+                let _flags = cpu.reg(Reg::R1);
+                let new_val_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let old_val_ptr = GuestAddr::new(cpu.reg(Reg::R3));
+
+                if let Some(timer) = self.timers.get_mut(&timerid) {
+                    if old_val_ptr.as_u32() != 0 {
+                        mem.write_u32(old_val_ptr, timer.interval_sec)?;
+                        mem.write_u32(old_val_ptr.add(4), timer.interval_nsec)?;
+                        mem.write_u32(old_val_ptr.add(8), timer.value_sec)?;
+                        mem.write_u32(old_val_ptr.add(12), timer.value_nsec)?;
+                    }
+                    if new_val_ptr.as_u32() != 0 {
+                        timer.interval_sec = mem.read_u32(new_val_ptr).unwrap_or(0);
+                        timer.interval_nsec = mem.read_u32(new_val_ptr.add(4)).unwrap_or(0);
+                        timer.value_sec = mem.read_u32(new_val_ptr.add(8)).unwrap_or(0);
+                        timer.value_nsec = mem.read_u32(new_val_ptr.add(12)).unwrap_or(0);
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::TimerGettime => {
+                let timerid = cpu.reg(Reg::R0);
+                let curr_val_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+
+                if let Some(timer) = self.timers.get(&timerid) {
+                    if curr_val_ptr.as_u32() != 0 {
+                        mem.write_u32(curr_val_ptr, timer.interval_sec)?;
+                        mem.write_u32(curr_val_ptr.add(4), timer.interval_nsec)?;
+                        mem.write_u32(curr_val_ptr.add(8), timer.value_sec)?;
+                        mem.write_u32(curr_val_ptr.add(12), timer.value_nsec)?;
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::TimerGetoverrun => {
+                let timerid = cpu.reg(Reg::R0);
+                if let Some(timer) = self.timers.get(&timerid) {
+                    cpu.set_reg(Reg::R0, timer.overrun_count);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::TimerDelete => {
+                let timerid = cpu.reg(Reg::R0);
+                if self.timers.remove(&timerid).is_some() {
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::Sigpending => {
+                let set_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if set_ptr.as_u32() != 0 {
+                    let pending = self.signal_state.pending_mask;
+                    mem.write_u32(set_ptr, pending as u32)?;
+                    mem.write_u32(set_ptr.add(4), (pending >> 32) as u32)?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::Sigsuspend => {
+                // Temporarily unblocks signals and waits. Stub: return -1 with EINTR
+                cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+            }
+            BionicFuncId::Sigwait => {
+                let set_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let sig_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+
+                if set_ptr.as_u32() != 0 {
+                    let low = mem.read_u32(set_ptr).unwrap_or(0);
+                    let sig = if low != 0 {
+                        low.trailing_zeros() + 1
+                    } else {
+                        14 // default SIGALRM
+                    };
+                    if sig_ptr.as_u32() != 0 {
+                        mem.write_u32(sig_ptr, sig)?;
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 22); // EINVAL
+                }
+            }
+            BionicFuncId::Sigtimedwait | BionicFuncId::Sigwaitinfo => {
+                let set_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let info_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+
+                if set_ptr.as_u32() != 0 {
+                    let low = mem.read_u32(set_ptr).unwrap_or(0);
+                    let sig = if low != 0 {
+                        low.trailing_zeros() + 1
+                    } else {
+                        14
+                    };
+                    if info_ptr.as_u32() != 0 {
+                        mem.write_u32(info_ptr, sig)?; // si_signo
+                        mem.write_u32(info_ptr.add(4), 0)?; // si_errno
+                        mem.write_u32(info_ptr.add(8), 0)?; // si_code
+                    }
+                    cpu.set_reg(Reg::R0, sig);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
