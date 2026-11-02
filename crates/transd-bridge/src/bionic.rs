@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use transd_core::{GuestAddr, Memory, MemoryError, Reg};
 use transd_elf::{DsoRegistry, SymbolResolver};
 pub use transd_elf::{RTLD_DEFAULT, RTLD_NEXT};
@@ -544,6 +544,17 @@ pub enum BionicFuncId {
     AndroidLogBwrite           = 813,
     AndroidLogSecurityBwrite   = 814,
     AndroidLogBtwrite          = 815,
+
+    // POSIX Message Queues (Stage 83)
+    MqOpen         = 830,
+    MqClose        = 831,
+    MqUnlink       = 832,
+    MqSend         = 833,
+    MqReceive      = 834,
+    MqTimedsend    = 835,
+    MqTimedreceive = 836,
+    MqGetattr      = 837,
+    MqSetattr      = 838,
 
     // Threading & Mutexes
     PthreadCreate = 20,
@@ -1093,6 +1104,15 @@ impl BionicFuncId {
             813 => Some(Self::AndroidLogBwrite),
             814 => Some(Self::AndroidLogSecurityBwrite),
             815 => Some(Self::AndroidLogBtwrite),
+            830 => Some(Self::MqOpen),
+            831 => Some(Self::MqClose),
+            832 => Some(Self::MqUnlink),
+            833 => Some(Self::MqSend),
+            834 => Some(Self::MqReceive),
+            835 => Some(Self::MqTimedsend),
+            836 => Some(Self::MqTimedreceive),
+            837 => Some(Self::MqGetattr),
+            838 => Some(Self::MqSetattr),
             _ => None,
         }
     }
@@ -1155,6 +1175,9 @@ pub struct BionicBridge {
     pub current_thread_id: u32,
     pub threads: HashMap<u32, ThreadDescriptor>,
     pub thread_names: HashMap<u32, String>,
+    // POSIX Message Queues table: mqdes -> (name, queue of (message_bytes, priority))
+    pub mqueue_table: HashMap<u32, (String, VecDeque<(Vec<u8>, u32)>)>,
+    pub next_mqdes: u32,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1213,6 +1236,8 @@ impl BionicBridge {
             current_thread_id: 1,
             threads: HashMap::new(),
             thread_names: HashMap::new(),
+            mqueue_table: HashMap::new(),
+            next_mqdes: 400,
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -1825,6 +1850,15 @@ impl BionicBridge {
             ("__android_log_bwrite",         BionicFuncId::AndroidLogBwrite),
             ("__android_log_security_bwrite", BionicFuncId::AndroidLogSecurityBwrite),
             ("__android_log_btwrite",        BionicFuncId::AndroidLogBtwrite),
+            ("mq_open",                      BionicFuncId::MqOpen),
+            ("mq_close",                     BionicFuncId::MqClose),
+            ("mq_unlink",                    BionicFuncId::MqUnlink),
+            ("mq_send",                      BionicFuncId::MqSend),
+            ("mq_receive",                   BionicFuncId::MqReceive),
+            ("mq_timedsend",                 BionicFuncId::MqTimedsend),
+            ("mq_timedreceive",              BionicFuncId::MqTimedreceive),
+            ("mq_getattr",                   BionicFuncId::MqGetattr),
+            ("mq_setattr",                   BionicFuncId::MqSetattr),
         ];
 
         for (name, id) in funcs {
@@ -2327,6 +2361,15 @@ impl BionicBridge {
             BionicFuncId::AndroidLogBwrite,
             BionicFuncId::AndroidLogSecurityBwrite,
             BionicFuncId::AndroidLogBtwrite,
+            BionicFuncId::MqOpen,
+            BionicFuncId::MqClose,
+            BionicFuncId::MqUnlink,
+            BionicFuncId::MqSend,
+            BionicFuncId::MqReceive,
+            BionicFuncId::MqTimedsend,
+            BionicFuncId::MqTimedreceive,
+            BionicFuncId::MqGetattr,
+            BionicFuncId::MqSetattr,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -4371,6 +4414,84 @@ impl BionicBridge {
             BionicFuncId::AndroidLogBtwrite => {
                 let len = cpu.reg(Reg::R3);
                 cpu.set_reg(Reg::R0, len);
+            }
+            // POSIX Message Queues (Stage 83)
+            BionicFuncId::MqOpen => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let _oflag = cpu.reg(Reg::R1);
+                let name = if name_ptr.as_u32() != 0 {
+                    Self::read_c_string(mem, name_ptr).unwrap_or_else(|_| "mq".to_string())
+                } else {
+                    "mq".to_string()
+                };
+                let mqdes = self.next_mqdes;
+                self.next_mqdes += 1;
+                self.mqueue_table.insert(mqdes, (name, VecDeque::new()));
+                cpu.set_reg(Reg::R0, mqdes);
+            }
+            BionicFuncId::MqClose => {
+                let mqdes = cpu.reg(Reg::R0);
+                self.mqueue_table.remove(&mqdes);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::MqUnlink => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::MqSend | BionicFuncId::MqTimedsend => {
+                let mqdes = cpu.reg(Reg::R0);
+                let msg_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let msg_len = cpu.reg(Reg::R2) as usize;
+                let prio = cpu.reg(Reg::R3);
+                if let Some((_, queue)) = self.mqueue_table.get_mut(&mqdes) {
+                    let mut buf = vec![0u8; msg_len];
+                    if msg_len > 0 && msg_ptr.as_u32() != 0 {
+                        mem.read_bytes(msg_ptr, &mut buf)?;
+                    }
+                    queue.push_back((buf, prio));
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::MqReceive | BionicFuncId::MqTimedreceive => {
+                let mqdes = cpu.reg(Reg::R0);
+                let msg_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let max_len = cpu.reg(Reg::R2) as usize;
+                let prio_ptr = GuestAddr::new(cpu.reg(Reg::R3));
+                if let Some((_, queue)) = self.mqueue_table.get_mut(&mqdes) {
+                    if let Some((msg, prio)) = queue.pop_front() {
+                        let count = msg.len().min(max_len);
+                        if msg_ptr.as_u32() != 0 && count > 0 {
+                            mem.write_bytes(msg_ptr, &msg[..count])?;
+                        }
+                        if prio_ptr.as_u32() != 0 {
+                            mem.write_u32(prio_ptr, prio)?;
+                        }
+                        cpu.set_reg(Reg::R0, count as u32);
+                    } else {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::MqGetattr => {
+                let mqdes = cpu.reg(Reg::R0);
+                let attr_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if let Some((_, queue)) = self.mqueue_table.get(&mqdes) {
+                    if attr_ptr.as_u32() != 0 {
+                        mem.write_u32(attr_ptr, 0)?; // mq_flags
+                        mem.write_u32(attr_ptr.add(4), 10)?; // mq_maxmsg
+                        mem.write_u32(attr_ptr.add(8), 8192)?; // mq_msgsize
+                        mem.write_u32(attr_ptr.add(12), queue.len() as u32)?; // mq_curmsgs
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::MqSetattr => {
+                cpu.set_reg(Reg::R0, 0);
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
