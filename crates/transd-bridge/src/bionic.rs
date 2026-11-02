@@ -743,6 +743,15 @@ pub enum BionicFuncId {
     PosixFallocate64                = 1139,
     Fallocate                       = 1140,
 
+    // Linux Inotify & Signal FD Subsystem (Stage 96)
+    InotifyInit                     = 1150,
+    InotifyInit1                    = 1151,
+    InotifyAddWatch                 = 1152,
+    InotifyRmWatch                  = 1153,
+    Signalfd                        = 1154,
+    Signalfd4                       = 1155,
+    Eventfd2                        = 1156,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1462,9 +1471,39 @@ impl BionicFuncId {
             1138 => Some(Self::PosixFallocate),
             1139 => Some(Self::PosixFallocate64),
             1140 => Some(Self::Fallocate),
+            1150 => Some(Self::InotifyInit),
+            1151 => Some(Self::InotifyInit1),
+            1152 => Some(Self::InotifyAddWatch),
+            1153 => Some(Self::InotifyRmWatch),
+            1154 => Some(Self::Signalfd),
+            1155 => Some(Self::Signalfd4),
+            1156 => Some(Self::Eventfd2),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct InotifyWatch {
+    pub wd: i32,
+    pub path: String,
+    pub mask: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct InotifyEvent {
+    pub wd: i32,
+    pub mask: u32,
+    pub cookie: u32,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct InotifyInstance {
+    pub flags: i32,
+    pub watches: HashMap<i32, InotifyWatch>,
+    pub next_wd: i32,
+    pub events: VecDeque<InotifyEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -1621,6 +1660,11 @@ pub struct BionicBridge {
     pub choreo_callbacks: Vec<ChoreographerFrameCallback>,
     pub choreo_refresh_callbacks: Vec<(u32, u32)>,
     pub vsync_period_ns: i64,
+    // Linux Inotify & Signal FD Subsystem (Stage 96)
+    pub inotify_instances: HashMap<u32, InotifyInstance>,
+    pub next_inotify_fd: u32,
+    pub signalfd_table: HashMap<u32, u64>,
+    pub next_signalfd: u32,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1709,6 +1753,10 @@ impl BionicBridge {
             choreo_callbacks: Vec::new(),
             choreo_refresh_callbacks: Vec::new(),
             vsync_period_ns: 16_666_667,
+            inotify_instances: HashMap::new(),
+            next_inotify_fd: 450,
+            signalfd_table: HashMap::new(),
+            next_signalfd: 460,
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -2492,6 +2540,13 @@ impl BionicBridge {
             ("posix_fallocate",                  BionicFuncId::PosixFallocate),
             ("posix_fallocate64",                BionicFuncId::PosixFallocate64),
             ("fallocate",                        BionicFuncId::Fallocate),
+            ("inotify_init",                     BionicFuncId::InotifyInit),
+            ("inotify_init1",                    BionicFuncId::InotifyInit1),
+            ("inotify_add_watch",                BionicFuncId::InotifyAddWatch),
+            ("inotify_rm_watch",                 BionicFuncId::InotifyRmWatch),
+            ("signalfd",                         BionicFuncId::Signalfd),
+            ("signalfd4",                        BionicFuncId::Signalfd4),
+            ("eventfd2",                         BionicFuncId::Eventfd2),
         ];
 
         for (name, id) in funcs {
@@ -3165,6 +3220,13 @@ impl BionicBridge {
             BionicFuncId::PosixFallocate,
             BionicFuncId::PosixFallocate64,
             BionicFuncId::Fallocate,
+            BionicFuncId::InotifyInit,
+            BionicFuncId::InotifyInit1,
+            BionicFuncId::InotifyAddWatch,
+            BionicFuncId::InotifyRmWatch,
+            BionicFuncId::Signalfd,
+            BionicFuncId::Signalfd4,
+            BionicFuncId::Eventfd2,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -7803,6 +7865,105 @@ impl BionicBridge {
                     cpu.set_reg(Reg::R0, 0); // OK
                 }
             }
+
+            // Linux Inotify & Signal FD Subsystem (Stage 96)
+            BionicFuncId::InotifyInit => {
+                let fd = self.next_inotify_fd;
+                self.next_inotify_fd += 1;
+                self.inotify_instances.insert(fd, InotifyInstance {
+                    flags: 0,
+                    watches: HashMap::new(),
+                    next_wd: 1,
+                    events: VecDeque::new(),
+                });
+                cpu.set_reg(Reg::R0, fd);
+            }
+            BionicFuncId::InotifyInit1 => {
+                let flags = cpu.reg(Reg::R0) as i32;
+                let fd = self.next_inotify_fd;
+                self.next_inotify_fd += 1;
+                self.inotify_instances.insert(fd, InotifyInstance {
+                    flags,
+                    watches: HashMap::new(),
+                    next_wd: 1,
+                    events: VecDeque::new(),
+                });
+                cpu.set_reg(Reg::R0, fd);
+            }
+            BionicFuncId::InotifyAddWatch => {
+                let fd = cpu.reg(Reg::R0);
+                let path_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let mask = cpu.reg(Reg::R2);
+
+                if path_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                } else {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    if let Some(instance) = self.inotify_instances.get_mut(&fd) {
+                        let existing_wd = instance.watches.values().find(|w| w.path == path).map(|w| w.wd);
+                        let wd = if let Some(wd) = existing_wd {
+                            if let Some(w) = instance.watches.get_mut(&wd) {
+                                w.mask = mask;
+                            }
+                            wd
+                        } else {
+                            let wd = instance.next_wd;
+                            instance.next_wd += 1;
+                            instance.watches.insert(wd, InotifyWatch {
+                                wd,
+                                path,
+                                mask,
+                            });
+                            wd
+                        };
+                        cpu.set_reg(Reg::R0, wd as u32);
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    }
+                }
+            }
+            BionicFuncId::InotifyRmWatch => {
+                let fd = cpu.reg(Reg::R0);
+                let wd = cpu.reg(Reg::R1) as i32;
+
+                if let Some(instance) = self.inotify_instances.get_mut(&fd) {
+                    if instance.watches.remove(&wd).is_some() {
+                        cpu.set_reg(Reg::R0, 0);
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+            BionicFuncId::Signalfd | BionicFuncId::Signalfd4 => {
+                let fd = cpu.reg(Reg::R0);
+                let mask_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let mask = if mask_ptr.as_u32() != 0 {
+                    let low = mem.read_u32(mask_ptr).unwrap_or(0) as u64;
+                    let high = mem.read_u32(mask_ptr.add(4)).unwrap_or(0) as u64;
+                    low | (high << 32)
+                } else {
+                    0
+                };
+                let target_fd = if fd == u32::MAX {
+                    let new_fd = self.next_signalfd;
+                    self.next_signalfd += 1;
+                    new_fd
+                } else {
+                    fd
+                };
+                self.signalfd_table.insert(target_fd, mask);
+                cpu.set_reg(Reg::R0, target_fd);
+            }
+            BionicFuncId::Eventfd2 => {
+                let initval = cpu.reg(Reg::R0) as u64;
+                let flags = cpu.reg(Reg::R1);
+                let fd = self.next_eventfd;
+                self.next_eventfd += 1;
+                self.eventfd_table.insert(fd, (initval, flags));
+                cpu.set_reg(Reg::R0, fd);
+            }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
                 let src = GuestAddr::new(cpu.reg(Reg::R1));
@@ -8629,7 +8790,7 @@ impl BionicBridge {
                 if self.socket_fds.remove(&fd).is_some()
                     || self.epoll_fds.remove(&fd).is_some()
                     || self.pipe_fds.remove(&fd).is_some()
-                    || self.eventfd_table.remove(&fd).is_some() || self.timerfd_table.remove(&fd).is_some()
+                    || self.eventfd_table.remove(&fd).is_some() || self.timerfd_table.remove(&fd).is_some() || self.inotify_instances.remove(&fd).is_some() || self.signalfd_table.remove(&fd).is_some()
                     || self.vfs.close(fd).is_ok()
                 {
                     cpu.set_reg(Reg::R0, 0);
@@ -8791,6 +8952,48 @@ impl BionicBridge {
                         cpu.set_reg(Reg::R0, 8);
                     } else {
                         cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                    }
+                } else if let Some(inotify) = self.inotify_instances.get_mut(&fd) {
+                    if inotify.events.is_empty() {
+                        cpu.set_reg(Reg::R0, 0);
+                    } else {
+                        let mut bytes_written = 0usize;
+                        while let Some(ev) = inotify.events.front() {
+                            let name_bytes = if ev.name.is_empty() {
+                                Vec::new()
+                            } else {
+                                let mut b = ev.name.as_bytes().to_vec();
+                                b.push(0);
+                                while b.len() % 4 != 0 {
+                                    b.push(0);
+                                }
+                                b
+                            };
+                            let ev_size = 16 + name_bytes.len();
+                            if bytes_written + ev_size > count {
+                                break;
+                            }
+                            let ev = inotify.events.pop_front().unwrap();
+                            let cur_ptr = buf_ptr.add(bytes_written as u32);
+                            mem.write_u32(cur_ptr, ev.wd as u32)?;
+                            mem.write_u32(cur_ptr.add(4), ev.mask)?;
+                            mem.write_u32(cur_ptr.add(8), ev.cookie)?;
+                            mem.write_u32(cur_ptr.add(12), name_bytes.len() as u32)?;
+                            if !name_bytes.is_empty() {
+                                mem.write_bytes(cur_ptr.add(16), &name_bytes)?;
+                            }
+                            bytes_written += ev_size;
+                        }
+                        cpu.set_reg(Reg::R0, bytes_written as u32);
+                    }
+                } else if let Some(_sig_mask) = self.signalfd_table.get_mut(&fd) {
+                    if count >= 128 {
+                        for i in 0..128 {
+                            mem.write_u8(buf_ptr.add(i as u32), 0)?;
+                        }
+                        cpu.set_reg(Reg::R0, 128);
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX);
                     }
                 } else {
                     let mut tmp = vec![0u8; count];
@@ -10816,6 +11019,24 @@ impl BionicBridge {
 
     pub fn set_vsync_period_ns(&mut self, period_ns: i64) {
         self.vsync_period_ns = period_ns;
+    }
+
+    pub fn trigger_inotify_event(&mut self, path: &str, mask: u32, cookie: u32, name: &str) -> usize {
+        let mut triggered = 0;
+        for instance in self.inotify_instances.values_mut() {
+            for watch in instance.watches.values() {
+                if watch.path == path && (watch.mask & mask) != 0 {
+                    instance.events.push_back(InotifyEvent {
+                        wd: watch.wd,
+                        mask,
+                        cookie,
+                        name: name.to_string(),
+                    });
+                    triggered += 1;
+                }
+            }
+        }
+        triggered
     }
 
     pub fn register_asset(&mut self, name: &str, data: Vec<u8>) {
