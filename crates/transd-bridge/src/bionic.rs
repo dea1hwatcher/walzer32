@@ -653,6 +653,16 @@ pub enum BionicFuncId {
     Endgrent                        = 992,
     Getgrent                        = 993,
 
+    // POSIX Interval Timers, Timer File Descriptors & Alarms (Stage 90)
+    Getitimer                       = 1000,
+    Setitimer                       = 1001,
+    Alarm                           = 1002,
+    Ualarm                          = 1003,
+    TimerfdCreate                   = 1004,
+    TimerfdSettime                  = 1005,
+    TimerfdGettime                  = 1006,
+    Profil                          = 1007,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1294,6 +1304,14 @@ impl BionicFuncId {
             991 => Some(Self::Setgrent),
             992 => Some(Self::Endgrent),
             993 => Some(Self::Getgrent),
+            1000 => Some(Self::Getitimer),
+            1001 => Some(Self::Setitimer),
+            1002 => Some(Self::Alarm),
+            1003 => Some(Self::Ualarm),
+            1004 => Some(Self::TimerfdCreate),
+            1005 => Some(Self::TimerfdSettime),
+            1006 => Some(Self::TimerfdGettime),
+            1007 => Some(Self::Profil),
             _ => None,
         }
     }
@@ -1403,6 +1421,11 @@ pub struct BionicBridge {
     // User and Group database enumeration state (Stage 89)
     pub pwent_index: usize,
     pub grent_index: usize,
+    // Interval timers & TimerFD (Stage 90)
+    pub itimers: HashMap<u32, (u32, u32, u32, u32)>,
+    pub timerfd_table: HashMap<u32, (u32, u32, u32, u32, u32, u64)>,
+    pub next_timerfd: u32,
+    pub alarm_remaining: u32,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1477,6 +1500,10 @@ impl BionicBridge {
             next_regex_handle: 800,
             pwent_index: 0,
             grent_index: 0,
+            itimers: HashMap::new(),
+            timerfd_table: HashMap::new(),
+            next_timerfd: 350,
+            alarm_remaining: 0,
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -2182,6 +2209,14 @@ impl BionicBridge {
             ("setgrent",                         BionicFuncId::Setgrent),
             ("endgrent",                         BionicFuncId::Endgrent),
             ("getgrent",                         BionicFuncId::Getgrent),
+            ("getitimer",                        BionicFuncId::Getitimer),
+            ("setitimer",                        BionicFuncId::Setitimer),
+            ("alarm",                            BionicFuncId::Alarm),
+            ("ualarm",                           BionicFuncId::Ualarm),
+            ("timerfd_create",                   BionicFuncId::TimerfdCreate),
+            ("timerfd_settime",                  BionicFuncId::TimerfdSettime),
+            ("timerfd_gettime",                  BionicFuncId::TimerfdGettime),
+            ("profil",                           BionicFuncId::Profil),
         ];
 
         for (name, id) in funcs {
@@ -2777,6 +2812,14 @@ impl BionicBridge {
             BionicFuncId::Setgrent,
             BionicFuncId::Endgrent,
             BionicFuncId::Getgrent,
+            BionicFuncId::Getitimer,
+            BionicFuncId::Setitimer,
+            BionicFuncId::Alarm,
+            BionicFuncId::Ualarm,
+            BionicFuncId::TimerfdCreate,
+            BionicFuncId::TimerfdSettime,
+            BionicFuncId::TimerfdGettime,
+            BionicFuncId::Profil,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -6100,6 +6143,104 @@ impl BionicBridge {
                     cpu.set_reg(Reg::R0, 0);
                 }
             }
+            // POSIX Interval Timers, Timer File Descriptors & Alarms (Stage 90)
+            BionicFuncId::Getitimer => {
+                let which = cpu.reg(Reg::R0);
+                let curr_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if curr_ptr.as_u32() != 0 {
+                    let (isec, iusec, vsec, vusec) = self.itimers.get(&which).cloned().unwrap_or((0, 0, 0, 0));
+                    mem.write_u32(curr_ptr, isec)?;
+                    mem.write_u32(curr_ptr.add(4), iusec)?;
+                    mem.write_u32(curr_ptr.add(8), vsec)?;
+                    mem.write_u32(curr_ptr.add(12), vusec)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Setitimer => {
+                let which = cpu.reg(Reg::R0);
+                let new_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let old_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                if old_ptr.as_u32() != 0 {
+                    let (isec, iusec, vsec, vusec) = self.itimers.get(&which).cloned().unwrap_or((0, 0, 0, 0));
+                    mem.write_u32(old_ptr, isec)?;
+                    mem.write_u32(old_ptr.add(4), iusec)?;
+                    mem.write_u32(old_ptr.add(8), vsec)?;
+                    mem.write_u32(old_ptr.add(12), vusec)?;
+                }
+
+                if new_ptr.as_u32() != 0 {
+                    let isec = mem.read_u32(new_ptr)?;
+                    let iusec = mem.read_u32(new_ptr.add(4))?;
+                    let vsec = mem.read_u32(new_ptr.add(8))?;
+                    let vusec = mem.read_u32(new_ptr.add(12))?;
+                    self.itimers.insert(which, (isec, iusec, vsec, vusec));
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Alarm => {
+                let seconds = cpu.reg(Reg::R0);
+                let prev = self.alarm_remaining;
+                self.alarm_remaining = seconds;
+                cpu.set_reg(Reg::R0, prev);
+            }
+            BionicFuncId::Ualarm => {
+                let value = cpu.reg(Reg::R0);
+                let interval = cpu.reg(Reg::R1);
+                let prev = self.itimers.get(&0).map(|&(_, _, _, v)| v).unwrap_or(0);
+                self.itimers.insert(0, (0, interval, 0, value));
+                cpu.set_reg(Reg::R0, prev);
+            }
+            BionicFuncId::TimerfdCreate => {
+                let clockid = cpu.reg(Reg::R0);
+                let fd = self.next_timerfd;
+                self.next_timerfd += 1;
+                self.timerfd_table.insert(fd, (clockid, 0, 0, 0, 0, 0));
+                cpu.set_reg(Reg::R0, fd);
+            }
+            BionicFuncId::TimerfdSettime => {
+                let fd = cpu.reg(Reg::R0);
+                let _flags = cpu.reg(Reg::R1);
+                let new_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let old_ptr = GuestAddr::new(cpu.reg(Reg::R3));
+
+                let mut ret = 0xFFFF_FFFF;
+                if let Some((_clockid, isec, insec, vsec, vnsec, expirations)) = self.timerfd_table.get_mut(&fd) {
+                    if old_ptr.as_u32() != 0 {
+                        mem.write_u32(old_ptr, *isec)?;
+                        mem.write_u32(old_ptr.add(4), *insec)?;
+                        mem.write_u32(old_ptr.add(8), *vsec)?;
+                        mem.write_u32(old_ptr.add(12), *vnsec)?;
+                    }
+                    if new_ptr.as_u32() != 0 {
+                        *isec = mem.read_u32(new_ptr)?;
+                        *insec = mem.read_u32(new_ptr.add(4))?;
+                        *vsec = mem.read_u32(new_ptr.add(8))?;
+                        *vnsec = mem.read_u32(new_ptr.add(12))?;
+                        *expirations = 1;
+                    }
+                    ret = 0;
+                }
+                cpu.set_reg(Reg::R0, ret);
+            }
+            BionicFuncId::TimerfdGettime => {
+                let fd = cpu.reg(Reg::R0);
+                let curr_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let mut ret = 0xFFFF_FFFF;
+                if let Some((_clk, isec, insec, vsec, vnsec, _)) = self.timerfd_table.get(&fd) {
+                    if curr_ptr.as_u32() != 0 {
+                        mem.write_u32(curr_ptr, *isec)?;
+                        mem.write_u32(curr_ptr.add(4), *insec)?;
+                        mem.write_u32(curr_ptr.add(8), *vsec)?;
+                        mem.write_u32(curr_ptr.add(12), *vnsec)?;
+                    }
+                    ret = 0;
+                }
+                cpu.set_reg(Reg::R0, ret);
+            }
+            BionicFuncId::Profil => {
+                cpu.set_reg(Reg::R0, 0);
+            }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
                 let src = GuestAddr::new(cpu.reg(Reg::R1));
@@ -6926,7 +7067,7 @@ impl BionicBridge {
                 if self.socket_fds.remove(&fd).is_some()
                     || self.epoll_fds.remove(&fd).is_some()
                     || self.pipe_fds.remove(&fd).is_some()
-                    || self.eventfd_table.remove(&fd).is_some()
+                    || self.eventfd_table.remove(&fd).is_some() || self.timerfd_table.remove(&fd).is_some()
                     || self.vfs.close(fd).is_ok()
                 {
                     cpu.set_reg(Reg::R0, 0);
@@ -7059,6 +7200,16 @@ impl BionicBridge {
                         mem.write_u8(buf_ptr.add(i as u32), *b)?;
                     }
                     cpu.set_reg(Reg::R0, n as u32);
+                } else if let Some((_clk, _isec, _insec, _vsec, _vnsec, expirations)) = self.timerfd_table.get_mut(&fd) {
+                    if count >= 8 {
+                        let exp = if *expirations > 0 { *expirations } else { 1 };
+                        *expirations = 0;
+                        mem.write_u32(buf_ptr, (exp & 0xFFFF_FFFF) as u32)?;
+                        mem.write_u32(buf_ptr.add(4), (exp >> 32) as u32)?;
+                        cpu.set_reg(Reg::R0, 8);
+                    } else {
+                        cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                    }
                 } else if let Some((counter, flags)) = self.eventfd_table.get_mut(&fd) {
                     if count >= 8 {
                         let val = if *flags & 1 != 0 {
