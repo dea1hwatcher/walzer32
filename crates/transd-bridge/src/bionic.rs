@@ -537,6 +537,14 @@ pub enum BionicFuncId {
     PthreadEqual        = 795,
     PthreadGetattrNp    = 796,
 
+    // Android Memory Management & Security Log Extensions (Stage 82)
+    AndroidMallopt             = 810,
+    MallocInfo                 = 811,
+    Mallinfo                   = 812,
+    AndroidLogBwrite           = 813,
+    AndroidLogSecurityBwrite   = 814,
+    AndroidLogBtwrite          = 815,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1079,6 +1087,12 @@ impl BionicFuncId {
             794 => Some(Self::PthreadGetnameNp),
             795 => Some(Self::PthreadEqual),
             796 => Some(Self::PthreadGetattrNp),
+            810 => Some(Self::AndroidMallopt),
+            811 => Some(Self::MallocInfo),
+            812 => Some(Self::Mallinfo),
+            813 => Some(Self::AndroidLogBwrite),
+            814 => Some(Self::AndroidLogSecurityBwrite),
+            815 => Some(Self::AndroidLogBtwrite),
             _ => None,
         }
     }
@@ -1805,6 +1819,12 @@ impl BionicBridge {
             ("pthread_getname_np",          BionicFuncId::PthreadGetnameNp),
             ("pthread_equal",               BionicFuncId::PthreadEqual),
             ("pthread_getattr_np",          BionicFuncId::PthreadGetattrNp),
+            ("android_mallopt",             BionicFuncId::AndroidMallopt),
+            ("malloc_info",                 BionicFuncId::MallocInfo),
+            ("mallinfo",                    BionicFuncId::Mallinfo),
+            ("__android_log_bwrite",         BionicFuncId::AndroidLogBwrite),
+            ("__android_log_security_bwrite", BionicFuncId::AndroidLogSecurityBwrite),
+            ("__android_log_btwrite",        BionicFuncId::AndroidLogBtwrite),
         ];
 
         for (name, id) in funcs {
@@ -2301,6 +2321,12 @@ impl BionicBridge {
             BionicFuncId::PthreadGetnameNp,
             BionicFuncId::PthreadEqual,
             BionicFuncId::PthreadGetattrNp,
+            BionicFuncId::AndroidMallopt,
+            BionicFuncId::MallocInfo,
+            BionicFuncId::Mallinfo,
+            BionicFuncId::AndroidLogBwrite,
+            BionicFuncId::AndroidLogSecurityBwrite,
+            BionicFuncId::AndroidLogBtwrite,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -4312,6 +4338,39 @@ impl BionicBridge {
                 } else {
                     cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
                 }
+            }
+            // Android Memory Management & Security Log Extensions (Stage 82)
+            BionicFuncId::AndroidMallopt => {
+                cpu.set_reg(Reg::R0, 1);
+            }
+            BionicFuncId::MallocInfo => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Mallinfo => {
+                let ret_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if ret_ptr.as_u32() != 0 {
+                    let heap_used = self.heap_current.as_u32().saturating_sub(0x0002_0000);
+                    let heap_free = self.heap_limit.as_u32().saturating_sub(self.heap_current.as_u32());
+                    mem.write_u32(ret_ptr, heap_used)?; // arena
+                    mem.write_u32(ret_ptr.add(4), 1)?; // ordblks
+                    mem.write_u32(ret_ptr.add(8), 0)?; // smblks
+                    mem.write_u32(ret_ptr.add(12), 0)?; // hblks
+                    mem.write_u32(ret_ptr.add(16), 0)?; // usmblks
+                    mem.write_u32(ret_ptr.add(20), 0)?; // fsmblks
+                    mem.write_u32(ret_ptr.add(24), heap_used)?; // uordblks
+                    mem.write_u32(ret_ptr.add(28), heap_free)?; // fordblks
+                    mem.write_u32(ret_ptr.add(32), 0)?; // keepcost
+                    mem.write_u32(ret_ptr.add(36), 0)?;
+                }
+                cpu.set_reg(Reg::R0, ret_ptr.as_u32());
+            }
+            BionicFuncId::AndroidLogBwrite | BionicFuncId::AndroidLogSecurityBwrite => {
+                let len = cpu.reg(Reg::R2);
+                cpu.set_reg(Reg::R0, len);
+            }
+            BionicFuncId::AndroidLogBtwrite => {
+                let len = cpu.reg(Reg::R3);
+                cpu.set_reg(Reg::R0, len);
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
