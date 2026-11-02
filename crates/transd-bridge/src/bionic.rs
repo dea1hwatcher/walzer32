@@ -771,6 +771,20 @@ pub enum BionicFuncId {
     ASensorGetResolution                    = 1185,
     ASensorGetMinDelay                      = 1186,
 
+    // Linux Extended Attributes Subsystem (Stage 98)
+    Getxattr                                = 1200,
+    Lgetxattr                               = 1201,
+    Fgetxattr                               = 1202,
+    Setxattr                                = 1203,
+    Lsetxattr                               = 1204,
+    Fsetxattr                               = 1205,
+    Listxattr                               = 1206,
+    Llistxattr                              = 1207,
+    Flistxattr                              = 1208,
+    Removexattr                             = 1209,
+    Lremovexattr                            = 1210,
+    Fremovexattr                            = 1211,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1514,6 +1528,18 @@ impl BionicFuncId {
             1184 => Some(Self::ASensorGetType),
             1185 => Some(Self::ASensorGetResolution),
             1186 => Some(Self::ASensorGetMinDelay),
+            1200 => Some(Self::Getxattr),
+            1201 => Some(Self::Lgetxattr),
+            1202 => Some(Self::Fgetxattr),
+            1203 => Some(Self::Setxattr),
+            1204 => Some(Self::Lsetxattr),
+            1205 => Some(Self::Fsetxattr),
+            1206 => Some(Self::Listxattr),
+            1207 => Some(Self::Llistxattr),
+            1208 => Some(Self::Flistxattr),
+            1209 => Some(Self::Removexattr),
+            1210 => Some(Self::Lremovexattr),
+            1211 => Some(Self::Fremovexattr),
             _ => None,
         }
     }
@@ -1736,6 +1762,8 @@ pub struct BionicBridge {
     pub sensors: Vec<AndroidSensorDescriptor>,
     pub sensor_queues: HashMap<u32, SensorEventQueue>,
     pub next_sensor_queue_id: u32,
+    // Linux Extended Attributes Subsystem (Stage 98)
+    pub xattrs: HashMap<String, HashMap<String, Vec<u8>>>,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1882,6 +1910,7 @@ impl BionicBridge {
             ],
             sensor_queues: HashMap::new(),
             next_sensor_queue_id: 750,
+            xattrs: HashMap::new(),
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -2689,6 +2718,18 @@ impl BionicBridge {
             ("ASensor_getType",                      BionicFuncId::ASensorGetType),
             ("ASensor_getResolution",                BionicFuncId::ASensorGetResolution),
             ("ASensor_getMinDelay",                  BionicFuncId::ASensorGetMinDelay),
+            ("getxattr",                             BionicFuncId::Getxattr),
+            ("lgetxattr",                            BionicFuncId::Lgetxattr),
+            ("fgetxattr",                            BionicFuncId::Fgetxattr),
+            ("setxattr",                             BionicFuncId::Setxattr),
+            ("lsetxattr",                            BionicFuncId::Lsetxattr),
+            ("fsetxattr",                            BionicFuncId::Fsetxattr),
+            ("listxattr",                            BionicFuncId::Listxattr),
+            ("llistxattr",                           BionicFuncId::Llistxattr),
+            ("flistxattr",                           BionicFuncId::Flistxattr),
+            ("removexattr",                          BionicFuncId::Removexattr),
+            ("lremovexattr",                         BionicFuncId::Lremovexattr),
+            ("fremovexattr",                         BionicFuncId::Fremovexattr),
         ];
 
         for (name, id) in funcs {
@@ -3386,6 +3427,18 @@ impl BionicBridge {
             BionicFuncId::ASensorGetType,
             BionicFuncId::ASensorGetResolution,
             BionicFuncId::ASensorGetMinDelay,
+            BionicFuncId::Getxattr,
+            BionicFuncId::Lgetxattr,
+            BionicFuncId::Fgetxattr,
+            BionicFuncId::Setxattr,
+            BionicFuncId::Lsetxattr,
+            BionicFuncId::Fsetxattr,
+            BionicFuncId::Listxattr,
+            BionicFuncId::Llistxattr,
+            BionicFuncId::Flistxattr,
+            BionicFuncId::Removexattr,
+            BionicFuncId::Lremovexattr,
+            BionicFuncId::Fremovexattr,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -8321,6 +8374,242 @@ impl BionicBridge {
                     cpu.set_reg(Reg::R0, self.sensors[idx].min_delay_us as u32);
                 } else {
                     cpu.set_reg(Reg::R0, 0);
+                }
+            }
+
+            // Linux Extended Attributes Subsystem (Stage 98)
+            BionicFuncId::Getxattr | BionicFuncId::Lgetxattr => {
+                let path_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let val_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let size = cpu.reg(Reg::R3) as usize;
+
+                if path_ptr.as_u32() == 0 || name_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                } else {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    let name = Self::read_c_string(mem, name_ptr)?;
+
+                    let default_val = if name == "security.selinux" {
+                        Some(b"u:object_r:app_data_file:s0 ".to_vec())
+                    } else {
+                        None
+                    };
+
+                    let val_opt = self.xattrs.get(&path)
+                        .and_then(|m| m.get(&name).cloned())
+                        .or(default_val);
+
+                    if let Some(val) = val_opt {
+                        if size == 0 {
+                            cpu.set_reg(Reg::R0, val.len() as u32);
+                        } else if size < val.len() {
+                            cpu.set_reg(Reg::R0, u32::MAX); // ERANGE
+                        } else {
+                            mem.write_bytes(val_ptr, &val)?;
+                            cpu.set_reg(Reg::R0, val.len() as u32);
+                        }
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX); // ENODATA
+                    }
+                }
+            }
+            BionicFuncId::Fgetxattr => {
+                let fd = cpu.reg(Reg::R0);
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let val_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let size = cpu.reg(Reg::R3) as usize;
+
+                if name_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                } else {
+                    let path = self.vfs.fd_path(fd).unwrap_or_else(|| format!("/proc/self/fd/{}", fd));
+                    let name = Self::read_c_string(mem, name_ptr)?;
+
+                    let default_val = if name == "security.selinux" {
+                        Some(b"u:object_r:app_data_file:s0 ".to_vec())
+                    } else {
+                        None
+                    };
+
+                    let val_opt = self.xattrs.get(&path)
+                        .and_then(|m| m.get(&name).cloned())
+                        .or(default_val);
+
+                    if let Some(val) = val_opt {
+                        if size == 0 {
+                            cpu.set_reg(Reg::R0, val.len() as u32);
+                        } else if size < val.len() {
+                            cpu.set_reg(Reg::R0, u32::MAX);
+                        } else {
+                            mem.write_bytes(val_ptr, &val)?;
+                            cpu.set_reg(Reg::R0, val.len() as u32);
+                        }
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    }
+                }
+            }
+            BionicFuncId::Setxattr | BionicFuncId::Lsetxattr => {
+                let path_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let val_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let size = cpu.reg(Reg::R3) as usize;
+
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let flags = if sp.as_u32() != 0 { mem.read_u32(sp).unwrap_or(0) } else { 0 };
+
+                if path_ptr.as_u32() == 0 || name_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                } else {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    let name = Self::read_c_string(mem, name_ptr)?;
+
+                    let mut val_bytes = vec![0u8; size];
+                    if size > 0 && val_ptr.as_u32() != 0 {
+                        mem.read_bytes(val_ptr, &mut val_bytes)?;
+                    }
+
+                    let exists = self.xattrs.get(&path).map(|m| m.contains_key(&name)).unwrap_or(false);
+                    // XATTR_CREATE = 1 (fail if exists), XATTR_REPLACE = 2 (fail if not exists)
+                    if flags == 1 && exists {
+                        cpu.set_reg(Reg::R0, u32::MAX); // EEXIST
+                    } else if flags == 2 && !exists {
+                        cpu.set_reg(Reg::R0, u32::MAX); // ENODATA
+                    } else {
+                        self.xattrs.entry(path).or_default().insert(name, val_bytes);
+                        cpu.set_reg(Reg::R0, 0); // OK
+                    }
+                }
+            }
+            BionicFuncId::Fsetxattr => {
+                let fd = cpu.reg(Reg::R0);
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let val_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let size = cpu.reg(Reg::R3) as usize;
+
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let flags = if sp.as_u32() != 0 { mem.read_u32(sp).unwrap_or(0) } else { 0 };
+
+                if name_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                } else {
+                    let path = self.vfs.fd_path(fd).unwrap_or_else(|| format!("/proc/self/fd/{}", fd));
+                    let name = Self::read_c_string(mem, name_ptr)?;
+
+                    let mut val_bytes = vec![0u8; size];
+                    if size > 0 && val_ptr.as_u32() != 0 {
+                        mem.read_bytes(val_ptr, &mut val_bytes)?;
+                    }
+
+                    let exists = self.xattrs.get(&path).map(|m| m.contains_key(&name)).unwrap_or(false);
+                    if flags == 1 && exists {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    } else if flags == 2 && !exists {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    } else {
+                        self.xattrs.entry(path).or_default().insert(name, val_bytes);
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                }
+            }
+            BionicFuncId::Listxattr | BionicFuncId::Llistxattr => {
+                let path_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let list_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let size = cpu.reg(Reg::R2) as usize;
+
+                if path_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                } else {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    let mut list_bytes = Vec::new();
+                    // Always include security.selinux
+                    list_bytes.extend_from_slice(b"security.selinux ");
+                    if let Some(m) = self.xattrs.get(&path) {
+                        for k in m.keys() {
+                            if k != "security.selinux" {
+                                list_bytes.extend_from_slice(k.as_bytes());
+                                list_bytes.push(0);
+                            }
+                        }
+                    }
+
+                    if size == 0 {
+                        cpu.set_reg(Reg::R0, list_bytes.len() as u32);
+                    } else if size < list_bytes.len() {
+                        cpu.set_reg(Reg::R0, u32::MAX); // ERANGE
+                    } else {
+                        mem.write_bytes(list_ptr, &list_bytes)?;
+                        cpu.set_reg(Reg::R0, list_bytes.len() as u32);
+                    }
+                }
+            }
+            BionicFuncId::Flistxattr => {
+                let fd = cpu.reg(Reg::R0);
+                let list_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let size = cpu.reg(Reg::R2) as usize;
+
+                let path = self.vfs.fd_path(fd).unwrap_or_else(|| format!("/proc/self/fd/{}", fd));
+                let mut list_bytes = Vec::new();
+                list_bytes.extend_from_slice(b"security.selinux ");
+                if let Some(m) = self.xattrs.get(&path) {
+                    for k in m.keys() {
+                        if k != "security.selinux" {
+                            list_bytes.extend_from_slice(k.as_bytes());
+                            list_bytes.push(0);
+                        }
+                    }
+                }
+
+                if size == 0 {
+                    cpu.set_reg(Reg::R0, list_bytes.len() as u32);
+                } else if size < list_bytes.len() {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                } else {
+                    mem.write_bytes(list_ptr, &list_bytes)?;
+                    cpu.set_reg(Reg::R0, list_bytes.len() as u32);
+                }
+            }
+            BionicFuncId::Removexattr | BionicFuncId::Lremovexattr => {
+                let path_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+
+                if path_ptr.as_u32() == 0 || name_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                } else {
+                    let path = Self::read_c_string(mem, path_ptr)?;
+                    let name = Self::read_c_string(mem, name_ptr)?;
+
+                    if let Some(m) = self.xattrs.get_mut(&path) {
+                        if m.remove(&name).is_some() {
+                            cpu.set_reg(Reg::R0, 0);
+                        } else {
+                            cpu.set_reg(Reg::R0, u32::MAX);
+                        }
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    }
+                }
+            }
+            BionicFuncId::Fremovexattr => {
+                let fd = cpu.reg(Reg::R0);
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+
+                if name_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                } else {
+                    let path = self.vfs.fd_path(fd).unwrap_or_else(|| format!("/proc/self/fd/{}", fd));
+                    let name = Self::read_c_string(mem, name_ptr)?;
+
+                    if let Some(m) = self.xattrs.get_mut(&path) {
+                        if m.remove(&name).is_some() {
+                            cpu.set_reg(Reg::R0, 0);
+                        } else {
+                            cpu.set_reg(Reg::R0, u32::MAX);
+                        }
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    }
                 }
             }
             BionicFuncId::Memmove => {

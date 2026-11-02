@@ -533,14 +533,8 @@ ro.product.manufacturer=Transd
 
     /// Returns the VFS path associated with an open file descriptor, if any.
     pub fn fd_path(&self, fd: u32) -> Option<String> {
-        // Search virtual_files for a path whose content Arc matches the open fd's Arc.
         if let Some(file) = self.open_fds.get(&fd) {
-            // Compare by pointer identity — registered_file and open fd share the same Arc.
-            for (path, arc) in &self.virtual_files {
-                if Arc::ptr_eq(arc, &file.content) {
-                    return Some(path.clone());
-                }
-            }
+            return Some(file.path.clone());
         }
         None
     }
