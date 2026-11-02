@@ -482,6 +482,17 @@ pub enum BionicFuncId {
     AtraceInt64Body         = 697,
     AtraceGetEnabledTags    = 698,
 
+    // EventFD & POSIX Asynchronous I/O APIs (Stage 77)
+    Eventfd              = 710,
+    EventfdRead          = 711,
+    EventfdWrite         = 712,
+    AioRead              = 713,
+    AioWrite             = 714,
+    AioError             = 715,
+    AioReturn            = 716,
+    AioSuspend           = 717,
+    AioCancel            = 718,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -979,6 +990,15 @@ impl BionicFuncId {
             696 => Some(Self::AtraceIntBody),
             697 => Some(Self::AtraceInt64Body),
             698 => Some(Self::AtraceGetEnabledTags),
+            710 => Some(Self::Eventfd),
+            711 => Some(Self::EventfdRead),
+            712 => Some(Self::EventfdWrite),
+            713 => Some(Self::AioRead),
+            714 => Some(Self::AioWrite),
+            715 => Some(Self::AioError),
+            716 => Some(Self::AioReturn),
+            717 => Some(Self::AioSuspend),
+            718 => Some(Self::AioCancel),
             _ => None,
         }
     }
@@ -1069,6 +1089,9 @@ pub struct BionicBridge {
     pub ttyname_addr: GuestAddr,
     pub atrace_enabled: bool,
     pub atrace_events: Vec<AtraceEvent>,
+    // Eventfd descriptor table: guest_fd -> (counter, flags)
+    pub eventfd_table: HashMap<u32, (u64, u32)>,
+    pub next_eventfd: u32,
     // Pipe descriptor table: guest_read_fd -> guest_write_fd, plus a small in-process buffer
     pub pipe_fds: HashMap<u32, (u32, Vec<u8>)>, // read_fd -> (write_fd, buffer)
     pub next_pipe_fd: u32,
@@ -1141,6 +1164,8 @@ impl BionicBridge {
             ttyname_addr: stub_base.add(0xC00),
             atrace_enabled: false,
             atrace_events: Vec::new(),
+            eventfd_table: HashMap::new(),
+            next_eventfd: 300,
             pipe_fds: HashMap::new(),
             next_pipe_fd: 100, // Guest pipe FDs start at 100
             dir_handles: std::collections::HashMap::new(),
@@ -1653,6 +1678,15 @@ impl BionicBridge {
             ("ATrace_endSection",           BionicFuncId::AtraceEndBody),
             ("ATrace_setCounter",           BionicFuncId::AtraceInt64Body),
             ("ATrace_isEnabled",            BionicFuncId::AtraceGetEnabledTags),
+            ("eventfd",                     BionicFuncId::Eventfd),
+            ("eventfd_read",                BionicFuncId::EventfdRead),
+            ("eventfd_write",               BionicFuncId::EventfdWrite),
+            ("aio_read",                    BionicFuncId::AioRead),
+            ("aio_write",                   BionicFuncId::AioWrite),
+            ("aio_error",                   BionicFuncId::AioError),
+            ("aio_return",                  BionicFuncId::AioReturn),
+            ("aio_suspend",                 BionicFuncId::AioSuspend),
+            ("aio_cancel",                  BionicFuncId::AioCancel),
         ];
 
         for (name, id) in funcs {
@@ -2104,6 +2138,15 @@ impl BionicBridge {
             BionicFuncId::AtraceIntBody,
             BionicFuncId::AtraceInt64Body,
             BionicFuncId::AtraceGetEnabledTags,
+            BionicFuncId::Eventfd,
+            BionicFuncId::EventfdRead,
+            BionicFuncId::EventfdWrite,
+            BionicFuncId::AioRead,
+            BionicFuncId::AioWrite,
+            BionicFuncId::AioError,
+            BionicFuncId::AioReturn,
+            BionicFuncId::AioSuspend,
+            BionicFuncId::AioCancel,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -3802,6 +3845,72 @@ impl BionicBridge {
                     self.atrace_events.push(AtraceEvent::Counter(name, value as i64));
                 }
             }
+            // EventFD & POSIX Asynchronous I/O APIs (Stage 77)
+            BionicFuncId::Eventfd => {
+                let initval = cpu.reg(Reg::R0);
+                let flags = cpu.reg(Reg::R1);
+                let fd = self.next_eventfd;
+                self.next_eventfd += 1;
+                self.eventfd_table.insert(fd, (initval as u64, flags));
+                cpu.set_reg(Reg::R0, fd);
+            }
+            BionicFuncId::EventfdRead => {
+                let fd = cpu.reg(Reg::R0);
+                let val_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if let Some((counter, flags)) = self.eventfd_table.get_mut(&fd) {
+                    let val = if *flags & 1 != 0 {
+                        if *counter > 0 {
+                            *counter -= 1;
+                            1u64
+                        } else {
+                            0u64
+                        }
+                    } else {
+                        let c = *counter;
+                        *counter = 0;
+                        c
+                    };
+                    if val_ptr.as_u32() != 0 {
+                        mem.write_u32(val_ptr, (val & 0xFFFF_FFFF) as u32)?;
+                        mem.write_u32(val_ptr.add(4), (val >> 32) as u32)?;
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::EventfdWrite => {
+                let fd = cpu.reg(Reg::R0);
+                let low = cpu.reg(Reg::R2) as u64;
+                let high = cpu.reg(Reg::R3) as u64;
+                let val = if low == 0 && high == 0 && cpu.reg(Reg::R1) != 0 {
+                    cpu.reg(Reg::R1) as u64
+                } else {
+                    (high << 32) | low
+                };
+                if let Some((counter, _flags)) = self.eventfd_table.get_mut(&fd) {
+                    *counter = (*counter).saturating_add(val);
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::AioRead | BionicFuncId::AioWrite | BionicFuncId::AioError |
+            BionicFuncId::AioSuspend => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AioReturn => {
+                let aiocbp = GuestAddr::new(cpu.reg(Reg::R0));
+                if aiocbp.as_u32() != 0 {
+                    let nbytes = mem.read_u32(aiocbp.add(20)).unwrap_or(0);
+                    cpu.set_reg(Reg::R0, nbytes);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::AioCancel => {
+                cpu.set_reg(Reg::R0, 2); // AIO_ALLDONE
+            }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
                 let src = GuestAddr::new(cpu.reg(Reg::R1));
@@ -4628,6 +4737,7 @@ impl BionicBridge {
                 if self.socket_fds.remove(&fd).is_some()
                     || self.epoll_fds.remove(&fd).is_some()
                     || self.pipe_fds.remove(&fd).is_some()
+                    || self.eventfd_table.remove(&fd).is_some()
                     || self.vfs.close(fd).is_ok()
                 {
                     cpu.set_reg(Reg::R0, 0);
@@ -4760,6 +4870,26 @@ impl BionicBridge {
                         mem.write_u8(buf_ptr.add(i as u32), *b)?;
                     }
                     cpu.set_reg(Reg::R0, n as u32);
+                } else if let Some((counter, flags)) = self.eventfd_table.get_mut(&fd) {
+                    if count >= 8 {
+                        let val = if *flags & 1 != 0 {
+                            if *counter > 0 {
+                                *counter -= 1;
+                                1u64
+                            } else {
+                                0u64
+                            }
+                        } else {
+                            let c = *counter;
+                            *counter = 0;
+                            c
+                        };
+                        mem.write_u32(buf_ptr, (val & 0xFFFF_FFFF) as u32)?;
+                        mem.write_u32(buf_ptr.add(4), (val >> 32) as u32)?;
+                        cpu.set_reg(Reg::R0, 8);
+                    } else {
+                        cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                    }
                 } else {
                     let mut tmp = vec![0u8; count];
                     match self.vfs.read(fd, &mut tmp) {
@@ -4793,6 +4923,16 @@ impl BionicBridge {
                         buf.extend_from_slice(&data);
                     }
                     cpu.set_reg(Reg::R0, count as u32);
+                } else if let Some((counter, _flags)) = self.eventfd_table.get_mut(&fd) {
+                    if count >= 8 {
+                        let low = mem.read_u32(buf_ptr)? as u64;
+                        let high = mem.read_u32(buf_ptr.add(4))? as u64;
+                        let val = (high << 32) | low;
+                        *counter = (*counter).saturating_add(val);
+                        cpu.set_reg(Reg::R0, 8);
+                    } else {
+                        cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                    }
                 } else if fd == 1 || fd == 2 {
                     // stdout / stderr: consumed
                     cpu.set_reg(Reg::R0, count as u32);
