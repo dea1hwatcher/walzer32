@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use transd_core::{GuestAddr, Memory, MemoryError, Reg};
 use transd_elf::{DsoRegistry, SymbolResolver};
 use crate::bionic_regex::{count_capture_groups, fnmatch_internal, regex_match_internal, CompiledRegex};
@@ -752,6 +752,25 @@ pub enum BionicFuncId {
     Signalfd4                       = 1155,
     Eventfd2                        = 1156,
 
+    // Android Sensors NDK APIs (Stage 97)
+    ASensorManagerGetInstance               = 1170,
+    ASensorManagerGetInstanceForPackage     = 1171,
+    ASensorManagerGetSensorList             = 1172,
+    ASensorManagerGetDefaultSensor          = 1173,
+    ASensorManagerGetDefaultSensorEx        = 1174,
+    ASensorManagerCreateEventQueue          = 1175,
+    ASensorManagerDestroyEventQueue         = 1176,
+    ASensorEventQueueEnableSensor           = 1177,
+    ASensorEventQueueDisableSensor          = 1178,
+    ASensorEventQueueSetEventRate           = 1179,
+    ASensorEventQueueHasEvents              = 1180,
+    ASensorEventQueueGetEvents              = 1181,
+    ASensorGetName                          = 1182,
+    ASensorGetVendor                        = 1183,
+    ASensorGetType                          = 1184,
+    ASensorGetResolution                    = 1185,
+    ASensorGetMinDelay                      = 1186,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1478,9 +1497,57 @@ impl BionicFuncId {
             1154 => Some(Self::Signalfd),
             1155 => Some(Self::Signalfd4),
             1156 => Some(Self::Eventfd2),
+            1170 => Some(Self::ASensorManagerGetInstance),
+            1171 => Some(Self::ASensorManagerGetInstanceForPackage),
+            1172 => Some(Self::ASensorManagerGetSensorList),
+            1173 => Some(Self::ASensorManagerGetDefaultSensor),
+            1174 => Some(Self::ASensorManagerGetDefaultSensorEx),
+            1175 => Some(Self::ASensorManagerCreateEventQueue),
+            1176 => Some(Self::ASensorManagerDestroyEventQueue),
+            1177 => Some(Self::ASensorEventQueueEnableSensor),
+            1178 => Some(Self::ASensorEventQueueDisableSensor),
+            1179 => Some(Self::ASensorEventQueueSetEventRate),
+            1180 => Some(Self::ASensorEventQueueHasEvents),
+            1181 => Some(Self::ASensorEventQueueGetEvents),
+            1182 => Some(Self::ASensorGetName),
+            1183 => Some(Self::ASensorGetVendor),
+            1184 => Some(Self::ASensorGetType),
+            1185 => Some(Self::ASensorGetResolution),
+            1186 => Some(Self::ASensorGetMinDelay),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct AndroidSensorDescriptor {
+    pub sensor_id: i32,
+    pub sensor_type: i32,
+    pub name: String,
+    pub vendor: String,
+    pub resolution: f32,
+    pub min_delay_us: i32,
+    pub name_addr: GuestAddr,
+    pub vendor_addr: GuestAddr,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawSensorEvent {
+    pub sensor_type: i32,
+    pub timestamp_ns: i64,
+    pub values: [f32; 3],
+}
+
+#[derive(Debug, Clone)]
+pub struct SensorEventQueue {
+    pub queue_id: u32,
+    pub looper_handle: u32,
+    pub ident: i32,
+    pub callback: u32,
+    pub data: u32,
+    pub enabled_sensors: HashSet<i32>,
+    pub event_rates_us: HashMap<i32, i32>,
+    pub events: VecDeque<RawSensorEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -1665,6 +1732,10 @@ pub struct BionicBridge {
     pub next_inotify_fd: u32,
     pub signalfd_table: HashMap<u32, u64>,
     pub next_signalfd: u32,
+    // Android Sensors NDK Subsystem (Stage 97)
+    pub sensors: Vec<AndroidSensorDescriptor>,
+    pub sensor_queues: HashMap<u32, SensorEventQueue>,
+    pub next_sensor_queue_id: u32,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1757,6 +1828,60 @@ impl BionicBridge {
             next_inotify_fd: 450,
             signalfd_table: HashMap::new(),
             next_signalfd: 460,
+            sensors: vec![
+                AndroidSensorDescriptor {
+                    sensor_id: 1,
+                    sensor_type: 1, // ASENSOR_TYPE_ACCELEROMETER
+                    name: "Virtual Accelerometer".to_string(),
+                    vendor: "transd".to_string(),
+                    resolution: 0.001,
+                    min_delay_us: 10000,
+                    name_addr: stub_base.add(0x3000),
+                    vendor_addr: stub_base.add(0x3040),
+                },
+                AndroidSensorDescriptor {
+                    sensor_id: 2,
+                    sensor_type: 2, // ASENSOR_TYPE_MAGNETIC_FIELD
+                    name: "Virtual Magnetometer".to_string(),
+                    vendor: "transd".to_string(),
+                    resolution: 0.001,
+                    min_delay_us: 20000,
+                    name_addr: stub_base.add(0x3080),
+                    vendor_addr: stub_base.add(0x30C0),
+                },
+                AndroidSensorDescriptor {
+                    sensor_id: 3,
+                    sensor_type: 4, // ASENSOR_TYPE_GYROSCOPE
+                    name: "Virtual Gyroscope".to_string(),
+                    vendor: "transd".to_string(),
+                    resolution: 0.001,
+                    min_delay_us: 10000,
+                    name_addr: stub_base.add(0x3100),
+                    vendor_addr: stub_base.add(0x3140),
+                },
+                AndroidSensorDescriptor {
+                    sensor_id: 4,
+                    sensor_type: 9, // ASENSOR_TYPE_GRAVITY
+                    name: "Virtual Gravity".to_string(),
+                    vendor: "transd".to_string(),
+                    resolution: 0.001,
+                    min_delay_us: 10000,
+                    name_addr: stub_base.add(0x3180),
+                    vendor_addr: stub_base.add(0x31C0),
+                },
+                AndroidSensorDescriptor {
+                    sensor_id: 5,
+                    sensor_type: 11, // ASENSOR_TYPE_ROTATION_VECTOR
+                    name: "Virtual Rotation Vector".to_string(),
+                    vendor: "transd".to_string(),
+                    resolution: 0.001,
+                    min_delay_us: 10000,
+                    name_addr: stub_base.add(0x3200),
+                    vendor_addr: stub_base.add(0x3240),
+                },
+            ],
+            sensor_queues: HashMap::new(),
+            next_sensor_queue_id: 750,
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -2547,6 +2672,23 @@ impl BionicBridge {
             ("signalfd",                         BionicFuncId::Signalfd),
             ("signalfd4",                        BionicFuncId::Signalfd4),
             ("eventfd2",                         BionicFuncId::Eventfd2),
+            ("ASensorManager_getInstance",           BionicFuncId::ASensorManagerGetInstance),
+            ("ASensorManager_getInstanceForPackage", BionicFuncId::ASensorManagerGetInstanceForPackage),
+            ("ASensorManager_getSensorList",         BionicFuncId::ASensorManagerGetSensorList),
+            ("ASensorManager_getDefaultSensor",      BionicFuncId::ASensorManagerGetDefaultSensor),
+            ("ASensorManager_getDefaultSensorEx",    BionicFuncId::ASensorManagerGetDefaultSensorEx),
+            ("ASensorManager_createEventQueue",      BionicFuncId::ASensorManagerCreateEventQueue),
+            ("ASensorManager_destroyEventQueue",     BionicFuncId::ASensorManagerDestroyEventQueue),
+            ("ASensorEventQueue_enableSensor",       BionicFuncId::ASensorEventQueueEnableSensor),
+            ("ASensorEventQueue_disableSensor",      BionicFuncId::ASensorEventQueueDisableSensor),
+            ("ASensorEventQueue_setEventRate",       BionicFuncId::ASensorEventQueueSetEventRate),
+            ("ASensorEventQueue_hasEvents",          BionicFuncId::ASensorEventQueueHasEvents),
+            ("ASensorEventQueue_getEvents",          BionicFuncId::ASensorEventQueueGetEvents),
+            ("ASensor_getName",                      BionicFuncId::ASensorGetName),
+            ("ASensor_getVendor",                    BionicFuncId::ASensorGetVendor),
+            ("ASensor_getType",                      BionicFuncId::ASensorGetType),
+            ("ASensor_getResolution",                BionicFuncId::ASensorGetResolution),
+            ("ASensor_getMinDelay",                  BionicFuncId::ASensorGetMinDelay),
         ];
 
         for (name, id) in funcs {
@@ -3227,6 +3369,23 @@ impl BionicBridge {
             BionicFuncId::Signalfd,
             BionicFuncId::Signalfd4,
             BionicFuncId::Eventfd2,
+            BionicFuncId::ASensorManagerGetInstance,
+            BionicFuncId::ASensorManagerGetInstanceForPackage,
+            BionicFuncId::ASensorManagerGetSensorList,
+            BionicFuncId::ASensorManagerGetDefaultSensor,
+            BionicFuncId::ASensorManagerGetDefaultSensorEx,
+            BionicFuncId::ASensorManagerCreateEventQueue,
+            BionicFuncId::ASensorManagerDestroyEventQueue,
+            BionicFuncId::ASensorEventQueueEnableSensor,
+            BionicFuncId::ASensorEventQueueDisableSensor,
+            BionicFuncId::ASensorEventQueueSetEventRate,
+            BionicFuncId::ASensorEventQueueHasEvents,
+            BionicFuncId::ASensorEventQueueGetEvents,
+            BionicFuncId::ASensorGetName,
+            BionicFuncId::ASensorGetVendor,
+            BionicFuncId::ASensorGetType,
+            BionicFuncId::ASensorGetResolution,
+            BionicFuncId::ASensorGetMinDelay,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -3235,6 +3394,16 @@ impl BionicBridge {
             mem.write_u32(addr, svc_code)?;
             mem.write_u32(addr.add(4), bx_lr)?;
         }
+        // Initialize sensor strings
+        for s in &self.sensors {
+            let mut nb = s.name.as_bytes().to_vec();
+            nb.push(0);
+            mem.write_bytes(s.name_addr, &nb)?;
+            let mut vb = s.vendor.as_bytes().to_vec();
+            vb.push(0);
+            mem.write_bytes(s.vendor_addr, &vb)?;
+        }
+
         // Initialize stack protector canary word
         mem.write_u32(self.stack_chk_guard_addr, 0x000A_0DFF)?;
 
@@ -7964,6 +8133,196 @@ impl BionicBridge {
                 self.eventfd_table.insert(fd, (initval, flags));
                 cpu.set_reg(Reg::R0, fd);
             }
+
+            // Android Sensors NDK Subsystem (Stage 97)
+            BionicFuncId::ASensorManagerGetInstance | BionicFuncId::ASensorManagerGetInstanceForPackage => {
+                cpu.set_reg(Reg::R0, 0x7300_FFFF);
+            }
+            BionicFuncId::ASensorManagerGetSensorList => {
+                let list_out_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if list_out_ptr.as_u32() != 0 {
+                    let table_addr = self.stub_base.add(0x3A00);
+                    for (i, _) in self.sensors.iter().enumerate() {
+                        let handle = 0x7300_0000 | (i as u32);
+                        mem.write_u32(table_addr.add((i * 4) as u32), handle)?;
+                    }
+                    mem.write_u32(list_out_ptr, table_addr.as_u32())?;
+                }
+                cpu.set_reg(Reg::R0, self.sensors.len() as u32);
+            }
+            BionicFuncId::ASensorManagerGetDefaultSensor | BionicFuncId::ASensorManagerGetDefaultSensorEx => {
+                let sensor_type = cpu.reg(Reg::R1) as i32;
+                if let Some(idx) = self.sensors.iter().position(|s| s.sensor_type == sensor_type) {
+                    cpu.set_reg(Reg::R0, 0x7300_0000 | (idx as u32));
+                } else {
+                    cpu.set_reg(Reg::R0, 0); // NULL
+                }
+            }
+            BionicFuncId::ASensorManagerCreateEventQueue => {
+                let looper = cpu.reg(Reg::R1);
+                let ident = cpu.reg(Reg::R2) as i32;
+                let callback = cpu.reg(Reg::R3);
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let data = if sp.as_u32() != 0 { mem.read_u32(sp).unwrap_or(0) } else { 0 };
+
+                let qid = self.next_sensor_queue_id;
+                self.next_sensor_queue_id += 1;
+                self.sensor_queues.insert(qid, SensorEventQueue {
+                    queue_id: qid,
+                    looper_handle: looper,
+                    ident,
+                    callback,
+                    data,
+                    enabled_sensors: HashSet::new(),
+                    event_rates_us: HashMap::new(),
+                    events: VecDeque::new(),
+                });
+                cpu.set_reg(Reg::R0, qid);
+            }
+            BionicFuncId::ASensorManagerDestroyEventQueue => {
+                let qid = cpu.reg(Reg::R1);
+                self.sensor_queues.remove(&qid);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::ASensorEventQueueEnableSensor => {
+                let qid = cpu.reg(Reg::R0);
+                let sensor_handle = cpu.reg(Reg::R1);
+                let idx = (sensor_handle & 0xFFFF) as usize;
+                if idx < self.sensors.len() {
+                    let st = self.sensors[idx].sensor_type;
+                    if let Some(q) = self.sensor_queues.get_mut(&qid) {
+                        q.enabled_sensors.insert(st);
+                        cpu.set_reg(Reg::R0, 0);
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+            BionicFuncId::ASensorEventQueueDisableSensor => {
+                let qid = cpu.reg(Reg::R0);
+                let sensor_handle = cpu.reg(Reg::R1);
+                let idx = (sensor_handle & 0xFFFF) as usize;
+                if idx < self.sensors.len() {
+                    let st = self.sensors[idx].sensor_type;
+                    if let Some(q) = self.sensor_queues.get_mut(&qid) {
+                        q.enabled_sensors.remove(&st);
+                        cpu.set_reg(Reg::R0, 0);
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+            BionicFuncId::ASensorEventQueueSetEventRate => {
+                let qid = cpu.reg(Reg::R0);
+                let sensor_handle = cpu.reg(Reg::R1);
+                let usec = cpu.reg(Reg::R2) as i32;
+                let idx = (sensor_handle & 0xFFFF) as usize;
+                if idx < self.sensors.len() {
+                    let st = self.sensors[idx].sensor_type;
+                    if let Some(q) = self.sensor_queues.get_mut(&qid) {
+                        q.event_rates_us.insert(st, usec);
+                        cpu.set_reg(Reg::R0, 0);
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+            BionicFuncId::ASensorEventQueueHasEvents => {
+                let qid = cpu.reg(Reg::R0);
+                let has = if let Some(q) = self.sensor_queues.get(&qid) {
+                    if !q.events.is_empty() { 1 } else { 0 }
+                } else {
+                    0
+                };
+                cpu.set_reg(Reg::R0, has);
+            }
+            BionicFuncId::ASensorEventQueueGetEvents => {
+                let qid = cpu.reg(Reg::R0);
+                let events_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let count = cpu.reg(Reg::R2) as usize;
+
+                let mut written = 0usize;
+                if let Some(q) = self.sensor_queues.get_mut(&qid) {
+                    while written < count && !q.events.is_empty() {
+                        let ev = q.events.pop_front().unwrap();
+                        let base = events_ptr.add((written * 104) as u32);
+                        // Zero 104 bytes
+                        for k in 0..104 {
+                            mem.write_u8(base.add(k as u32), 0)?;
+                        }
+                        // version = 104
+                        mem.write_u32(base, 104)?;
+                        // sensor = type
+                        mem.write_u32(base.add(4), ev.sensor_type as u32)?;
+                        // type = type
+                        mem.write_u32(base.add(8), ev.sensor_type as u32)?;
+                        // timestamp at offset 16 (64-bit)
+                        mem.write_u32(base.add(16), ev.timestamp_ns as u32)?;
+                        mem.write_u32(base.add(20), (ev.timestamp_ns >> 32) as u32)?;
+                        // vector values at offset 24 (3 x f32)
+                        mem.write_u32(base.add(24), ev.values[0].to_bits())?;
+                        mem.write_u32(base.add(28), ev.values[1].to_bits())?;
+                        mem.write_u32(base.add(32), ev.values[2].to_bits())?;
+
+                        written += 1;
+                    }
+                }
+                cpu.set_reg(Reg::R0, written as u32);
+            }
+            BionicFuncId::ASensorGetName => {
+                let sensor_handle = cpu.reg(Reg::R0);
+                let idx = (sensor_handle & 0xFFFF) as usize;
+                if idx < self.sensors.len() {
+                    cpu.set_reg(Reg::R0, self.sensors[idx].name_addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::ASensorGetVendor => {
+                let sensor_handle = cpu.reg(Reg::R0);
+                let idx = (sensor_handle & 0xFFFF) as usize;
+                if idx < self.sensors.len() {
+                    cpu.set_reg(Reg::R0, self.sensors[idx].vendor_addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::ASensorGetType => {
+                let sensor_handle = cpu.reg(Reg::R0);
+                let idx = (sensor_handle & 0xFFFF) as usize;
+                if idx < self.sensors.len() {
+                    cpu.set_reg(Reg::R0, self.sensors[idx].sensor_type as u32);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::ASensorGetResolution => {
+                let sensor_handle = cpu.reg(Reg::R0);
+                let idx = (sensor_handle & 0xFFFF) as usize;
+                if idx < self.sensors.len() {
+                    let r = self.sensors[idx].resolution;
+                    cpu.set_reg(Reg::R0, r.to_bits());
+                    cpu.set_s_reg(0, r);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                    cpu.set_s_reg(0, 0.0);
+                }
+            }
+            BionicFuncId::ASensorGetMinDelay => {
+                let sensor_handle = cpu.reg(Reg::R0);
+                let idx = (sensor_handle & 0xFFFF) as usize;
+                if idx < self.sensors.len() {
+                    cpu.set_reg(Reg::R0, self.sensors[idx].min_delay_us as u32);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
                 let src = GuestAddr::new(cpu.reg(Reg::R1));
@@ -11019,6 +11378,21 @@ impl BionicBridge {
 
     pub fn set_vsync_period_ns(&mut self, period_ns: i64) {
         self.vsync_period_ns = period_ns;
+    }
+
+    pub fn push_sensor_event(&mut self, sensor_type: i32, values: [f32; 3], timestamp_ns: i64) -> usize {
+        let mut delivered = 0;
+        for queue in self.sensor_queues.values_mut() {
+            if queue.enabled_sensors.contains(&sensor_type) {
+                queue.events.push_back(RawSensorEvent {
+                    sensor_type,
+                    timestamp_ns,
+                    values,
+                });
+                delivered += 1;
+            }
+        }
+        delivered
     }
 
     pub fn trigger_inotify_event(&mut self, path: &str, mask: u32, cookie: u32, name: &str) -> usize {
