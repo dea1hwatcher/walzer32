@@ -528,6 +528,15 @@ pub enum BionicFuncId {
     AshmemPinRegion     = 777,
     AshmemUnpinRegion   = 778,
 
+    // Advanced Signal Masking & Extended Pthread APIs (Stage 81)
+    PthreadSigmask      = 790,
+    Sigqueue            = 791,
+    PthreadKill         = 792,
+    PthreadSetnameNp    = 793,
+    PthreadGetnameNp    = 794,
+    PthreadEqual        = 795,
+    PthreadGetattrNp    = 796,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1063,6 +1072,13 @@ impl BionicFuncId {
             776 => Some(Self::AshmemGetSizeRegion),
             777 => Some(Self::AshmemPinRegion),
             778 => Some(Self::AshmemUnpinRegion),
+            790 => Some(Self::PthreadSigmask),
+            791 => Some(Self::Sigqueue),
+            792 => Some(Self::PthreadKill),
+            793 => Some(Self::PthreadSetnameNp),
+            794 => Some(Self::PthreadGetnameNp),
+            795 => Some(Self::PthreadEqual),
+            796 => Some(Self::PthreadGetattrNp),
             _ => None,
         }
     }
@@ -1124,6 +1140,7 @@ pub struct BionicBridge {
     pub next_thread_id: u32,
     pub current_thread_id: u32,
     pub threads: HashMap<u32, ThreadDescriptor>,
+    pub thread_names: HashMap<u32, String>,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1181,6 +1198,7 @@ impl BionicBridge {
             next_thread_id: 1,
             current_thread_id: 1,
             threads: HashMap::new(),
+            thread_names: HashMap::new(),
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -1780,6 +1798,13 @@ impl BionicBridge {
             ("ashmem_get_size_region",      BionicFuncId::AshmemGetSizeRegion),
             ("ashmem_pin_region",           BionicFuncId::AshmemPinRegion),
             ("ashmem_unpin_region",         BionicFuncId::AshmemUnpinRegion),
+            ("pthread_sigmask",             BionicFuncId::PthreadSigmask),
+            ("sigqueue",                    BionicFuncId::Sigqueue),
+            ("pthread_kill",                BionicFuncId::PthreadKill),
+            ("pthread_setname_np",          BionicFuncId::PthreadSetnameNp),
+            ("pthread_getname_np",          BionicFuncId::PthreadGetnameNp),
+            ("pthread_equal",               BionicFuncId::PthreadEqual),
+            ("pthread_getattr_np",          BionicFuncId::PthreadGetattrNp),
         ];
 
         for (name, id) in funcs {
@@ -2269,6 +2294,13 @@ impl BionicBridge {
             BionicFuncId::AshmemGetSizeRegion,
             BionicFuncId::AshmemPinRegion,
             BionicFuncId::AshmemUnpinRegion,
+            BionicFuncId::PthreadSigmask,
+            BionicFuncId::Sigqueue,
+            BionicFuncId::PthreadKill,
+            BionicFuncId::PthreadSetnameNp,
+            BionicFuncId::PthreadGetnameNp,
+            BionicFuncId::PthreadEqual,
+            BionicFuncId::PthreadGetattrNp,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -2833,7 +2865,7 @@ impl BionicBridge {
                     }
                 }
             }
-            BionicFuncId::Sigprocmask => {
+            BionicFuncId::Sigprocmask | BionicFuncId::PthreadSigmask => {
                 let how = cpu.reg(Reg::R0);
                 let set_ptr = GuestAddr::new(cpu.reg(Reg::R1));
                 let oldset_ptr = GuestAddr::new(cpu.reg(Reg::R2));
@@ -4233,6 +4265,53 @@ impl BionicBridge {
             }
             BionicFuncId::AshmemPinRegion | BionicFuncId::AshmemUnpinRegion => {
                 cpu.set_reg(Reg::R0, 0);
+            }
+            // Advanced Signal Masking & Extended Pthread APIs (Stage 81)
+            BionicFuncId::Sigqueue | BionicFuncId::PthreadKill => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadSetnameNp => {
+                let thread = cpu.reg(Reg::R0);
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if name_ptr.as_u32() != 0 {
+                    if let Ok(name) = Self::read_c_string(mem, name_ptr) {
+                        self.thread_names.insert(thread, name);
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadGetnameNp => {
+                let thread = cpu.reg(Reg::R0);
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let buflen = cpu.reg(Reg::R2) as usize;
+                let name = self.thread_names.get(&thread).map(|s| s.as_str()).unwrap_or("main");
+                let bytes = name.as_bytes();
+                if bytes.len() + 1 > buflen {
+                    cpu.set_reg(Reg::R0, 34); // ERANGE
+                } else if buf_ptr.as_u32() != 0 {
+                    mem.write_bytes(buf_ptr, bytes)?;
+                    mem.write_u8(buf_ptr.add(bytes.len() as u32), 0)?;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 14); // EFAULT
+                }
+            }
+            BionicFuncId::PthreadEqual => {
+                let t1 = cpu.reg(Reg::R0);
+                let t2 = cpu.reg(Reg::R1);
+                cpu.set_reg(Reg::R0, if t1 == t2 { 1 } else { 0 });
+            }
+            BionicFuncId::PthreadGetattrNp => {
+                let attr_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if attr_ptr.as_u32() != 0 {
+                    mem.write_u32(attr_ptr, 0)?; // flags / detachstate
+                    mem.write_u32(attr_ptr.add(4), 0x7000_0000)?; // stackaddr
+                    mem.write_u32(attr_ptr.add(8), 0x0010_0000)?; // stacksize (1MB)
+                    mem.write_u32(attr_ptr.add(12), 4096)?; // guardsize
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
