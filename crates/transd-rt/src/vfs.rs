@@ -473,6 +473,60 @@ ro.product.manufacturer=Transd
         st.st_blocks = ((file.content.len() + 511) / 512) as u64;
         Ok(st)
     }
+
+    /// Lists the basenames of virtual files whose paths start with `dir_prefix`.
+    /// `dir_prefix` must end with `/` (e.g. `/proc/`).
+    /// Returns `None` if no virtual files live under that prefix.
+    pub fn list_dir(&self, dir_prefix: &str) -> Option<Vec<String>> {
+        let prefix = if dir_prefix.ends_with('/') {
+            dir_prefix.to_string()
+        } else {
+            format!("{}/", dir_prefix)
+        };
+
+        let mut names: Vec<String> = self
+            .virtual_files
+            .keys()
+            .filter_map(|path| {
+                if path.starts_with(&prefix) {
+                    // Take only the immediate child component (one level deep)
+                    let rest = &path[prefix.len()..];
+                    let component = rest.split('/').next().unwrap_or("");
+                    if !component.is_empty() {
+                        Some(component.to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Dedup (multiple files under the same sub-dir produce duplicate dir names)
+        names.sort();
+        names.dedup();
+
+        if names.is_empty() {
+            None
+        } else {
+            Some(names)
+        }
+    }
+
+    /// Returns the VFS path associated with an open file descriptor, if any.
+    pub fn fd_path(&self, fd: u32) -> Option<String> {
+        // Search virtual_files for a path whose content Arc matches the open fd's Arc.
+        if let Some(file) = self.open_fds.get(&fd) {
+            // Compare by pointer identity — registered_file and open fd share the same Arc.
+            for (path, arc) in &self.virtual_files {
+                if Arc::ptr_eq(arc, &file.content) {
+                    return Some(path.clone());
+                }
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
