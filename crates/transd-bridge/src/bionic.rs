@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use transd_core::{GuestAddr, Memory, MemoryError, Reg};
-use transd_elf::{DsoRegistry, SymbolResolver, RTLD_DEFAULT, RTLD_NEXT};
+use transd_elf::{DsoRegistry, SymbolResolver};
+pub use transd_elf::{RTLD_DEFAULT, RTLD_NEXT};
 
 pub const BIONIC_SVC_MAGIC: u32 = 0xB10000;
 
@@ -343,6 +344,18 @@ pub enum BionicFuncId {
     Mlockall    = 528,
     Munlockall  = 529,
     Mincore     = 530,
+
+    // Dynamic Linker & Android Log Extensions (Stage 68)
+    AndroidDlopenExt     = 540,
+    Dladdr               = 541,
+    Dladdr1              = 542,
+    AndroidLogAssert     = 543,
+    AndroidLogBufPrint   = 544,
+    AndroidLogBufWrite   = 545,
+    AndroidLogVprint     = 546,
+    AndroidLogIsLoggable = 547,
+    Assert               = 548,
+    Assert2              = 549,
 
     // Threading & Mutexes
     PthreadCreate = 20,
@@ -722,6 +735,16 @@ impl BionicFuncId {
             528 => Some(Self::Mlockall),
             529 => Some(Self::Munlockall),
             530 => Some(Self::Mincore),
+            540 => Some(Self::AndroidDlopenExt),
+            541 => Some(Self::Dladdr),
+            542 => Some(Self::Dladdr1),
+            543 => Some(Self::AndroidLogAssert),
+            544 => Some(Self::AndroidLogBufPrint),
+            545 => Some(Self::AndroidLogBufWrite),
+            546 => Some(Self::AndroidLogVprint),
+            547 => Some(Self::AndroidLogIsLoggable),
+            548 => Some(Self::Assert),
+            549 => Some(Self::Assert2),
             _ => None,
         }
     }
@@ -750,7 +773,7 @@ pub struct BionicBridge {
     pub stub_base: GuestAddr,
     pub heap_current: GuestAddr,
     pub heap_limit: GuestAddr,
-    symbol_table: HashMap<String, GuestAddr>,
+    pub symbol_table: HashMap<String, GuestAddr>,
     pub logs: Vec<LogMessage>,
 
     pub next_thread_id: u32,
@@ -1217,6 +1240,16 @@ impl BionicBridge {
             ("mlockall",    BionicFuncId::Mlockall),
             ("munlockall",  BionicFuncId::Munlockall),
             ("mincore",     BionicFuncId::Mincore),
+            ("android_dlopen_ext",        BionicFuncId::AndroidDlopenExt),
+            ("dladdr",                    BionicFuncId::Dladdr),
+            ("dladdr1",                   BionicFuncId::Dladdr1),
+            ("__android_log_assert",      BionicFuncId::AndroidLogAssert),
+            ("__android_log_buf_print",   BionicFuncId::AndroidLogBufPrint),
+            ("__android_log_buf_write",   BionicFuncId::AndroidLogBufWrite),
+            ("__android_log_vprint",      BionicFuncId::AndroidLogVprint),
+            ("__android_log_is_loggable", BionicFuncId::AndroidLogIsLoggable),
+            ("__assert",                  BionicFuncId::Assert),
+            ("__assert2",                 BionicFuncId::Assert2),
         ];
 
         for (name, id) in funcs {
@@ -1549,6 +1582,16 @@ impl BionicBridge {
             BionicFuncId::Mlockall,
             BionicFuncId::Munlockall,
             BionicFuncId::Mincore,
+            BionicFuncId::AndroidDlopenExt,
+            BionicFuncId::Dladdr,
+            BionicFuncId::Dladdr1,
+            BionicFuncId::AndroidLogAssert,
+            BionicFuncId::AndroidLogBufPrint,
+            BionicFuncId::AndroidLogBufWrite,
+            BionicFuncId::AndroidLogVprint,
+            BionicFuncId::AndroidLogIsLoggable,
+            BionicFuncId::Assert,
+            BionicFuncId::Assert2,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -1983,14 +2026,32 @@ impl BionicBridge {
             }
 
             // ── Dynamic Linking (libdl) ─────────────────────────────────────────
-            BionicFuncId::Dlopen => {
+            BionicFuncId::Dlopen | BionicFuncId::AndroidDlopenExt => {
                 let filename_ptr = GuestAddr::new(cpu.reg(Reg::R0));
                 let _flags = cpu.reg(Reg::R1);
+                let extinfo_ptr = GuestAddr::new(cpu.reg(Reg::R2));
 
-                if filename_ptr.as_u32() == 0 {
+                let mut resolved_fd_filename = None;
+                if func_id == BionicFuncId::AndroidDlopenExt && filename_ptr.as_u32() == 0 && extinfo_ptr.as_u32() != 0 {
+                    let ext_flags = mem.read_u32(extinfo_ptr).unwrap_or(0);
+                    // ANDROID_DLEXT_USE_LIBRARY_FD = 0x10
+                    if (ext_flags & 0x10) != 0 {
+                        if let Ok(lib_fd) = mem.read_u32(extinfo_ptr.add(16)) {
+                            if let Some(path) = self.vfs.fd_path(lib_fd) {
+                                resolved_fd_filename = Some(path.to_string());
+                            }
+                        }
+                    }
+                }
+
+                if filename_ptr.as_u32() == 0 && resolved_fd_filename.is_none() {
                     cpu.set_reg(Reg::R0, RTLD_DEFAULT);
                 } else {
-                    let filename = Self::read_c_string(mem, filename_ptr)?;
+                    let filename = if let Some(f) = resolved_fd_filename {
+                        f
+                    } else {
+                        Self::read_c_string(mem, filename_ptr)?
+                    };
                     let basename = filename.rsplit('/').next().unwrap_or(&filename);
 
                     if basename == "libc.so"
@@ -4870,6 +4931,221 @@ impl BionicBridge {
                         let _ = mem.write_u8(vec_ptr.add(i as u32), 1);
                     }
                 }
+                cpu.set_reg(Reg::R0, 0);
+            }
+
+            // Dynamic Linker inspection (Stage 68)
+            BionicFuncId::Dladdr | BionicFuncId::Dladdr1 => {
+                let query_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let info_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if func_id == BionicFuncId::Dladdr1 {
+                    let extra_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                    if extra_ptr.as_u32() != 0 {
+                        let _ = mem.write_u32(extra_ptr, 0);
+                    }
+                }
+
+                if info_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, 0);
+                } else if let Some(lib) = self.dso_registry.find_by_pc(query_addr) {
+                    let fname = lib.soname.as_deref().unwrap_or("libapp.so");
+                    let fbase = lib.load_base.as_u32();
+
+                    let mut best_sym: Option<(&str, GuestAddr)> = None;
+                    for (sym_name, &sym_addr) in &lib.symbols {
+                        if sym_addr <= query_addr {
+                            match best_sym {
+                                Some((_, best_addr)) if sym_addr > best_addr => {
+                                    best_sym = Some((sym_name.as_str(), sym_addr));
+                                }
+                                None => {
+                                    best_sym = Some((sym_name.as_str(), sym_addr));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    let mut fname_bytes = fname.as_bytes().to_vec();
+                    fname_bytes.push(0);
+                    let fname_buf = self.stub_base.add(0xD00);
+                    mem.write_bytes(fname_buf, &fname_bytes)?;
+
+                    let (dli_sname, dli_saddr) = if let Some((sname, saddr)) = best_sym {
+                        let mut sname_bytes = sname.as_bytes().to_vec();
+                        sname_bytes.push(0);
+                        let sname_buf = self.stub_base.add(0xE00);
+                        mem.write_bytes(sname_buf, &sname_bytes)?;
+                        (sname_buf.as_u32(), saddr.as_u32())
+                    } else {
+                        (0, 0)
+                    };
+
+                    mem.write_u32(info_ptr, fname_buf.as_u32())?;
+                    mem.write_u32(info_ptr.add(4), fbase)?;
+                    mem.write_u32(info_ptr.add(8), dli_sname)?;
+                    mem.write_u32(info_ptr.add(12), dli_saddr)?;
+
+                    cpu.set_reg(Reg::R0, 1);
+                } else {
+                    let mut found_sym: Option<(&str, GuestAddr)> = None;
+                    for (name, &saddr) in &self.symbol_table {
+                        if saddr == query_addr {
+                            found_sym = Some((name.as_str(), saddr));
+                            break;
+                        }
+                    }
+
+                    if let Some((sname, saddr)) = found_sym {
+                        let fname_buf = self.stub_base.add(0xD00);
+                        mem.write_bytes(fname_buf, b"libc.so ")?;
+
+                        let sname_buf = self.stub_base.add(0xE00);
+                        let mut sname_bytes = sname.as_bytes().to_vec();
+                        sname_bytes.push(0);
+                        mem.write_bytes(sname_buf, &sname_bytes)?;
+
+                        mem.write_u32(info_ptr, fname_buf.as_u32())?;
+                        mem.write_u32(info_ptr.add(4), self.stub_base.as_u32())?;
+                        mem.write_u32(info_ptr.add(8), sname_buf.as_u32())?;
+                        mem.write_u32(info_ptr.add(12), saddr.as_u32())?;
+
+                        cpu.set_reg(Reg::R0, 1);
+                    } else {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                }
+            }
+
+            // Android Log & Assertion Extensions (Stage 68)
+            BionicFuncId::AndroidLogAssert => {
+                let cond_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let tag_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let fmt_addr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                let cond = if cond_addr.as_u32() != 0 {
+                    Self::read_c_string(mem, cond_addr).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let tag = if tag_addr.as_u32() != 0 {
+                    Self::read_c_string(mem, tag_addr).unwrap_or_else(|_| "assertion".to_string())
+                } else {
+                    "assertion".to_string()
+                };
+                let fmt = if fmt_addr.as_u32() != 0 {
+                    Self::read_c_string(mem, fmt_addr).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                let text = if !cond.is_empty() && !fmt.is_empty() {
+                    format!("{}: {}", cond, fmt)
+                } else if !cond.is_empty() {
+                    format!("assertion \"{}\" failed", cond)
+                } else {
+                    fmt
+                };
+
+                self.logs.push(LogMessage {
+                    priority: 7, // ANDROID_LOG_FATAL
+                    tag,
+                    text,
+                });
+
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AndroidLogBufPrint => {
+                let _buf_id = cpu.reg(Reg::R0);
+                let prio = cpu.reg(Reg::R1);
+                let tag_addr = GuestAddr::new(cpu.reg(Reg::R2));
+                let fmt_addr = GuestAddr::new(cpu.reg(Reg::R3));
+
+                let tag = Self::read_c_string(mem, tag_addr).unwrap_or_default();
+                let fmt = Self::read_c_string(mem, fmt_addr).unwrap_or_default();
+
+                self.logs.push(LogMessage {
+                    priority: prio,
+                    tag,
+                    text: fmt,
+                });
+
+                cpu.set_reg(Reg::R0, 1);
+            }
+            BionicFuncId::AndroidLogBufWrite => {
+                let _buf_id = cpu.reg(Reg::R0);
+                let prio = cpu.reg(Reg::R1);
+                let tag_addr = GuestAddr::new(cpu.reg(Reg::R2));
+                let text_addr = GuestAddr::new(cpu.reg(Reg::R3));
+
+                let tag = Self::read_c_string(mem, tag_addr).unwrap_or_default();
+                let text = Self::read_c_string(mem, text_addr).unwrap_or_default();
+
+                self.logs.push(LogMessage {
+                    priority: prio,
+                    tag,
+                    text,
+                });
+
+                cpu.set_reg(Reg::R0, 1);
+            }
+            BionicFuncId::AndroidLogVprint => {
+                let prio = cpu.reg(Reg::R0);
+                let tag_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let fmt_addr = GuestAddr::new(cpu.reg(Reg::R2));
+                let _ap = cpu.reg(Reg::R3);
+
+                let tag = Self::read_c_string(mem, tag_addr).unwrap_or_default();
+                let fmt = Self::read_c_string(mem, fmt_addr).unwrap_or_default();
+
+                self.logs.push(LogMessage {
+                    priority: prio,
+                    tag,
+                    text: fmt,
+                });
+
+                cpu.set_reg(Reg::R0, 1);
+            }
+            BionicFuncId::AndroidLogIsLoggable => {
+                let prio = cpu.reg(Reg::R0);
+                let _tag_addr = GuestAddr::new(cpu.reg(Reg::R1));
+                let def_prio = cpu.reg(Reg::R2);
+
+                let is_loggable = if prio >= def_prio { 1 } else { 0 };
+                cpu.set_reg(Reg::R0, is_loggable);
+            }
+            BionicFuncId::Assert => {
+                let file_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let line = cpu.reg(Reg::R1);
+                let msg_addr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                let file = Self::read_c_string(mem, file_addr).unwrap_or_default();
+                let msg = Self::read_c_string(mem, msg_addr).unwrap_or_default();
+
+                self.logs.push(LogMessage {
+                    priority: 7, // ANDROID_LOG_FATAL
+                    tag: "assert".to_string(),
+                    text: format!("{}:{}: assertion failed: {}", file, line, msg),
+                });
+
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Assert2 => {
+                let file_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let line = cpu.reg(Reg::R1);
+                let func_addr = GuestAddr::new(cpu.reg(Reg::R2));
+                let msg_addr = GuestAddr::new(cpu.reg(Reg::R3));
+
+                let file = Self::read_c_string(mem, file_addr).unwrap_or_default();
+                let func = Self::read_c_string(mem, func_addr).unwrap_or_default();
+                let msg = Self::read_c_string(mem, msg_addr).unwrap_or_default();
+
+                self.logs.push(LogMessage {
+                    priority: 7, // ANDROID_LOG_FATAL
+                    tag: "assert".to_string(),
+                    text: format!("{}:{}: {}: assertion failed: {}", file, line, func, msg),
+                });
+
                 cpu.set_reg(Reg::R0, 0);
             }
             _ => {}
