@@ -637,6 +637,22 @@ pub enum BionicFuncId {
     Qsort                           = 971,
     Bsearch                         = 972,
 
+    // System User & Group Database Emulation (Stage 89)
+    Getpwnam                        = 980,
+    Getpwuid                        = 981,
+    GetpwnamR                       = 982,
+    GetpwuidR                       = 983,
+    Getgrnam                        = 984,
+    Getgrgid                        = 985,
+    GetgrnamR                       = 986,
+    GetgrgidR                       = 987,
+    Setpwent                        = 988,
+    Endpwent                        = 989,
+    Getpwent                        = 990,
+    Setgrent                        = 991,
+    Endgrent                        = 992,
+    Getgrent                        = 993,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1264,6 +1280,20 @@ impl BionicFuncId {
             970 => Some(Self::Nftw64),
             971 => Some(Self::Qsort),
             972 => Some(Self::Bsearch),
+            980 => Some(Self::Getpwnam),
+            981 => Some(Self::Getpwuid),
+            982 => Some(Self::GetpwnamR),
+            983 => Some(Self::GetpwuidR),
+            984 => Some(Self::Getgrnam),
+            985 => Some(Self::Getgrgid),
+            986 => Some(Self::GetgrnamR),
+            987 => Some(Self::GetgrgidR),
+            988 => Some(Self::Setpwent),
+            989 => Some(Self::Endpwent),
+            990 => Some(Self::Getpwent),
+            991 => Some(Self::Setgrent),
+            992 => Some(Self::Endgrent),
+            993 => Some(Self::Getgrent),
             _ => None,
         }
     }
@@ -1370,6 +1400,9 @@ pub struct BionicBridge {
     // POSIX Regular Expressions (Stage 87)
     pub regex_table: HashMap<u32, CompiledRegex>,
     pub next_regex_handle: u32,
+    // User and Group database enumeration state (Stage 89)
+    pub pwent_index: usize,
+    pub grent_index: usize,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1442,6 +1475,8 @@ impl BionicBridge {
             next_config_id: 700,
             regex_table: HashMap::new(),
             next_regex_handle: 800,
+            pwent_index: 0,
+            grent_index: 0,
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -2133,6 +2168,20 @@ impl BionicBridge {
             ("nftw64",                           BionicFuncId::Nftw64),
             ("qsort",                            BionicFuncId::Qsort),
             ("bsearch",                          BionicFuncId::Bsearch),
+            ("getpwnam",                         BionicFuncId::Getpwnam),
+            ("getpwuid",                         BionicFuncId::Getpwuid),
+            ("getpwnam_r",                       BionicFuncId::GetpwnamR),
+            ("getpwuid_r",                       BionicFuncId::GetpwuidR),
+            ("getgrnam",                         BionicFuncId::Getgrnam),
+            ("getgrgid",                         BionicFuncId::Getgrgid),
+            ("getgrnam_r",                       BionicFuncId::GetgrnamR),
+            ("getgrgid_r",                       BionicFuncId::GetgrgidR),
+            ("setpwent",                         BionicFuncId::Setpwent),
+            ("endpwent",                         BionicFuncId::Endpwent),
+            ("getpwent",                         BionicFuncId::Getpwent),
+            ("setgrent",                         BionicFuncId::Setgrent),
+            ("endgrent",                         BionicFuncId::Endgrent),
+            ("getgrent",                         BionicFuncId::Getgrent),
         ];
 
         for (name, id) in funcs {
@@ -2714,6 +2763,20 @@ impl BionicBridge {
             BionicFuncId::Nftw64,
             BionicFuncId::Qsort,
             BionicFuncId::Bsearch,
+            BionicFuncId::Getpwnam,
+            BionicFuncId::Getpwuid,
+            BionicFuncId::GetpwnamR,
+            BionicFuncId::GetpwuidR,
+            BionicFuncId::Getgrnam,
+            BionicFuncId::Getgrgid,
+            BionicFuncId::GetgrnamR,
+            BionicFuncId::GetgrgidR,
+            BionicFuncId::Setpwent,
+            BionicFuncId::Endpwent,
+            BionicFuncId::Getpwent,
+            BionicFuncId::Setgrent,
+            BionicFuncId::Endgrent,
+            BionicFuncId::Getgrent,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -5824,6 +5887,219 @@ impl BionicBridge {
                 }
                 cpu.set_reg(Reg::R0, found_addr);
             }
+            // System User & Group Database Emulation (Stage 89)
+            BionicFuncId::Getpwuid => {
+                let uid = cpu.reg(Reg::R0);
+                let (name, gid, dir, shell) = Self::lookup_user(uid, None);
+                let pwd_addr = self.stub_base.add(0x1A00);
+                let str_addr = self.stub_base.add(0x1A40);
+
+                let _ = Self::write_passwd(mem, pwd_addr, str_addr, &name, uid, gid, &dir, &shell);
+                cpu.set_reg(Reg::R0, pwd_addr.as_u32());
+            }
+            BionicFuncId::Getpwnam => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let mut res_addr = 0u32;
+                if name_ptr.as_u32() != 0 {
+                    if let Ok(name_str) = Self::read_c_string(mem, name_ptr) {
+                        let (name, uid, gid, dir, shell) = Self::lookup_user_by_name(&name_str);
+                        let pwd_addr = self.stub_base.add(0x1A00);
+                        let str_addr = self.stub_base.add(0x1A40);
+                        let _ = Self::write_passwd(mem, pwd_addr, str_addr, &name, uid, gid, &dir, &shell);
+                        res_addr = pwd_addr.as_u32();
+                    }
+                }
+                cpu.set_reg(Reg::R0, res_addr);
+            }
+            BionicFuncId::GetpwuidR => {
+                let uid = cpu.reg(Reg::R0);
+                let pwd_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let buflen = cpu.reg(Reg::R3) as usize;
+                let sp = GuestAddr::new(cpu.sp());
+                let result_ptr = GuestAddr::new(mem.read_u32(sp).unwrap_or(0));
+
+                let (name, gid, dir, shell) = Self::lookup_user(uid, None);
+                let needed = name.len() + 1 + 2 + dir.len() + 1 + shell.len() + 1 + 16;
+                if buflen < needed {
+                    if result_ptr.as_u32() != 0 {
+                        let _ = mem.write_u32(result_ptr, 0);
+                    }
+                    cpu.set_reg(Reg::R0, 34); // ERANGE
+                } else {
+                    let _ = Self::write_passwd(mem, pwd_ptr, buf_ptr, &name, uid, gid, &dir, &shell);
+                    if result_ptr.as_u32() != 0 {
+                        let _ = mem.write_u32(result_ptr, pwd_ptr.as_u32());
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::GetpwnamR => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let pwd_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let buflen = cpu.reg(Reg::R3) as usize;
+                let sp = GuestAddr::new(cpu.sp());
+                let result_ptr = GuestAddr::new(mem.read_u32(sp).unwrap_or(0));
+
+                let mut err = 0u32;
+                if name_ptr.as_u32() != 0 {
+                    if let Ok(name_str) = Self::read_c_string(mem, name_ptr) {
+                        let (name, uid, gid, dir, shell) = Self::lookup_user_by_name(&name_str);
+                        let needed = name.len() + 1 + 2 + dir.len() + 1 + shell.len() + 1 + 16;
+                        if buflen < needed {
+                            err = 34; // ERANGE
+                            if result_ptr.as_u32() != 0 {
+                                let _ = mem.write_u32(result_ptr, 0);
+                            }
+                        } else {
+                            let _ = Self::write_passwd(mem, pwd_ptr, buf_ptr, &name, uid, gid, &dir, &shell);
+                            if result_ptr.as_u32() != 0 {
+                                let _ = mem.write_u32(result_ptr, pwd_ptr.as_u32());
+                            }
+                        }
+                    } else {
+                        err = 2; // ENOENT
+                        if result_ptr.as_u32() != 0 {
+                            let _ = mem.write_u32(result_ptr, 0);
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, err);
+            }
+            BionicFuncId::Getgrgid => {
+                let gid = cpu.reg(Reg::R0);
+                let name = Self::lookup_group(gid);
+                let grp_addr = self.stub_base.add(0x1C00);
+                let str_addr = self.stub_base.add(0x1C40);
+
+                let _ = Self::write_group(mem, grp_addr, str_addr, &name, gid);
+                cpu.set_reg(Reg::R0, grp_addr.as_u32());
+            }
+            BionicFuncId::Getgrnam => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let mut res_addr = 0u32;
+                if name_ptr.as_u32() != 0 {
+                    if let Ok(name_str) = Self::read_c_string(mem, name_ptr) {
+                        let (name, gid) = Self::lookup_group_by_name(&name_str);
+                        let grp_addr = self.stub_base.add(0x1C00);
+                        let str_addr = self.stub_base.add(0x1C40);
+                        let _ = Self::write_group(mem, grp_addr, str_addr, &name, gid);
+                        res_addr = grp_addr.as_u32();
+                    }
+                }
+                cpu.set_reg(Reg::R0, res_addr);
+            }
+            BionicFuncId::GetgrgidR => {
+                let gid = cpu.reg(Reg::R0);
+                let grp_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let buflen = cpu.reg(Reg::R3) as usize;
+                let sp = GuestAddr::new(cpu.sp());
+                let result_ptr = GuestAddr::new(mem.read_u32(sp).unwrap_or(0));
+
+                let name = Self::lookup_group(gid);
+                let needed = name.len() + 1 + 2 + 16;
+                if buflen < needed {
+                    if result_ptr.as_u32() != 0 {
+                        let _ = mem.write_u32(result_ptr, 0);
+                    }
+                    cpu.set_reg(Reg::R0, 34); // ERANGE
+                } else {
+                    let _ = Self::write_group(mem, grp_ptr, buf_ptr, &name, gid);
+                    if result_ptr.as_u32() != 0 {
+                        let _ = mem.write_u32(result_ptr, grp_ptr.as_u32());
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::GetgrnamR => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let grp_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let buflen = cpu.reg(Reg::R3) as usize;
+                let sp = GuestAddr::new(cpu.sp());
+                let result_ptr = GuestAddr::new(mem.read_u32(sp).unwrap_or(0));
+
+                let mut err = 0u32;
+                if name_ptr.as_u32() != 0 {
+                    if let Ok(name_str) = Self::read_c_string(mem, name_ptr) {
+                        let (name, gid) = Self::lookup_group_by_name(&name_str);
+                        let needed = name.len() + 1 + 2 + 16;
+                        if buflen < needed {
+                            err = 34; // ERANGE
+                            if result_ptr.as_u32() != 0 {
+                                let _ = mem.write_u32(result_ptr, 0);
+                            }
+                        } else {
+                            let _ = Self::write_group(mem, grp_ptr, buf_ptr, &name, gid);
+                            if result_ptr.as_u32() != 0 {
+                                let _ = mem.write_u32(result_ptr, grp_ptr.as_u32());
+                            }
+                        }
+                    } else {
+                        err = 2; // ENOENT
+                        if result_ptr.as_u32() != 0 {
+                            let _ = mem.write_u32(result_ptr, 0);
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, err);
+            }
+            BionicFuncId::Setpwent => {
+                self.pwent_index = 0;
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Endpwent => {
+                self.pwent_index = 0;
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Getpwent => {
+                let users = [
+                    ("root", 0, 0, "/", "/system/bin/sh"),
+                    ("system", 1000, 1000, "/data/system", "/system/bin/sh"),
+                    ("shell", 2000, 2000, "/", "/system/bin/sh"),
+                    ("u0_a100", 10100, 10100, "/data/data/com.transd.app", "/system/bin/sh"),
+                ];
+                if self.pwent_index < users.len() {
+                    let (name, uid, gid, dir, shell) = users[self.pwent_index];
+                    self.pwent_index += 1;
+                    let pwd_addr = self.stub_base.add(0x1A00);
+                    let str_addr = self.stub_base.add(0x1A40);
+                    let _ = Self::write_passwd(mem, pwd_addr, str_addr, name, uid, gid, dir, shell);
+                    cpu.set_reg(Reg::R0, pwd_addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0); // NULL = EOF
+                }
+            }
+            BionicFuncId::Setgrent => {
+                self.grent_index = 0;
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Endgrent => {
+                self.grent_index = 0;
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Getgrent => {
+                let groups = [
+                    ("root", 0),
+                    ("system", 1000),
+                    ("shell", 2000),
+                    ("inet", 3003),
+                    ("net_raw", 3004),
+                    ("u0_a100", 10100),
+                ];
+                if self.grent_index < groups.len() {
+                    let (name, gid) = groups[self.grent_index];
+                    self.grent_index += 1;
+                    let grp_addr = self.stub_base.add(0x1C00);
+                    let str_addr = self.stub_base.add(0x1C40);
+                    let _ = Self::write_group(mem, grp_addr, str_addr, name, gid);
+                    cpu.set_reg(Reg::R0, grp_addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
                 let src = GuestAddr::new(cpu.reg(Reg::R1));
@@ -8815,6 +9091,158 @@ impl BionicBridge {
 
     pub fn register_asset(&mut self, name: &str, data: Vec<u8>) {
         self.asset_store.insert(name.to_string(), data);
+    }
+
+    fn lookup_user(uid: u32, default_name: Option<&str>) -> (String, u32, String, String) {
+        match uid {
+            0 => ("root".to_string(), 0, "/".to_string(), "/system/bin/sh".to_string()),
+            1000 => ("system".to_string(), 1000, "/data/system".to_string(), "/system/bin/sh".to_string()),
+            2000 => ("shell".to_string(), 2000, "/".to_string(), "/system/bin/sh".to_string()),
+            u if u >= 10000 => (
+                default_name.map(|s| s.to_string()).unwrap_or_else(|| format!("u0_a{}", u - 10000)),
+                u,
+                "/data/data/com.transd.app".to_string(),
+                "/system/bin/sh".to_string(),
+            ),
+            u => (
+                default_name.map(|s| s.to_string()).unwrap_or_else(|| format!("user_{}", u)),
+                u,
+                "/".to_string(),
+                "/system/bin/sh".to_string(),
+            ),
+        }
+    }
+
+    fn lookup_user_by_name(name: &str) -> (String, u32, u32, String, String) {
+        match name {
+            "root" => ("root".to_string(), 0, 0, "/".to_string(), "/system/bin/sh".to_string()),
+            "system" => ("system".to_string(), 1000, 1000, "/data/system".to_string(), "/system/bin/sh".to_string()),
+            "shell" => ("shell".to_string(), 2000, 2000, "/".to_string(), "/system/bin/sh".to_string()),
+            other if other.starts_with("u0_a") => {
+                let id = other[4..].parse::<u32>().unwrap_or(100);
+                let uid = 10000 + id;
+                (other.to_string(), uid, uid, "/data/data/com.transd.app".to_string(), "/system/bin/sh".to_string())
+            }
+            other => (other.to_string(), 10000, 10000, "/data/data/com.transd.app".to_string(), "/system/bin/sh".to_string()),
+        }
+    }
+
+    fn lookup_group(gid: u32) -> String {
+        match gid {
+            0 => "root".to_string(),
+            1000 => "system".to_string(),
+            2000 => "shell".to_string(),
+            3003 => "inet".to_string(),
+            3004 => "net_raw".to_string(),
+            3005 => "net_admin".to_string(),
+            g if g >= 10000 => format!("u0_a{}", g - 10000),
+            g => format!("group_{}", g),
+        }
+    }
+
+    fn lookup_group_by_name(name: &str) -> (String, u32) {
+        match name {
+            "root" => ("root".to_string(), 0),
+            "system" => ("system".to_string(), 1000),
+            "shell" => ("shell".to_string(), 2000),
+            "inet" => ("inet".to_string(), 3003),
+            "net_raw" => ("net_raw".to_string(), 3004),
+            "net_admin" => ("net_admin".to_string(), 3005),
+            other if other.starts_with("u0_a") => {
+                let id = other[4..].parse::<u32>().unwrap_or(100);
+                (other.to_string(), 10000 + id)
+            }
+            other => (other.to_string(), 10000),
+        }
+    }
+
+    fn write_passwd(
+        mem: &mut (impl Memory + ?Sized),
+        pwd_addr: GuestAddr,
+        buf_addr: GuestAddr,
+        name: &str,
+        uid: u32,
+        gid: u32,
+        dir: &str,
+        shell: &str,
+    ) -> Result<(), MemoryError> {
+        let mut cur = buf_addr;
+
+        let name_addr = cur;
+        mem.write_bytes(cur, name.as_bytes())?;
+        mem.write_u8(cur.add(name.len() as u32), 0)?;
+        cur = cur.add((name.len() as u32 + 4) & !3);
+
+        let pass_addr = cur;
+        mem.write_bytes(cur, b"x ")?;
+        cur = cur.add(4);
+
+        let gecos_addr = cur;
+        mem.write_bytes(cur, name.as_bytes())?;
+        mem.write_u8(cur.add(name.len() as u32), 0)?;
+        cur = cur.add((name.len() as u32 + 4) & !3);
+
+        let dir_addr = cur;
+        mem.write_bytes(cur, dir.as_bytes())?;
+        mem.write_u8(cur.add(dir.len() as u32), 0)?;
+        cur = cur.add((dir.len() as u32 + 4) & !3);
+
+        let shell_addr = cur;
+        mem.write_bytes(cur, shell.as_bytes())?;
+        mem.write_u8(cur.add(shell.len() as u32), 0)?;
+
+        // struct passwd:
+        // pw_name: offset 0
+        // pw_passwd: offset 4
+        // pw_uid: offset 8
+        // pw_gid: offset 12
+        // pw_gecos: offset 16
+        // pw_dir: offset 20
+        // pw_shell: offset 24
+        mem.write_u32(pwd_addr, name_addr.as_u32())?;
+        mem.write_u32(pwd_addr.add(4), pass_addr.as_u32())?;
+        mem.write_u32(pwd_addr.add(8), uid)?;
+        mem.write_u32(pwd_addr.add(12), gid)?;
+        mem.write_u32(pwd_addr.add(16), gecos_addr.as_u32())?;
+        mem.write_u32(pwd_addr.add(20), dir_addr.as_u32())?;
+        mem.write_u32(pwd_addr.add(24), shell_addr.as_u32())?;
+
+        Ok(())
+    }
+
+    fn write_group(
+        mem: &mut (impl Memory + ?Sized),
+        grp_addr: GuestAddr,
+        buf_addr: GuestAddr,
+        name: &str,
+        gid: u32,
+    ) -> Result<(), MemoryError> {
+        let mut cur = buf_addr;
+
+        let name_addr = cur;
+        mem.write_bytes(cur, name.as_bytes())?;
+        mem.write_u8(cur.add(name.len() as u32), 0)?;
+        cur = cur.add((name.len() as u32 + 4) & !3);
+
+        let pass_addr = cur;
+        mem.write_bytes(cur, b"x ")?;
+        cur = cur.add(4);
+
+        // Member list (char **): single NULL pointer
+        let mem_list_addr = cur;
+        mem.write_u32(cur, 0)?;
+
+        // struct group:
+        // gr_name: offset 0
+        // gr_passwd: offset 4
+        // gr_gid: offset 8
+        // gr_mem: offset 12
+        mem.write_u32(grp_addr, name_addr.as_u32())?;
+        mem.write_u32(grp_addr.add(4), pass_addr.as_u32())?;
+        mem.write_u32(grp_addr.add(8), gid)?;
+        mem.write_u32(grp_addr.add(12), mem_list_addr.as_u32())?;
+
+        Ok(())
     }
 
     fn version_compare(a: &str, b: &str) -> i32 {
