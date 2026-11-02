@@ -44,6 +44,11 @@ pub trait Memory {
         Ok(())
     }
 
+    /// Commits virtual pages in memory for the given guest range (default is no-op)
+    fn commit_range(&mut self, _addr: GuestAddr, _len: usize) -> Result<(), MemoryError> {
+        Ok(())
+    }
+
     /// Queries the protection flags for a given guest address
     fn get_protection(&self, _addr: GuestAddr) -> u32 {
         PROT_READ | PROT_WRITE | PROT_EXEC

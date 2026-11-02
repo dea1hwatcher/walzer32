@@ -435,6 +435,10 @@ impl Memory for ArenaMemory {
         self.mprotect(addr, len, prot)
     }
 
+    fn commit_range(&mut self, addr: GuestAddr, len: usize) -> Result<(), MemoryError> {
+        ArenaMemory::commit_range(self, addr, len)
+    }
+
     fn get_protection(&self, addr: GuestAddr) -> u32 {
         self.get_protection(addr)
     }
@@ -540,6 +544,10 @@ impl Memory for SharedArenaMemory {
 
     fn atomic_cmpxchg_u32(&mut self, addr: GuestAddr, expected: u32, new: u32) -> Result<u32, MemoryError> {
         self.inner.write().unwrap().atomic_cmpxchg_u32(addr, expected, new)
+    }
+
+    fn commit_range(&mut self, addr: GuestAddr, len: usize) -> Result<(), MemoryError> {
+        self.inner.write().unwrap().commit_range(addr, len)
     }
 }
 

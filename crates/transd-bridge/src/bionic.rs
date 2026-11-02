@@ -331,6 +331,19 @@ pub enum BionicFuncId {
     Strftime    = 513,
     Strptime    = 514,
 
+    // Memory-Mapped I/O (Stage 67)
+    Mmap        = 520,
+    Mmap64      = 521,
+    Munmap      = 522,
+    Madvise     = 523,
+    Msync       = 524,
+    Mremap      = 525,
+    Mlock       = 526,
+    Munlock     = 527,
+    Mlockall    = 528,
+    Munlockall  = 529,
+    Mincore     = 530,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -698,6 +711,17 @@ impl BionicFuncId {
             512 => Some(Self::CtimeR),
             513 => Some(Self::Strftime),
             514 => Some(Self::Strptime),
+            520 => Some(Self::Mmap),
+            521 => Some(Self::Mmap64),
+            522 => Some(Self::Munmap),
+            523 => Some(Self::Madvise),
+            524 => Some(Self::Msync),
+            525 => Some(Self::Mremap),
+            526 => Some(Self::Mlock),
+            527 => Some(Self::Munlock),
+            528 => Some(Self::Mlockall),
+            529 => Some(Self::Munlockall),
+            530 => Some(Self::Mincore),
             _ => None,
         }
     }
@@ -761,6 +785,8 @@ pub struct BionicBridge {
     pub next_dir_handle: u32,
     // strtok internal saved pointer (R0=0 means "continue from saved")
     pub strtok_saved: Option<GuestAddr>,
+    pub mmap_current: GuestAddr,
+    pub mmap_regions: std::collections::HashMap<u32, usize>,
     pub vfs: transd_rt::vfs::VirtualFileSystem,
     pub cwd: String,
 }
@@ -807,6 +833,8 @@ impl BionicBridge {
             dir_handles: std::collections::HashMap::new(),
             next_dir_handle: 200, // Guest DIR* handles start at 200
             strtok_saved: None,
+            mmap_current: GuestAddr::new(0x7100_0000),
+            mmap_regions: std::collections::HashMap::new(),
             vfs: transd_rt::vfs::VirtualFileSystem::new(),
             cwd: "/data/data/com.transd.app".to_string(),
         };
@@ -1178,6 +1206,17 @@ impl BionicBridge {
             ("ctime_r",     BionicFuncId::CtimeR),
             ("strftime",    BionicFuncId::Strftime),
             ("strptime",    BionicFuncId::Strptime),
+            ("mmap",        BionicFuncId::Mmap),
+            ("mmap64",      BionicFuncId::Mmap64),
+            ("munmap",      BionicFuncId::Munmap),
+            ("madvise",     BionicFuncId::Madvise),
+            ("msync",       BionicFuncId::Msync),
+            ("mremap",      BionicFuncId::Mremap),
+            ("mlock",       BionicFuncId::Mlock),
+            ("munlock",     BionicFuncId::Munlock),
+            ("mlockall",    BionicFuncId::Mlockall),
+            ("munlockall",  BionicFuncId::Munlockall),
+            ("mincore",     BionicFuncId::Mincore),
         ];
 
         for (name, id) in funcs {
@@ -1499,6 +1538,17 @@ impl BionicBridge {
             BionicFuncId::CtimeR,
             BionicFuncId::Strftime,
             BionicFuncId::Strptime,
+            BionicFuncId::Mmap,
+            BionicFuncId::Mmap64,
+            BionicFuncId::Munmap,
+            BionicFuncId::Madvise,
+            BionicFuncId::Msync,
+            BionicFuncId::Mremap,
+            BionicFuncId::Mlock,
+            BionicFuncId::Munlock,
+            BionicFuncId::Mlockall,
+            BionicFuncId::Munlockall,
+            BionicFuncId::Mincore,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -4732,6 +4782,95 @@ impl BionicBridge {
                 } else {
                     cpu.set_reg(Reg::R0, 0);
                 }
+            }
+            // ── Stage 67: Memory-Mapped I/O APIs ───────────────────────────
+            BionicFuncId::Mmap | BionicFuncId::Mmap64 => {
+                let req_addr = cpu.reg(Reg::R0);
+                let len      = cpu.reg(Reg::R1) as usize;
+                let prot     = cpu.reg(Reg::R2);
+                let _flags   = cpu.reg(Reg::R3);
+                let sp       = GuestAddr::new(cpu.reg(Reg::SP));
+                let fd       = if sp.as_u32() >= 0x1000 { mem.read_u32(sp).unwrap_or(u32::MAX) } else { u32::MAX };
+
+                if len == 0 {
+                    cpu.set_reg(Reg::R0, u32::MAX); // MAP_FAILED
+                } else {
+                    let aligned_len = (len + 0xFFF) & !0xFFF;
+                    let map_addr = if req_addr != 0 {
+                        GuestAddr::new(req_addr)
+                    } else {
+                        let addr = self.mmap_current;
+                        self.mmap_current = self.mmap_current.add(aligned_len as u32);
+                        addr
+                    };
+
+                    let _ = mem.commit_range(map_addr, aligned_len);
+                    let _ = mem.mprotect(map_addr, aligned_len, prot);
+
+                    if let Some(ashmem) = self.vfs.ashmem_regions.get(&fd) {
+                        if let Ok(lock) = ashmem.data.lock() {
+                            let copy_len = aligned_len.min(lock.len());
+                            if copy_len > 0 {
+                                let _ = mem.write_bytes(map_addr, &lock[..copy_len]);
+                            }
+                        }
+                    }
+
+                    self.mmap_regions.insert(map_addr.as_u32(), aligned_len);
+                    cpu.set_reg(Reg::R0, map_addr.as_u32());
+                }
+            }
+            BionicFuncId::Munmap => {
+                let addr = cpu.reg(Reg::R0);
+                let _len = cpu.reg(Reg::R1) as usize;
+                self.mmap_regions.remove(&addr);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Madvise => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Msync => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Mremap => {
+                let old_addr = GuestAddr::new(cpu.reg(Reg::R0));
+                let old_size = cpu.reg(Reg::R1) as usize;
+                let new_size = cpu.reg(Reg::R2) as usize;
+                if old_addr.as_u32() == 0 || new_size == 0 {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                } else if new_size <= old_size {
+                    self.mmap_regions.insert(old_addr.as_u32(), new_size);
+                    cpu.set_reg(Reg::R0, old_addr.as_u32());
+                } else {
+                    let aligned_new = (new_size + 0xFFF) & !0xFFF;
+                    let new_addr = self.mmap_current;
+                    self.mmap_current = self.mmap_current.add(aligned_new as u32);
+                    let _ = mem.commit_range(new_addr, aligned_new);
+                    let _ = mem.mprotect(new_addr, aligned_new, 0x3);
+                    let copy_len = old_size.min(new_size);
+                    let mut buf = vec![0u8; copy_len];
+                    if mem.read_bytes(old_addr, &mut buf).is_ok() {
+                        let _ = mem.write_bytes(new_addr, &buf);
+                    }
+                    self.mmap_regions.remove(&old_addr.as_u32());
+                    self.mmap_regions.insert(new_addr.as_u32(), aligned_new);
+                    cpu.set_reg(Reg::R0, new_addr.as_u32());
+                }
+            }
+            BionicFuncId::Mlock | BionicFuncId::Munlock | BionicFuncId::Mlockall | BionicFuncId::Munlockall => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Mincore => {
+                let _addr    = GuestAddr::new(cpu.reg(Reg::R0));
+                let length   = cpu.reg(Reg::R1) as usize;
+                let vec_ptr  = GuestAddr::new(cpu.reg(Reg::R2));
+                if vec_ptr.as_u32() != 0 {
+                    let pages = (length + 4095) / 4096;
+                    for i in 0..pages {
+                        let _ = mem.write_u8(vec_ptr.add(i as u32), 1);
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
             }
             _ => {}
         }
