@@ -572,6 +572,44 @@ pub enum BionicFuncId {
     ANativeWindowLock               = 876,
     ANativeWindowUnlockAndPost      = 877,
 
+    // Android Asset Manager & Configuration NDK APIs (Stage 86)
+    AAssetManagerFromJava           = 890,
+    AAssetManagerOpen               = 891,
+    AAssetManagerOpenDir            = 892,
+    AAssetRead                      = 893,
+    AAssetSeek                      = 894,
+    AAssetSeek64                    = 895,
+    AAssetClose                     = 896,
+    AAssetGetLength                 = 897,
+    AAssetGetLength64               = 898,
+    AAssetGetRemainingLength        = 899,
+    AAssetGetRemainingLength64      = 900,
+    AAssetGetBuffer                 = 901,
+    AAssetIsAllocated               = 902,
+    AAssetDirGetNextFileName        = 903,
+    AAssetDirRewind                 = 904,
+    AAssetDirClose                  = 905,
+    AConfigurationNew               = 906,
+    AConfigurationDelete            = 907,
+    AConfigurationFromAssetManager  = 908,
+    AConfigurationCopy              = 909,
+    AConfigurationGetOrientation    = 910,
+    AConfigurationSetOrientation    = 911,
+    AConfigurationGetDensity        = 912,
+    AConfigurationSetDensity        = 913,
+    AConfigurationGetSdkVersion     = 914,
+    AConfigurationSetSdkVersion     = 915,
+    AConfigurationGetScreenSize     = 916,
+    AConfigurationSetScreenSize     = 917,
+    AConfigurationGetScreenLong     = 918,
+    AConfigurationSetScreenLong     = 919,
+    AConfigurationGetUiModeType     = 920,
+    AConfigurationSetUiModeType     = 921,
+    AConfigurationGetLanguage       = 922,
+    AConfigurationGetCountry        = 923,
+    AConfigurationSetLanguage       = 924,
+    AConfigurationSetCountry        = 925,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1141,7 +1179,70 @@ impl BionicFuncId {
             875 => Some(Self::ANativeWindowSetBuffersGeometry),
             876 => Some(Self::ANativeWindowLock),
             877 => Some(Self::ANativeWindowUnlockAndPost),
+            890 => Some(Self::AAssetManagerFromJava),
+            891 => Some(Self::AAssetManagerOpen),
+            892 => Some(Self::AAssetManagerOpenDir),
+            893 => Some(Self::AAssetRead),
+            894 => Some(Self::AAssetSeek),
+            895 => Some(Self::AAssetSeek64),
+            896 => Some(Self::AAssetClose),
+            897 => Some(Self::AAssetGetLength),
+            898 => Some(Self::AAssetGetLength64),
+            899 => Some(Self::AAssetGetRemainingLength),
+            900 => Some(Self::AAssetGetRemainingLength64),
+            901 => Some(Self::AAssetGetBuffer),
+            902 => Some(Self::AAssetIsAllocated),
+            903 => Some(Self::AAssetDirGetNextFileName),
+            904 => Some(Self::AAssetDirRewind),
+            905 => Some(Self::AAssetDirClose),
+            906 => Some(Self::AConfigurationNew),
+            907 => Some(Self::AConfigurationDelete),
+            908 => Some(Self::AConfigurationFromAssetManager),
+            909 => Some(Self::AConfigurationCopy),
+            910 => Some(Self::AConfigurationGetOrientation),
+            911 => Some(Self::AConfigurationSetOrientation),
+            912 => Some(Self::AConfigurationGetDensity),
+            913 => Some(Self::AConfigurationSetDensity),
+            914 => Some(Self::AConfigurationGetSdkVersion),
+            915 => Some(Self::AConfigurationSetSdkVersion),
+            916 => Some(Self::AConfigurationGetScreenSize),
+            917 => Some(Self::AConfigurationSetScreenSize),
+            918 => Some(Self::AConfigurationGetScreenLong),
+            919 => Some(Self::AConfigurationSetScreenLong),
+            920 => Some(Self::AConfigurationGetUiModeType),
+            921 => Some(Self::AConfigurationSetUiModeType),
+            922 => Some(Self::AConfigurationGetLanguage),
+            923 => Some(Self::AConfigurationGetCountry),
+            924 => Some(Self::AConfigurationSetLanguage),
+            925 => Some(Self::AConfigurationSetCountry),
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AndroidConfiguration {
+    pub orientation: i32,
+    pub density: i32,
+    pub sdk_version: i32,
+    pub screen_size: i32,
+    pub screen_long: i32,
+    pub ui_mode_type: i32,
+    pub language: [u8; 4],
+    pub country: [u8; 4],
+}
+
+impl Default for AndroidConfiguration {
+    fn default() -> Self {
+        Self {
+            orientation: 1,
+            density: 320,
+            sdk_version: 28,
+            screen_size: 2,
+            screen_long: 1,
+            ui_mode_type: 1,
+            language: *b"en\0\0",
+            country: *b"US\0\0",
         }
     }
 }
@@ -1209,6 +1310,14 @@ pub struct BionicBridge {
     pub surface_width: u32,
     pub surface_height: u32,
     pub surface_format: u32,
+    // Android Asset Manager & Configuration (Stage 86)
+    pub asset_handles: HashMap<u32, (Vec<u8>, usize, GuestAddr)>,
+    pub next_asset_handle: u32,
+    pub asset_dirs: HashMap<u32, (Vec<String>, usize, GuestAddr)>,
+    pub next_asset_dir: u32,
+    pub asset_store: HashMap<String, Vec<u8>>,
+    pub configurations: HashMap<u32, AndroidConfiguration>,
+    pub next_config_id: u32,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1272,6 +1381,13 @@ impl BionicBridge {
             surface_width: 1920,
             surface_height: 1080,
             surface_format: 1,
+            asset_handles: HashMap::new(),
+            next_asset_handle: 500,
+            asset_dirs: HashMap::new(),
+            next_asset_dir: 600,
+            asset_store: HashMap::new(),
+            configurations: HashMap::new(),
+            next_config_id: 700,
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -1905,6 +2021,42 @@ impl BionicBridge {
             ("ANativeWindow_setBuffersGeometry", BionicFuncId::ANativeWindowSetBuffersGeometry),
             ("ANativeWindow_lock",               BionicFuncId::ANativeWindowLock),
             ("ANativeWindow_unlockAndPost",      BionicFuncId::ANativeWindowUnlockAndPost),
+            ("AAssetManager_fromJava",           BionicFuncId::AAssetManagerFromJava),
+            ("AAssetManager_open",               BionicFuncId::AAssetManagerOpen),
+            ("AAssetManager_openDir",            BionicFuncId::AAssetManagerOpenDir),
+            ("AAsset_read",                      BionicFuncId::AAssetRead),
+            ("AAsset_seek",                      BionicFuncId::AAssetSeek),
+            ("AAsset_seek64",                    BionicFuncId::AAssetSeek64),
+            ("AAsset_close",                     BionicFuncId::AAssetClose),
+            ("AAsset_getLength",                 BionicFuncId::AAssetGetLength),
+            ("AAsset_getLength64",               BionicFuncId::AAssetGetLength64),
+            ("AAsset_getRemainingLength",        BionicFuncId::AAssetGetRemainingLength),
+            ("AAsset_getRemainingLength64",      BionicFuncId::AAssetGetRemainingLength64),
+            ("AAsset_getBuffer",                 BionicFuncId::AAssetGetBuffer),
+            ("AAsset_isAllocated",               BionicFuncId::AAssetIsAllocated),
+            ("AAssetDir_getNextFileName",        BionicFuncId::AAssetDirGetNextFileName),
+            ("AAssetDir_rewind",                 BionicFuncId::AAssetDirRewind),
+            ("AAssetDir_close",                  BionicFuncId::AAssetDirClose),
+            ("AConfiguration_new",               BionicFuncId::AConfigurationNew),
+            ("AConfiguration_delete",            BionicFuncId::AConfigurationDelete),
+            ("AConfiguration_fromAssetManager",  BionicFuncId::AConfigurationFromAssetManager),
+            ("AConfiguration_copy",              BionicFuncId::AConfigurationCopy),
+            ("AConfiguration_getOrientation",    BionicFuncId::AConfigurationGetOrientation),
+            ("AConfiguration_setOrientation",    BionicFuncId::AConfigurationSetOrientation),
+            ("AConfiguration_getDensity",        BionicFuncId::AConfigurationGetDensity),
+            ("AConfiguration_setDensity",        BionicFuncId::AConfigurationSetDensity),
+            ("AConfiguration_getSdkVersion",     BionicFuncId::AConfigurationGetSdkVersion),
+            ("AConfiguration_setSdkVersion",     BionicFuncId::AConfigurationSetSdkVersion),
+            ("AConfiguration_getScreenSize",     BionicFuncId::AConfigurationGetScreenSize),
+            ("AConfiguration_setScreenSize",     BionicFuncId::AConfigurationSetScreenSize),
+            ("AConfiguration_getScreenLong",     BionicFuncId::AConfigurationGetScreenLong),
+            ("AConfiguration_setScreenLong",     BionicFuncId::AConfigurationSetScreenLong),
+            ("AConfiguration_getUiModeType",     BionicFuncId::AConfigurationGetUiModeType),
+            ("AConfiguration_setUiModeType",     BionicFuncId::AConfigurationSetUiModeType),
+            ("AConfiguration_getLanguage",       BionicFuncId::AConfigurationGetLanguage),
+            ("AConfiguration_getCountry",        BionicFuncId::AConfigurationGetCountry),
+            ("AConfiguration_setLanguage",       BionicFuncId::AConfigurationSetLanguage),
+            ("AConfiguration_setCountry",        BionicFuncId::AConfigurationSetCountry),
         ];
 
         for (name, id) in funcs {
@@ -2428,6 +2580,42 @@ impl BionicBridge {
             BionicFuncId::ANativeWindowSetBuffersGeometry,
             BionicFuncId::ANativeWindowLock,
             BionicFuncId::ANativeWindowUnlockAndPost,
+            BionicFuncId::AAssetManagerFromJava,
+            BionicFuncId::AAssetManagerOpen,
+            BionicFuncId::AAssetManagerOpenDir,
+            BionicFuncId::AAssetRead,
+            BionicFuncId::AAssetSeek,
+            BionicFuncId::AAssetSeek64,
+            BionicFuncId::AAssetClose,
+            BionicFuncId::AAssetGetLength,
+            BionicFuncId::AAssetGetLength64,
+            BionicFuncId::AAssetGetRemainingLength,
+            BionicFuncId::AAssetGetRemainingLength64,
+            BionicFuncId::AAssetGetBuffer,
+            BionicFuncId::AAssetIsAllocated,
+            BionicFuncId::AAssetDirGetNextFileName,
+            BionicFuncId::AAssetDirRewind,
+            BionicFuncId::AAssetDirClose,
+            BionicFuncId::AConfigurationNew,
+            BionicFuncId::AConfigurationDelete,
+            BionicFuncId::AConfigurationFromAssetManager,
+            BionicFuncId::AConfigurationCopy,
+            BionicFuncId::AConfigurationGetOrientation,
+            BionicFuncId::AConfigurationSetOrientation,
+            BionicFuncId::AConfigurationGetDensity,
+            BionicFuncId::AConfigurationSetDensity,
+            BionicFuncId::AConfigurationGetSdkVersion,
+            BionicFuncId::AConfigurationSetSdkVersion,
+            BionicFuncId::AConfigurationGetScreenSize,
+            BionicFuncId::AConfigurationSetScreenSize,
+            BionicFuncId::AConfigurationGetScreenLong,
+            BionicFuncId::AConfigurationSetScreenLong,
+            BionicFuncId::AConfigurationGetUiModeType,
+            BionicFuncId::AConfigurationSetUiModeType,
+            BionicFuncId::AConfigurationGetLanguage,
+            BionicFuncId::AConfigurationGetCountry,
+            BionicFuncId::AConfigurationSetLanguage,
+            BionicFuncId::AConfigurationSetCountry,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -4662,6 +4850,408 @@ impl BionicBridge {
                 cpu.set_reg(Reg::R0, 0);
             }
             BionicFuncId::ANativeWindowUnlockAndPost => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            // Android Asset Manager & Configuration NDK APIs (Stage 86)
+            BionicFuncId::AAssetManagerFromJava => {
+                // AAssetManager_fromJava(JNIEnv* env, jobject assetManager) -> AAssetManager*
+                cpu.set_reg(Reg::R0, 0xA55E_7000);
+            }
+            BionicFuncId::AAssetManagerOpen => {
+                // AAssetManager_open(mgr, filename, mode) -> AAsset*
+                let filename_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let mut asset_handle = 0u32;
+                if filename_ptr.as_u32() != 0 {
+                    if let Ok(path) = Self::read_c_string(mem, filename_ptr) {
+                        let clean_path = path.trim_start_matches('/');
+                        let data_opt = self.asset_store.get(&path)
+                            .or_else(|| self.asset_store.get(clean_path))
+                            .cloned()
+                            .or_else(|| self.vfs.get_file(&path).map(|a| (*a).clone()))
+                            .or_else(|| self.vfs.get_file(clean_path).map(|a| (*a).clone()))
+                            .or_else(|| self.vfs.get_file(&format!("/assets/{}", clean_path)).map(|a| (*a).clone()))
+                            .or_else(|| self.vfs.get_file(&format!("/android_asset/{}", clean_path)).map(|a| (*a).clone()));
+
+                        if let Some(data) = data_opt {
+                            let align_size = ((data.len() as u32) + 15) & !15;
+                            let buf_addr = if self.heap_current.add(align_size) <= self.heap_limit {
+                                let ptr = self.heap_current;
+                                self.heap_current = self.heap_current.add(align_size);
+                                let _ = mem.write_bytes(ptr, &data);
+                                ptr
+                            } else {
+                                GuestAddr::new(0)
+                            };
+
+                            let handle = self.next_asset_handle;
+                            self.next_asset_handle += 1;
+                            self.asset_handles.insert(handle, (data, 0, buf_addr));
+                            asset_handle = handle;
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, asset_handle);
+            }
+            BionicFuncId::AAssetManagerOpenDir => {
+                // AAssetManager_openDir(mgr, dirName) -> AAssetDir*
+                let dirname_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let dir_name = if dirname_ptr.as_u32() != 0 {
+                    Self::read_c_string(mem, dirname_ptr).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                let prefix = if dir_name.is_empty() {
+                    String::new()
+                } else {
+                    let mut p = dir_name.trim_start_matches('/').to_string();
+                    if !p.ends_with('/') {
+                        p.push('/');
+                    }
+                    p
+                };
+
+                let mut file_set = std::collections::BTreeSet::new();
+                for k in self.asset_store.keys() {
+                    let clean = k.trim_start_matches('/');
+                    if prefix.is_empty() {
+                        let comp = clean.split('/').next().unwrap_or("");
+                        if !comp.is_empty() {
+                            file_set.insert(comp.to_string());
+                        }
+                    } else if clean.starts_with(&prefix) {
+                        let rest = &clean[prefix.len()..];
+                        let comp = rest.split('/').next().unwrap_or("");
+                        if !comp.is_empty() {
+                            file_set.insert(comp.to_string());
+                        }
+                    }
+                }
+
+                let vfs_paths = [
+                    if dir_name.is_empty() { "/assets".to_string() } else { format!("/assets/{}", dir_name.trim_start_matches('/')) },
+                    dir_name.clone(),
+                ];
+                for vp in &vfs_paths {
+                    if let Some(entries) = self.vfs.list_dir(vp) {
+                        for e in entries {
+                            file_set.insert(e);
+                        }
+                    }
+                }
+
+                let files: Vec<String> = file_set.into_iter().collect();
+                let name_buf_addr = if self.heap_current.add(256) <= self.heap_limit {
+                    let ptr = self.heap_current;
+                    self.heap_current = self.heap_current.add(256);
+                    ptr
+                } else {
+                    GuestAddr::new(0)
+                };
+
+                let handle = self.next_asset_dir;
+                self.next_asset_dir += 1;
+                self.asset_dirs.insert(handle, (files, 0, name_buf_addr));
+                cpu.set_reg(Reg::R0, handle);
+            }
+            BionicFuncId::AAssetDirGetNextFileName => {
+                let dir_handle = cpu.reg(Reg::R0);
+                let mut res_ptr = 0u32;
+                if let Some((files, cursor, name_buf)) = self.asset_dirs.get_mut(&dir_handle) {
+                    if *cursor < files.len() && name_buf.as_u32() != 0 {
+                        let filename = &files[*cursor];
+                        *cursor += 1;
+                        let bytes = filename.as_bytes();
+                        if mem.write_bytes(*name_buf, bytes).is_ok() && mem.write_u8(name_buf.add(bytes.len() as u32), 0).is_ok() {
+                            res_ptr = name_buf.as_u32();
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, res_ptr);
+            }
+            BionicFuncId::AAssetDirRewind => {
+                let dir_handle = cpu.reg(Reg::R0);
+                if let Some((_, cursor, _)) = self.asset_dirs.get_mut(&dir_handle) {
+                    *cursor = 0;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AAssetDirClose => {
+                let dir_handle = cpu.reg(Reg::R0);
+                self.asset_dirs.remove(&dir_handle);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AAssetRead => {
+                let asset_handle = cpu.reg(Reg::R0);
+                let buf = GuestAddr::new(cpu.reg(Reg::R1));
+                let count = cpu.reg(Reg::R2) as usize;
+                if let Some((data, cursor, _)) = self.asset_handles.get_mut(&asset_handle) {
+                    if *cursor >= data.len() {
+                        cpu.set_reg(Reg::R0, 0); // EOF
+                    } else {
+                        let avail = data.len() - *cursor;
+                        let to_read = avail.min(count);
+                        mem.write_bytes(buf, &data[*cursor..*cursor + to_read])?;
+                        *cursor += to_read;
+                        cpu.set_reg(Reg::R0, to_read as u32);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, (-1i32) as u32);
+                }
+            }
+            BionicFuncId::AAssetSeek => {
+                let asset_handle = cpu.reg(Reg::R0);
+                let offset = cpu.reg(Reg::R1) as i32;
+                let whence = cpu.reg(Reg::R2) as i32;
+                if let Some((data, cursor, _)) = self.asset_handles.get_mut(&asset_handle) {
+                    let new_pos: i64 = match whence {
+                        0 => offset as i64,                      // SEEK_SET
+                        1 => (*cursor as i64) + (offset as i64),   // SEEK_CUR
+                        2 => (data.len() as i64) + (offset as i64),// SEEK_END
+                        _ => -1,
+                    };
+                    if new_pos < 0 {
+                        cpu.set_reg(Reg::R0, (-1i32) as u32);
+                    } else {
+                        *cursor = new_pos as usize;
+                        cpu.set_reg(Reg::R0, *cursor as u32);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, (-1i32) as u32);
+                }
+            }
+            BionicFuncId::AAssetSeek64 => {
+                let asset_handle = cpu.reg(Reg::R0);
+                let (offset, whence) = if cpu.reg(Reg::R3) <= 2 {
+                    let lo = cpu.reg(Reg::R1) as u64;
+                    let hi = cpu.reg(Reg::R2) as u64;
+                    ((lo | (hi << 32)) as i64, cpu.reg(Reg::R3) as i32)
+                } else {
+                    let lo = cpu.reg(Reg::R2) as u64;
+                    let hi = cpu.reg(Reg::R3) as u64;
+                    let sp = GuestAddr::new(cpu.sp());
+                    let w = mem.read_u32(sp).unwrap_or(0) as i32;
+                    ((lo | (hi << 32)) as i64, w)
+                };
+
+                if let Some((data, cursor, _)) = self.asset_handles.get_mut(&asset_handle) {
+                    let new_pos: i64 = match whence {
+                        0 => offset,
+                        1 => (*cursor as i64) + offset,
+                        2 => (data.len() as i64) + offset,
+                        _ => -1,
+                    };
+                    if new_pos < 0 {
+                        cpu.set_reg(Reg::R0, u32::MAX);
+                        cpu.set_reg(Reg::R1, u32::MAX);
+                    } else {
+                        *cursor = new_pos as usize;
+                        let pos_u64 = *cursor as u64;
+                        cpu.set_reg(Reg::R0, (pos_u64 & 0xFFFF_FFFF) as u32);
+                        cpu.set_reg(Reg::R1, ((pos_u64 >> 32) & 0xFFFF_FFFF) as u32);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                    cpu.set_reg(Reg::R1, u32::MAX);
+                }
+            }
+            BionicFuncId::AAssetClose => {
+                let asset_handle = cpu.reg(Reg::R0);
+                self.asset_handles.remove(&asset_handle);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AAssetGetLength => {
+                let asset_handle = cpu.reg(Reg::R0);
+                if let Some((data, _, _)) = self.asset_handles.get(&asset_handle) {
+                    cpu.set_reg(Reg::R0, data.len() as u32);
+                } else {
+                    cpu.set_reg(Reg::R0, (-1i32) as u32);
+                }
+            }
+            BionicFuncId::AAssetGetLength64 => {
+                let asset_handle = cpu.reg(Reg::R0);
+                if let Some((data, _, _)) = self.asset_handles.get(&asset_handle) {
+                    let len = data.len() as u64;
+                    cpu.set_reg(Reg::R0, (len & 0xFFFF_FFFF) as u32);
+                    cpu.set_reg(Reg::R1, ((len >> 32) & 0xFFFF_FFFF) as u32);
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                    cpu.set_reg(Reg::R1, u32::MAX);
+                }
+            }
+            BionicFuncId::AAssetGetRemainingLength => {
+                let asset_handle = cpu.reg(Reg::R0);
+                if let Some((data, cursor, _)) = self.asset_handles.get(&asset_handle) {
+                    let rem = data.len().saturating_sub(*cursor);
+                    cpu.set_reg(Reg::R0, rem as u32);
+                } else {
+                    cpu.set_reg(Reg::R0, (-1i32) as u32);
+                }
+            }
+            BionicFuncId::AAssetGetRemainingLength64 => {
+                let asset_handle = cpu.reg(Reg::R0);
+                if let Some((data, cursor, _)) = self.asset_handles.get(&asset_handle) {
+                    let rem = (data.len().saturating_sub(*cursor)) as u64;
+                    cpu.set_reg(Reg::R0, (rem & 0xFFFF_FFFF) as u32);
+                    cpu.set_reg(Reg::R1, ((rem >> 32) & 0xFFFF_FFFF) as u32);
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                    cpu.set_reg(Reg::R1, u32::MAX);
+                }
+            }
+            BionicFuncId::AAssetGetBuffer => {
+                let asset_handle = cpu.reg(Reg::R0);
+                if let Some((_, _, buf_addr)) = self.asset_handles.get(&asset_handle) {
+                    cpu.set_reg(Reg::R0, buf_addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::AAssetIsAllocated => {
+                cpu.set_reg(Reg::R0, 1);
+            }
+            BionicFuncId::AConfigurationNew => {
+                let handle = self.next_config_id;
+                self.next_config_id += 1;
+                self.configurations.insert(handle, AndroidConfiguration::default());
+                cpu.set_reg(Reg::R0, handle);
+            }
+            BionicFuncId::AConfigurationDelete => {
+                let handle = cpu.reg(Reg::R0);
+                self.configurations.remove(&handle);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AConfigurationFromAssetManager => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AConfigurationCopy => {
+                let dest_handle = cpu.reg(Reg::R0);
+                let src_handle = cpu.reg(Reg::R1);
+                if let Some(src) = self.configurations.get(&src_handle).cloned() {
+                    self.configurations.insert(dest_handle, src);
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AConfigurationGetOrientation => {
+                let handle = cpu.reg(Reg::R0);
+                let val = self.configurations.get(&handle).map(|c| c.orientation).unwrap_or(1);
+                cpu.set_reg(Reg::R0, val as u32);
+            }
+            BionicFuncId::AConfigurationSetOrientation => {
+                let handle = cpu.reg(Reg::R0);
+                let val = cpu.reg(Reg::R1) as i32;
+                if let Some(cfg) = self.configurations.get_mut(&handle) {
+                    cfg.orientation = val;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AConfigurationGetDensity => {
+                let handle = cpu.reg(Reg::R0);
+                let val = self.configurations.get(&handle).map(|c| c.density).unwrap_or(320);
+                cpu.set_reg(Reg::R0, val as u32);
+            }
+            BionicFuncId::AConfigurationSetDensity => {
+                let handle = cpu.reg(Reg::R0);
+                let val = cpu.reg(Reg::R1) as i32;
+                if let Some(cfg) = self.configurations.get_mut(&handle) {
+                    cfg.density = val;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AConfigurationGetSdkVersion => {
+                let handle = cpu.reg(Reg::R0);
+                let val = self.configurations.get(&handle).map(|c| c.sdk_version).unwrap_or(28);
+                cpu.set_reg(Reg::R0, val as u32);
+            }
+            BionicFuncId::AConfigurationSetSdkVersion => {
+                let handle = cpu.reg(Reg::R0);
+                let val = cpu.reg(Reg::R1) as i32;
+                if let Some(cfg) = self.configurations.get_mut(&handle) {
+                    cfg.sdk_version = val;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AConfigurationGetScreenSize => {
+                let handle = cpu.reg(Reg::R0);
+                let val = self.configurations.get(&handle).map(|c| c.screen_size).unwrap_or(2);
+                cpu.set_reg(Reg::R0, val as u32);
+            }
+            BionicFuncId::AConfigurationSetScreenSize => {
+                let handle = cpu.reg(Reg::R0);
+                let val = cpu.reg(Reg::R1) as i32;
+                if let Some(cfg) = self.configurations.get_mut(&handle) {
+                    cfg.screen_size = val;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AConfigurationGetScreenLong => {
+                let handle = cpu.reg(Reg::R0);
+                let val = self.configurations.get(&handle).map(|c| c.screen_long).unwrap_or(1);
+                cpu.set_reg(Reg::R0, val as u32);
+            }
+            BionicFuncId::AConfigurationSetScreenLong => {
+                let handle = cpu.reg(Reg::R0);
+                let val = cpu.reg(Reg::R1) as i32;
+                if let Some(cfg) = self.configurations.get_mut(&handle) {
+                    cfg.screen_long = val;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AConfigurationGetUiModeType => {
+                let handle = cpu.reg(Reg::R0);
+                let val = self.configurations.get(&handle).map(|c| c.ui_mode_type).unwrap_or(1);
+                cpu.set_reg(Reg::R0, val as u32);
+            }
+            BionicFuncId::AConfigurationSetUiModeType => {
+                let handle = cpu.reg(Reg::R0);
+                let val = cpu.reg(Reg::R1) as i32;
+                if let Some(cfg) = self.configurations.get_mut(&handle) {
+                    cfg.ui_mode_type = val;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AConfigurationGetLanguage => {
+                let handle = cpu.reg(Reg::R0);
+                let out_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let lang = self.configurations.get(&handle).map(|c| c.language).unwrap_or(*b"en\0\0");
+                if out_ptr.as_u32() != 0 {
+                    mem.write_bytes(out_ptr, &lang[..2])?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AConfigurationGetCountry => {
+                let handle = cpu.reg(Reg::R0);
+                let out_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let country = self.configurations.get(&handle).map(|c| c.country).unwrap_or(*b"US\0\0");
+                if out_ptr.as_u32() != 0 {
+                    mem.write_bytes(out_ptr, &country[..2])?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AConfigurationSetLanguage => {
+                let handle = cpu.reg(Reg::R0);
+                let in_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if in_ptr.as_u32() != 0 {
+                    let mut buf = [0u8; 2];
+                    if mem.read_bytes(in_ptr, &mut buf).is_ok() {
+                        if let Some(cfg) = self.configurations.get_mut(&handle) {
+                            cfg.language = [buf[0], buf[1], 0, 0];
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AConfigurationSetCountry => {
+                let handle = cpu.reg(Reg::R0);
+                let in_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if in_ptr.as_u32() != 0 {
+                    let mut buf = [0u8; 2];
+                    if mem.read_bytes(in_ptr, &mut buf).is_ok() {
+                        if let Some(cfg) = self.configurations.get_mut(&handle) {
+                            cfg.country = [buf[0], buf[1], 0, 0];
+                        }
+                    }
+                }
                 cpu.set_reg(Reg::R0, 0);
             }
             BionicFuncId::Memmove => {
@@ -7651,6 +8241,10 @@ impl BionicBridge {
             22 => "Invalid argument",
             _ => "Unknown error",
         }
+    }
+
+    pub fn register_asset(&mut self, name: &str, data: Vec<u8>) {
+        self.asset_store.insert(name.to_string(), data);
     }
 
     fn read_c_string(mem: &(impl Memory + ?Sized), addr: GuestAddr) -> Result<String, MemoryError> {
