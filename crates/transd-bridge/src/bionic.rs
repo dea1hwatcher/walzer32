@@ -663,6 +663,26 @@ pub enum BionicFuncId {
     TimerfdGettime                  = 1006,
     Profil                          = 1007,
 
+    // Extended Math & Floating Point Functions (Stage 91)
+    Fmaf                            = 1020,
+    Fma                             = 1021,
+    Remquof                         = 1022,
+    Remquo                          = 1023,
+    Nextafterf                      = 1024,
+    Nextafter                       = 1025,
+    Nanf                            = 1026,
+    Nan                             = 1027,
+    Fdimf                           = 1028,
+    Fdim                            = 1029,
+    Ilogbf                          = 1030,
+    Ilogb                           = 1031,
+    Logbf                           = 1032,
+    Logb                            = 1033,
+    Scalbnf                         = 1034,
+    Scalbn                          = 1035,
+    Scalblnf                        = 1036,
+    Scalbln                         = 1037,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1312,6 +1332,24 @@ impl BionicFuncId {
             1005 => Some(Self::TimerfdSettime),
             1006 => Some(Self::TimerfdGettime),
             1007 => Some(Self::Profil),
+            1020 => Some(Self::Fmaf),
+            1021 => Some(Self::Fma),
+            1022 => Some(Self::Remquof),
+            1023 => Some(Self::Remquo),
+            1024 => Some(Self::Nextafterf),
+            1025 => Some(Self::Nextafter),
+            1026 => Some(Self::Nanf),
+            1027 => Some(Self::Nan),
+            1028 => Some(Self::Fdimf),
+            1029 => Some(Self::Fdim),
+            1030 => Some(Self::Ilogbf),
+            1031 => Some(Self::Ilogb),
+            1032 => Some(Self::Logbf),
+            1033 => Some(Self::Logb),
+            1034 => Some(Self::Scalbnf),
+            1035 => Some(Self::Scalbn),
+            1036 => Some(Self::Scalblnf),
+            1037 => Some(Self::Scalbln),
             _ => None,
         }
     }
@@ -2217,6 +2255,24 @@ impl BionicBridge {
             ("timerfd_settime",                  BionicFuncId::TimerfdSettime),
             ("timerfd_gettime",                  BionicFuncId::TimerfdGettime),
             ("profil",                           BionicFuncId::Profil),
+            ("fmaf",                             BionicFuncId::Fmaf),
+            ("fma",                              BionicFuncId::Fma),
+            ("remquof",                          BionicFuncId::Remquof),
+            ("remquo",                           BionicFuncId::Remquo),
+            ("nextafterf",                       BionicFuncId::Nextafterf),
+            ("nextafter",                        BionicFuncId::Nextafter),
+            ("nanf",                             BionicFuncId::Nanf),
+            ("nan",                              BionicFuncId::Nan),
+            ("fdimf",                            BionicFuncId::Fdimf),
+            ("fdim",                             BionicFuncId::Fdim),
+            ("ilogbf",                           BionicFuncId::Ilogbf),
+            ("ilogb",                            BionicFuncId::Ilogb),
+            ("logbf",                            BionicFuncId::Logbf),
+            ("logb",                             BionicFuncId::Logb),
+            ("scalbnf",                          BionicFuncId::Scalbnf),
+            ("scalbn",                           BionicFuncId::Scalbn),
+            ("scalblnf",                         BionicFuncId::Scalblnf),
+            ("scalbln",                          BionicFuncId::Scalbln),
         ];
 
         for (name, id) in funcs {
@@ -2820,6 +2876,24 @@ impl BionicBridge {
             BionicFuncId::TimerfdSettime,
             BionicFuncId::TimerfdGettime,
             BionicFuncId::Profil,
+            BionicFuncId::Fmaf,
+            BionicFuncId::Fma,
+            BionicFuncId::Remquof,
+            BionicFuncId::Remquo,
+            BionicFuncId::Nextafterf,
+            BionicFuncId::Nextafter,
+            BionicFuncId::Nanf,
+            BionicFuncId::Nan,
+            BionicFuncId::Fdimf,
+            BionicFuncId::Fdim,
+            BionicFuncId::Ilogbf,
+            BionicFuncId::Ilogb,
+            BionicFuncId::Logbf,
+            BionicFuncId::Logb,
+            BionicFuncId::Scalbnf,
+            BionicFuncId::Scalbn,
+            BionicFuncId::Scalblnf,
+            BionicFuncId::Scalbln,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -6240,6 +6314,233 @@ impl BionicBridge {
             }
             BionicFuncId::Profil => {
                 cpu.set_reg(Reg::R0, 0);
+            }
+            // Extended Math & Floating Point Functions (Stage 91)
+            BionicFuncId::Fmaf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let y = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R1)), true);
+                let z = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R2)), true);
+                let res = cpu.sanitize_f32(x.mul_add(y, z), false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Fma => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let y_bits = (cpu.reg(Reg::R2) as u64) | ((cpu.reg(Reg::R3) as u64) << 32);
+                let sp = GuestAddr::new(cpu.sp());
+                let z_low = mem.read_u32(sp).unwrap_or(0) as u64;
+                let z_high = mem.read_u32(sp.add(4)).unwrap_or(0) as u64;
+                let z_bits = z_low | (z_high << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let y = cpu.sanitize_f64(f64::from_bits(y_bits), true);
+                let z = cpu.sanitize_f64(f64::from_bits(z_bits), true);
+                let res = cpu.sanitize_f64(x.mul_add(y, z), false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Remquof => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let y = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R1)), true);
+                let quo_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let rem = if y != 0.0 {
+                    let q = (x / y).round() as i32;
+                    if quo_ptr.as_u32() != 0 {
+                        let _ = mem.write_u32(quo_ptr, q as u32);
+                    }
+                    x - (q as f32) * y
+                } else {
+                    f32::NAN
+                };
+                let res = cpu.sanitize_f32(rem, false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Remquo => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let y_bits = (cpu.reg(Reg::R2) as u64) | ((cpu.reg(Reg::R3) as u64) << 32);
+                let sp = GuestAddr::new(cpu.sp());
+                let quo_ptr = GuestAddr::new(mem.read_u32(sp).unwrap_or(0));
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let y = cpu.sanitize_f64(f64::from_bits(y_bits), true);
+                let rem = if y != 0.0 {
+                    let q = (x / y).round() as i64;
+                    if quo_ptr.as_u32() != 0 {
+                        let _ = mem.write_u32(quo_ptr, (q & 0x7FFF_FFFF) as u32);
+                    }
+                    x - (q as f64) * y
+                } else {
+                    f64::NAN
+                };
+                let res = cpu.sanitize_f64(rem, false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
+            }
+            BionicFuncId::Nextafterf => {
+                let x_bits = cpu.reg(Reg::R0);
+                let y_bits = cpu.reg(Reg::R1);
+                let x = cpu.sanitize_f32(f32::from_bits(x_bits), true);
+                let y = cpu.sanitize_f32(f32::from_bits(y_bits), true);
+                let res = if x.is_nan() || y.is_nan() {
+                    f32::NAN
+                } else if x == y {
+                    y
+                } else if x == 0.0 {
+                    let next_bits = 1u32 | (y_bits & 0x8000_0000);
+                    f32::from_bits(next_bits)
+                } else if (x > 0.0) == (x < y) {
+                    f32::from_bits(x_bits + 1)
+                } else {
+                    f32::from_bits(x_bits - 1)
+                };
+                let res_san = cpu.sanitize_f32(res, false);
+                cpu.set_reg(Reg::R0, res_san.to_bits());
+                cpu.set_s_reg(0, res_san);
+            }
+            BionicFuncId::Nextafter => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let y_bits = (cpu.reg(Reg::R2) as u64) | ((cpu.reg(Reg::R3) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let y = cpu.sanitize_f64(f64::from_bits(y_bits), true);
+                let res = if x.is_nan() || y.is_nan() {
+                    f64::NAN
+                } else if x == y {
+                    y
+                } else if x == 0.0 {
+                    let next_bits = 1u64 | (y_bits & 0x8000_0000_0000_0000);
+                    f64::from_bits(next_bits)
+                } else if (x > 0.0) == (x < y) {
+                    f64::from_bits(x_bits + 1)
+                } else {
+                    f64::from_bits(x_bits - 1)
+                };
+                let res_san = cpu.sanitize_f64(res, false);
+                let res_bits = res_san.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res_san);
+            }
+            BionicFuncId::Nanf => {
+                let nan = f32::NAN;
+                cpu.set_reg(Reg::R0, nan.to_bits());
+                cpu.set_s_reg(0, nan);
+            }
+            BionicFuncId::Nan => {
+                let nan = f64::NAN;
+                let nan_bits = nan.to_bits();
+                cpu.set_reg(Reg::R0, nan_bits as u32);
+                cpu.set_reg(Reg::R1, (nan_bits >> 32) as u32);
+                cpu.set_d_reg(0, nan);
+            }
+            BionicFuncId::Fdimf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let y = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R1)), true);
+                let res = if x.is_nan() || y.is_nan() {
+                    f32::NAN
+                } else if x > y {
+                    x - y
+                } else {
+                    0.0f32
+                };
+                let res_san = cpu.sanitize_f32(res, false);
+                cpu.set_reg(Reg::R0, res_san.to_bits());
+                cpu.set_s_reg(0, res_san);
+            }
+            BionicFuncId::Fdim => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let y_bits = (cpu.reg(Reg::R2) as u64) | ((cpu.reg(Reg::R3) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let y = cpu.sanitize_f64(f64::from_bits(y_bits), true);
+                let res = if x.is_nan() || y.is_nan() {
+                    f64::NAN
+                } else if x > y {
+                    x - y
+                } else {
+                    0.0f64
+                };
+                let res_san = cpu.sanitize_f64(res, false);
+                let res_bits = res_san.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res_san);
+            }
+            BionicFuncId::Ilogbf => {
+                let x = f32::from_bits(cpu.reg(Reg::R0));
+                let res = if x == 0.0 {
+                    i32::MIN
+                } else if x.is_nan() || x.is_infinite() {
+                    i32::MAX
+                } else {
+                    ((x.to_bits() >> 23) & 0xFF) as i32 - 127
+                };
+                cpu.set_reg(Reg::R0, res as u32);
+            }
+            BionicFuncId::Ilogb => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = f64::from_bits(x_bits);
+                let res = if x == 0.0 {
+                    i32::MIN
+                } else if x.is_nan() || x.is_infinite() {
+                    i32::MAX
+                } else {
+                    ((x_bits >> 52) & 0x7FF) as i32 - 1023
+                };
+                cpu.set_reg(Reg::R0, res as u32);
+            }
+            BionicFuncId::Logbf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let res = if x == 0.0 {
+                    f32::NEG_INFINITY
+                } else if x.is_nan() {
+                    f32::NAN
+                } else if x.is_infinite() {
+                    f32::INFINITY
+                } else {
+                    (((x.to_bits() >> 23) & 0xFF) as i32 - 127) as f32
+                };
+                let res_san = cpu.sanitize_f32(res, false);
+                cpu.set_reg(Reg::R0, res_san.to_bits());
+                cpu.set_s_reg(0, res_san);
+            }
+            BionicFuncId::Logb => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let res = if x == 0.0 {
+                    f64::NEG_INFINITY
+                } else if x.is_nan() {
+                    f64::NAN
+                } else if x.is_infinite() {
+                    f64::INFINITY
+                } else {
+                    (((x_bits >> 52) & 0x7FF) as i32 - 1023) as f64
+                };
+                let res_san = cpu.sanitize_f64(res, false);
+                let res_bits = res_san.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res_san);
+            }
+            BionicFuncId::Scalbnf | BionicFuncId::Scalblnf => {
+                let x = cpu.sanitize_f32(f32::from_bits(cpu.reg(Reg::R0)), true);
+                let n = (cpu.reg(Reg::R1) as i32).clamp(-126, 127);
+                let factor = (2.0f32).powi(n);
+                let res = cpu.sanitize_f32(x * factor, false);
+                cpu.set_reg(Reg::R0, res.to_bits());
+                cpu.set_s_reg(0, res);
+            }
+            BionicFuncId::Scalbn | BionicFuncId::Scalbln => {
+                let x_bits = (cpu.reg(Reg::R0) as u64) | ((cpu.reg(Reg::R1) as u64) << 32);
+                let x = cpu.sanitize_f64(f64::from_bits(x_bits), true);
+                let n = (cpu.reg(Reg::R2) as i32).clamp(-1022, 1023);
+                let factor = (2.0f64).powi(n);
+                let res = cpu.sanitize_f64(x * factor, false);
+                let res_bits = res.to_bits();
+                cpu.set_reg(Reg::R0, res_bits as u32);
+                cpu.set_reg(Reg::R1, (res_bits >> 32) as u32);
+                cpu.set_d_reg(0, res);
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
