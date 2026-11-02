@@ -98,6 +98,7 @@ pub fn read_cstring_from_mem(
 
 #[derive(Debug, Clone)]
 pub struct OpenFile {
+    pub path: String,
     pub content: Arc<Vec<u8>>,
     pub cursor: usize,
     pub flags: u32,
@@ -293,6 +294,7 @@ ro.product.manufacturer=Transd
             self.open_fds.insert(
                 fd,
                 OpenFile {
+                    path: resolved,
                     content,
                     cursor: 0,
                     flags,
@@ -353,7 +355,7 @@ ro.product.manufacturer=Transd
         Ok(to_read)
     }
 
-    /// Writes bytes to an open guest file descriptor (e.g. ashmem / memfd)
+    /// Writes bytes to an open guest file descriptor (e.g. ashmem / memfd / open file)
     pub fn write(&mut self, fd: u32, buf: &[u8]) -> Result<usize, i32> {
         if let Some(ashmem) = self.ashmem_regions.get_mut(&fd) {
             if let Ok(mut lock) = ashmem.data.lock() {
@@ -365,6 +367,21 @@ ro.product.manufacturer=Transd
                 return Ok(count);
             }
         }
+
+        if let Some(file) = self.open_fds.get_mut(&fd) {
+            let count = buf.len();
+            let path = file.path.clone();
+            let content = Arc::make_mut(&mut file.content);
+            if file.cursor + count > content.len() {
+                content.resize(file.cursor + count, 0);
+            }
+            content[file.cursor..file.cursor + count].copy_from_slice(buf);
+            file.cursor += count;
+            let updated = Arc::clone(&file.content);
+            self.virtual_files.insert(path, updated);
+            return Ok(count);
+        }
+
         Err(EBADF)
     }
 

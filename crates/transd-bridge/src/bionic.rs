@@ -730,6 +730,19 @@ pub enum BionicFuncId {
     AChoreographerRegisterRefreshRateCallback   = 1115,
     AChoreographerUnregisterRefreshRateCallback = 1116,
 
+    // POSIX Vector & Positional File I/O (Stage 95)
+    Readv                           = 1130,
+    Writev                          = 1131,
+    Pread                           = 1132,
+    Pwrite                          = 1133,
+    Pread64                         = 1134,
+    Pwrite64                        = 1135,
+    Preadv                          = 1136,
+    Pwritev                         = 1137,
+    PosixFallocate                  = 1138,
+    PosixFallocate64                = 1139,
+    Fallocate                       = 1140,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1438,6 +1451,17 @@ impl BionicFuncId {
             1114 => Some(Self::AChoreographerPostFrameCallbackDelayed64),
             1115 => Some(Self::AChoreographerRegisterRefreshRateCallback),
             1116 => Some(Self::AChoreographerUnregisterRefreshRateCallback),
+            1130 => Some(Self::Readv),
+            1131 => Some(Self::Writev),
+            1132 => Some(Self::Pread),
+            1133 => Some(Self::Pwrite),
+            1134 => Some(Self::Pread64),
+            1135 => Some(Self::Pwrite64),
+            1136 => Some(Self::Preadv),
+            1137 => Some(Self::Pwritev),
+            1138 => Some(Self::PosixFallocate),
+            1139 => Some(Self::PosixFallocate64),
+            1140 => Some(Self::Fallocate),
             _ => None,
         }
     }
@@ -2457,6 +2481,17 @@ impl BionicBridge {
             ("AChoreographer_postFrameCallbackDelayed64", BionicFuncId::AChoreographerPostFrameCallbackDelayed64),
             ("AChoreographer_registerRefreshRateCallback", BionicFuncId::AChoreographerRegisterRefreshRateCallback),
             ("AChoreographer_unregisterRefreshRateCallback", BionicFuncId::AChoreographerUnregisterRefreshRateCallback),
+            ("readv",                            BionicFuncId::Readv),
+            ("writev",                           BionicFuncId::Writev),
+            ("pread",                            BionicFuncId::Pread),
+            ("pwrite",                           BionicFuncId::Pwrite),
+            ("pread64",                          BionicFuncId::Pread64),
+            ("pwrite64",                         BionicFuncId::Pwrite64),
+            ("preadv",                           BionicFuncId::Preadv),
+            ("pwritev",                          BionicFuncId::Pwritev),
+            ("posix_fallocate",                  BionicFuncId::PosixFallocate),
+            ("posix_fallocate64",                BionicFuncId::PosixFallocate64),
+            ("fallocate",                        BionicFuncId::Fallocate),
         ];
 
         for (name, id) in funcs {
@@ -3119,6 +3154,17 @@ impl BionicBridge {
             BionicFuncId::AChoreographerPostFrameCallbackDelayed64,
             BionicFuncId::AChoreographerRegisterRefreshRateCallback,
             BionicFuncId::AChoreographerUnregisterRefreshRateCallback,
+            BionicFuncId::Readv,
+            BionicFuncId::Writev,
+            BionicFuncId::Pread,
+            BionicFuncId::Pwrite,
+            BionicFuncId::Pread64,
+            BionicFuncId::Pwrite64,
+            BionicFuncId::Preadv,
+            BionicFuncId::Pwritev,
+            BionicFuncId::PosixFallocate,
+            BionicFuncId::PosixFallocate64,
+            BionicFuncId::Fallocate,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -7471,6 +7517,290 @@ impl BionicBridge {
                 let data = cpu.reg(Reg::R2);
                 if let Some(pos) = self.choreo_refresh_callbacks.iter().position(|&(c, d)| c == cb && d == data) {
                     self.choreo_refresh_callbacks.remove(pos);
+                }
+            }
+
+            // POSIX Vector & Positional File I/O (Stage 95)
+            BionicFuncId::Readv => {
+                let fd = cpu.reg(Reg::R0);
+                let iov_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let iovcnt = cpu.reg(Reg::R2) as usize;
+
+                let mut total_read = 0usize;
+                for i in 0..iovcnt {
+                    let base = mem.read_u32(iov_ptr.add((i * 8) as u32)).unwrap_or(0);
+                    let len = mem.read_u32(iov_ptr.add((i * 8 + 4) as u32)).unwrap_or(0) as usize;
+                    if len == 0 || base == 0 {
+                        continue;
+                    }
+                    if let Some((_write_fd, buf)) = self.pipe_fds.get_mut(&fd) {
+                        let n = len.min(buf.len());
+                        let data: Vec<u8> = buf.drain(..n).collect();
+                        for (idx, b) in data.iter().enumerate() {
+                            mem.write_u8(GuestAddr::new(base).add(idx as u32), *b)?;
+                        }
+                        total_read += n;
+                        if n < len {
+                            break;
+                        }
+                    } else {
+                        let mut tmp = vec![0u8; len];
+                        match self.vfs.read(fd, &mut tmp) {
+                            Ok(n) => {
+                                for idx in 0..n {
+                                    mem.write_u8(GuestAddr::new(base).add(idx as u32), tmp[idx])?;
+                                }
+                                total_read += n;
+                                if n < len {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, total_read as u32);
+            }
+            BionicFuncId::Writev => {
+                let fd = cpu.reg(Reg::R0);
+                let iov_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let iovcnt = cpu.reg(Reg::R2) as usize;
+
+                let mut total_written = 0usize;
+                for i in 0..iovcnt {
+                    let base = mem.read_u32(iov_ptr.add((i * 8) as u32)).unwrap_or(0);
+                    let len = mem.read_u32(iov_ptr.add((i * 8 + 4) as u32)).unwrap_or(0) as usize;
+                    if len == 0 || base == 0 {
+                        continue;
+                    }
+                    let mut data = Vec::with_capacity(len);
+                    for idx in 0..len {
+                        data.push(mem.read_u8(GuestAddr::new(base).add(idx as u32))?);
+                    }
+
+                    let read_fd_opt = self.pipe_fds.iter()
+                        .find(|(_, (w, _))| *w == fd)
+                        .map(|(r, _)| *r);
+                    if let Some(read_fd) = read_fd_opt {
+                        if let Some((_, buf)) = self.pipe_fds.get_mut(&read_fd) {
+                            buf.extend_from_slice(&data);
+                        }
+                        total_written += len;
+                    } else if fd == 1 || fd == 2 {
+                        total_written += len;
+                    } else {
+                        match self.vfs.write(fd, &data) {
+                            Ok(n) => total_written += n,
+                            Err(_) => total_written += len,
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, total_written as u32);
+            }
+            BionicFuncId::Pread => {
+                let fd = cpu.reg(Reg::R0);
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let count = cpu.reg(Reg::R2) as usize;
+                let offset = cpu.reg(Reg::R3) as i32 as i64;
+
+                let orig = self.vfs.seek(fd, 0, 1);
+                let _ = self.vfs.seek(fd, offset, 0);
+                let mut tmp = vec![0u8; count];
+                let ret = match self.vfs.read(fd, &mut tmp) {
+                    Ok(n) => {
+                        for i in 0..n {
+                            mem.write_u8(buf_ptr.add(i as u32), tmp[i])?;
+                        }
+                        n as u32
+                    }
+                    Err(_) => u32::MAX,
+                };
+                if let Ok(pos) = orig {
+                    let _ = self.vfs.seek(fd, pos as i64, 0);
+                }
+                cpu.set_reg(Reg::R0, ret);
+            }
+            BionicFuncId::Pwrite => {
+                let fd = cpu.reg(Reg::R0);
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let count = cpu.reg(Reg::R2) as usize;
+                let offset = cpu.reg(Reg::R3) as i32 as i64;
+
+                let mut data = Vec::with_capacity(count);
+                for i in 0..count {
+                    data.push(mem.read_u8(buf_ptr.add(i as u32))?);
+                }
+                let orig = self.vfs.seek(fd, 0, 1);
+                let _ = self.vfs.seek(fd, offset, 0);
+                let ret = match self.vfs.write(fd, &data) {
+                    Ok(n) => n as u32,
+                    Err(_) => count as u32,
+                };
+                if let Ok(pos) = orig {
+                    let _ = self.vfs.seek(fd, pos as i64, 0);
+                }
+                cpu.set_reg(Reg::R0, ret);
+            }
+            BionicFuncId::Pread64 => {
+                let fd = cpu.reg(Reg::R0);
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let count = cpu.reg(Reg::R2) as usize;
+
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let low = if sp.as_u32() != 0 { mem.read_u32(sp).unwrap_or(0) as u64 } else { 0 };
+                let high = if sp.as_u32() != 0 { mem.read_u32(sp.add(4)).unwrap_or(0) as u64 } else { 0 };
+                let offset_val = (low | (high << 32)) as i64;
+                let offset = if offset_val != 0 { offset_val } else { cpu.reg(Reg::R3) as i32 as i64 };
+
+                let orig = self.vfs.seek(fd, 0, 1);
+                let _ = self.vfs.seek(fd, offset, 0);
+                let mut tmp = vec![0u8; count];
+                let ret = match self.vfs.read(fd, &mut tmp) {
+                    Ok(n) => {
+                        for i in 0..n {
+                            mem.write_u8(buf_ptr.add(i as u32), tmp[i])?;
+                        }
+                        n as u32
+                    }
+                    Err(_) => u32::MAX,
+                };
+                if let Ok(pos) = orig {
+                    let _ = self.vfs.seek(fd, pos as i64, 0);
+                }
+                cpu.set_reg(Reg::R0, ret);
+            }
+            BionicFuncId::Pwrite64 => {
+                let fd = cpu.reg(Reg::R0);
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let count = cpu.reg(Reg::R2) as usize;
+
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let low = if sp.as_u32() != 0 { mem.read_u32(sp).unwrap_or(0) as u64 } else { 0 };
+                let high = if sp.as_u32() != 0 { mem.read_u32(sp.add(4)).unwrap_or(0) as u64 } else { 0 };
+                let offset_val = (low | (high << 32)) as i64;
+                let offset = if offset_val != 0 { offset_val } else { cpu.reg(Reg::R3) as i32 as i64 };
+
+                let mut data = Vec::with_capacity(count);
+                for i in 0..count {
+                    data.push(mem.read_u8(buf_ptr.add(i as u32))?);
+                }
+                let orig = self.vfs.seek(fd, 0, 1);
+                let _ = self.vfs.seek(fd, offset, 0);
+                let ret = match self.vfs.write(fd, &data) {
+                    Ok(n) => n as u32,
+                    Err(_) => count as u32,
+                };
+                if let Ok(pos) = orig {
+                    let _ = self.vfs.seek(fd, pos as i64, 0);
+                }
+                cpu.set_reg(Reg::R0, ret);
+            }
+            BionicFuncId::Preadv => {
+                let fd = cpu.reg(Reg::R0);
+                let iov_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let iovcnt = cpu.reg(Reg::R2) as usize;
+                let offset = cpu.reg(Reg::R3) as i32 as i64;
+
+                let orig = self.vfs.seek(fd, 0, 1);
+                let _ = self.vfs.seek(fd, offset, 0);
+                let mut total_read = 0usize;
+                for i in 0..iovcnt {
+                    let base = mem.read_u32(iov_ptr.add((i * 8) as u32)).unwrap_or(0);
+                    let len = mem.read_u32(iov_ptr.add((i * 8 + 4) as u32)).unwrap_or(0) as usize;
+                    if len == 0 || base == 0 {
+                        continue;
+                    }
+                    let mut tmp = vec![0u8; len];
+                    match self.vfs.read(fd, &mut tmp) {
+                        Ok(n) => {
+                            for idx in 0..n {
+                                mem.write_u8(GuestAddr::new(base).add(idx as u32), tmp[idx])?;
+                            }
+                            total_read += n;
+                            if n < len {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if let Ok(pos) = orig {
+                    let _ = self.vfs.seek(fd, pos as i64, 0);
+                }
+                cpu.set_reg(Reg::R0, total_read as u32);
+            }
+            BionicFuncId::Pwritev => {
+                let fd = cpu.reg(Reg::R0);
+                let iov_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let iovcnt = cpu.reg(Reg::R2) as usize;
+                let offset = cpu.reg(Reg::R3) as i32 as i64;
+
+                let orig = self.vfs.seek(fd, 0, 1);
+                let _ = self.vfs.seek(fd, offset, 0);
+                let mut total_written = 0usize;
+                for i in 0..iovcnt {
+                    let base = mem.read_u32(iov_ptr.add((i * 8) as u32)).unwrap_or(0);
+                    let len = mem.read_u32(iov_ptr.add((i * 8 + 4) as u32)).unwrap_or(0) as usize;
+                    if len == 0 || base == 0 {
+                        continue;
+                    }
+                    let mut data = Vec::with_capacity(len);
+                    for idx in 0..len {
+                        data.push(mem.read_u8(GuestAddr::new(base).add(idx as u32))?);
+                    }
+                    match self.vfs.write(fd, &data) {
+                        Ok(n) => total_written += n,
+                        Err(_) => total_written += len,
+                    }
+                }
+                if let Ok(pos) = orig {
+                    let _ = self.vfs.seek(fd, pos as i64, 0);
+                }
+                cpu.set_reg(Reg::R0, total_written as u32);
+            }
+            BionicFuncId::PosixFallocate => {
+                let fd = cpu.reg(Reg::R0);
+                let offset = cpu.reg(Reg::R1) as i32;
+                let len = cpu.reg(Reg::R2) as i32;
+
+                if offset < 0 || len <= 0 {
+                    cpu.set_reg(Reg::R0, 22); // EINVAL
+                } else if self.vfs.fstat64(fd).is_err() {
+                    cpu.set_reg(Reg::R0, 9); // EBADF
+                } else {
+                    cpu.set_reg(Reg::R0, 0); // OK
+                }
+            }
+            BionicFuncId::PosixFallocate64 => {
+                let fd = cpu.reg(Reg::R0);
+                // AAPCS: R0=fd, R1=padding, R2:R3=offset(64), [SP]:[SP+4]=len(64)
+                let off_low = cpu.reg(Reg::R2) as u64;
+                let off_high = cpu.reg(Reg::R3) as u64;
+                let offset = (off_low | (off_high << 32)) as i64;
+
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let len_low = if sp.as_u32() != 0 { mem.read_u32(sp).unwrap_or(0) as u64 } else { 0 };
+                let len_high = if sp.as_u32() != 0 { mem.read_u32(sp.add(4)).unwrap_or(0) as u64 } else { 0 };
+                let len = (len_low | (len_high << 32)) as i64;
+
+                if offset < 0 || len <= 0 {
+                    cpu.set_reg(Reg::R0, 22); // EINVAL
+                } else if self.vfs.fstat64(fd).is_err() {
+                    cpu.set_reg(Reg::R0, 9); // EBADF
+                } else {
+                    cpu.set_reg(Reg::R0, 0); // OK
+                }
+            }
+            BionicFuncId::Fallocate => {
+                let fd = cpu.reg(Reg::R0);
+                let _mode = cpu.reg(Reg::R1);
+                let offset = cpu.reg(Reg::R2) as i32;
+                let len = cpu.reg(Reg::R3) as i32;
+
+                if offset < 0 || len <= 0 || self.vfs.fstat64(fd).is_err() {
+                    cpu.set_reg(Reg::R0, u32::MAX); // -1
+                } else {
+                    cpu.set_reg(Reg::R0, 0); // OK
                 }
             }
             BionicFuncId::Memmove => {
