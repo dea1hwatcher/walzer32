@@ -562,6 +562,16 @@ pub enum BionicFuncId {
     IfNameindex     = 852,
     IfFreenameindex = 853,
 
+    // Android Native Window (ANativeWindow) NDK APIs (Stage 85)
+    ANativeWindowAcquire            = 870,
+    ANativeWindowRelease            = 871,
+    ANativeWindowGetWidth           = 872,
+    ANativeWindowGetHeight          = 873,
+    ANativeWindowGetFormat          = 874,
+    ANativeWindowSetBuffersGeometry = 875,
+    ANativeWindowLock               = 876,
+    ANativeWindowUnlockAndPost      = 877,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1123,6 +1133,14 @@ impl BionicFuncId {
             851 => Some(Self::IfIndextoname),
             852 => Some(Self::IfNameindex),
             853 => Some(Self::IfFreenameindex),
+            870 => Some(Self::ANativeWindowAcquire),
+            871 => Some(Self::ANativeWindowRelease),
+            872 => Some(Self::ANativeWindowGetWidth),
+            873 => Some(Self::ANativeWindowGetHeight),
+            874 => Some(Self::ANativeWindowGetFormat),
+            875 => Some(Self::ANativeWindowSetBuffersGeometry),
+            876 => Some(Self::ANativeWindowLock),
+            877 => Some(Self::ANativeWindowUnlockAndPost),
             _ => None,
         }
     }
@@ -1188,6 +1206,9 @@ pub struct BionicBridge {
     // POSIX Message Queues table: mqdes -> (name, queue of (message_bytes, priority))
     pub mqueue_table: HashMap<u32, (String, VecDeque<(Vec<u8>, u32)>)>,
     pub next_mqdes: u32,
+    pub surface_width: u32,
+    pub surface_height: u32,
+    pub surface_format: u32,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1248,6 +1269,9 @@ impl BionicBridge {
             thread_names: HashMap::new(),
             mqueue_table: HashMap::new(),
             next_mqdes: 400,
+            surface_width: 1920,
+            surface_height: 1080,
+            surface_format: 1,
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -1873,6 +1897,14 @@ impl BionicBridge {
             ("if_indextoname",               BionicFuncId::IfIndextoname),
             ("if_nameindex",                 BionicFuncId::IfNameindex),
             ("if_freenameindex",             BionicFuncId::IfFreenameindex),
+            ("ANativeWindow_acquire",            BionicFuncId::ANativeWindowAcquire),
+            ("ANativeWindow_release",            BionicFuncId::ANativeWindowRelease),
+            ("ANativeWindow_getWidth",           BionicFuncId::ANativeWindowGetWidth),
+            ("ANativeWindow_getHeight",          BionicFuncId::ANativeWindowGetHeight),
+            ("ANativeWindow_getFormat",          BionicFuncId::ANativeWindowGetFormat),
+            ("ANativeWindow_setBuffersGeometry", BionicFuncId::ANativeWindowSetBuffersGeometry),
+            ("ANativeWindow_lock",               BionicFuncId::ANativeWindowLock),
+            ("ANativeWindow_unlockAndPost",      BionicFuncId::ANativeWindowUnlockAndPost),
         ];
 
         for (name, id) in funcs {
@@ -2388,6 +2420,14 @@ impl BionicBridge {
             BionicFuncId::IfIndextoname,
             BionicFuncId::IfNameindex,
             BionicFuncId::IfFreenameindex,
+            BionicFuncId::ANativeWindowAcquire,
+            BionicFuncId::ANativeWindowRelease,
+            BionicFuncId::ANativeWindowGetWidth,
+            BionicFuncId::ANativeWindowGetHeight,
+            BionicFuncId::ANativeWindowGetFormat,
+            BionicFuncId::ANativeWindowSetBuffersGeometry,
+            BionicFuncId::ANativeWindowLock,
+            BionicFuncId::ANativeWindowUnlockAndPost,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -4577,6 +4617,51 @@ impl BionicBridge {
                 cpu.set_reg(Reg::R0, base.as_u32());
             }
             BionicFuncId::IfFreenameindex => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            // Android Native Window (ANativeWindow) NDK APIs (Stage 85)
+            BionicFuncId::ANativeWindowAcquire | BionicFuncId::ANativeWindowRelease => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::ANativeWindowGetWidth => {
+                cpu.set_reg(Reg::R0, self.surface_width);
+            }
+            BionicFuncId::ANativeWindowGetHeight => {
+                cpu.set_reg(Reg::R0, self.surface_height);
+            }
+            BionicFuncId::ANativeWindowGetFormat => {
+                cpu.set_reg(Reg::R0, self.surface_format);
+            }
+            BionicFuncId::ANativeWindowSetBuffersGeometry => {
+                let width = cpu.reg(Reg::R1);
+                let height = cpu.reg(Reg::R2);
+                let format = cpu.reg(Reg::R3);
+                if width > 0 {
+                    self.surface_width = width;
+                }
+                if height > 0 {
+                    self.surface_height = height;
+                }
+                if format > 0 {
+                    self.surface_format = format;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::ANativeWindowLock => {
+                let out_buffer_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if out_buffer_ptr.as_u32() != 0 {
+                    mem.write_u32(out_buffer_ptr, self.surface_width)?;
+                    mem.write_u32(out_buffer_ptr.add(4), self.surface_height)?;
+                    mem.write_u32(out_buffer_ptr.add(8), self.surface_width)?;
+                    mem.write_u32(out_buffer_ptr.add(12), self.surface_format)?;
+                    mem.write_u32(out_buffer_ptr.add(16), 0x7200_0000)?;
+                    for i in 0..6 {
+                        mem.write_u32(out_buffer_ptr.add(20 + i * 4), 0)?;
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::ANativeWindowUnlockAndPost => {
                 cpu.set_reg(Reg::R0, 0);
             }
             BionicFuncId::Memmove => {
