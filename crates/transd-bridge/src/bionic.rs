@@ -795,6 +795,34 @@ pub enum BionicFuncId {
     AHardwareBufferIsSupported              = 1226,
     AHardwareBufferLockPlanes               = 1227,
 
+    // Android Media NDK Subsystem - libmediandk (Stage 100)
+    AMediaFormatNew                         = 1240,
+    AMediaFormatDelete                      = 1241,
+    AMediaFormatSetString                   = 1242,
+    AMediaFormatGetString                   = 1243,
+    AMediaFormatSetInt32                    = 1244,
+    AMediaFormatGetInt32                    = 1245,
+    AMediaFormatSetInt64                    = 1246,
+    AMediaFormatGetInt64                    = 1247,
+    AMediaFormatSetFloat                    = 1248,
+    AMediaFormatGetFloat                    = 1249,
+    AMediaFormatToString                    = 1250,
+    AMediaCodecCreateDecoderByType          = 1251,
+    AMediaCodecCreateEncoderByType          = 1252,
+    AMediaCodecCreateCodecByName            = 1253,
+    AMediaCodecDelete                       = 1254,
+    AMediaCodecConfigure                    = 1255,
+    AMediaCodecStart                        = 1256,
+    AMediaCodecStop                         = 1257,
+    AMediaCodecFlush                        = 1258,
+    AMediaCodecDequeueInputBuffer           = 1259,
+    AMediaCodecGetInputBuffer               = 1260,
+    AMediaCodecQueueInputBuffer             = 1261,
+    AMediaCodecDequeueOutputBuffer          = 1262,
+    AMediaCodecGetOutputBuffer              = 1263,
+    AMediaCodecReleaseOutputBuffer          = 1264,
+    AMediaCodecGetOutputFormat              = 1265,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1558,9 +1586,59 @@ impl BionicFuncId {
             1225 => Some(Self::AHardwareBufferUnlock),
             1226 => Some(Self::AHardwareBufferIsSupported),
             1227 => Some(Self::AHardwareBufferLockPlanes),
+            1240 => Some(Self::AMediaFormatNew),
+            1241 => Some(Self::AMediaFormatDelete),
+            1242 => Some(Self::AMediaFormatSetString),
+            1243 => Some(Self::AMediaFormatGetString),
+            1244 => Some(Self::AMediaFormatSetInt32),
+            1245 => Some(Self::AMediaFormatGetInt32),
+            1246 => Some(Self::AMediaFormatSetInt64),
+            1247 => Some(Self::AMediaFormatGetInt64),
+            1248 => Some(Self::AMediaFormatSetFloat),
+            1249 => Some(Self::AMediaFormatGetFloat),
+            1250 => Some(Self::AMediaFormatToString),
+            1251 => Some(Self::AMediaCodecCreateDecoderByType),
+            1252 => Some(Self::AMediaCodecCreateEncoderByType),
+            1253 => Some(Self::AMediaCodecCreateCodecByName),
+            1254 => Some(Self::AMediaCodecDelete),
+            1255 => Some(Self::AMediaCodecConfigure),
+            1256 => Some(Self::AMediaCodecStart),
+            1257 => Some(Self::AMediaCodecStop),
+            1258 => Some(Self::AMediaCodecFlush),
+            1259 => Some(Self::AMediaCodecDequeueInputBuffer),
+            1260 => Some(Self::AMediaCodecGetInputBuffer),
+            1261 => Some(Self::AMediaCodecQueueInputBuffer),
+            1262 => Some(Self::AMediaCodecDequeueOutputBuffer),
+            1263 => Some(Self::AMediaCodecGetOutputBuffer),
+            1264 => Some(Self::AMediaCodecReleaseOutputBuffer),
+            1265 => Some(Self::AMediaCodecGetOutputFormat),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MediaFormatData {
+    pub strings: HashMap<String, (String, GuestAddr)>,
+    pub int32s: HashMap<String, i32>,
+    pub int64s: HashMap<String, i64>,
+    pub floats: HashMap<String, f32>,
+    pub debug_str_addr: GuestAddr,
+}
+
+#[derive(Debug, Clone)]
+pub struct MediaCodecData {
+    pub handle: u32,
+    pub name: String,
+    pub mime_type: String,
+    pub is_encoder: bool,
+    pub is_started: bool,
+    pub format_id: u32,
+    pub surface_handle: u32,
+    pub input_buffers: Vec<(GuestAddr, usize)>,
+    pub output_buffers: Vec<(GuestAddr, usize)>,
+    pub input_queue: VecDeque<usize>,
+    pub output_queue: VecDeque<(usize, usize, i64, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -1800,6 +1878,11 @@ pub struct BionicBridge {
     // Android Hardware Buffer Subsystem (Stage 99)
     pub hw_buffers: HashMap<u32, HardwareBufferData>,
     pub next_hwbuffer_id: u32,
+    // Android Media NDK Subsystem (Stage 100)
+    pub media_formats: HashMap<u32, MediaFormatData>,
+    pub next_media_format_id: u32,
+    pub media_codecs: HashMap<u32, MediaCodecData>,
+    pub next_media_codec_id: u32,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1949,6 +2032,10 @@ impl BionicBridge {
             xattrs: HashMap::new(),
             hw_buffers: HashMap::new(),
             next_hwbuffer_id: 850,
+            media_formats: HashMap::new(),
+            next_media_format_id: 650,
+            media_codecs: HashMap::new(),
+            next_media_codec_id: 880,
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -2776,6 +2863,32 @@ impl BionicBridge {
             ("AHardwareBuffer_unlock",               BionicFuncId::AHardwareBufferUnlock),
             ("AHardwareBuffer_isSupported",          BionicFuncId::AHardwareBufferIsSupported),
             ("AHardwareBuffer_lockPlanes",           BionicFuncId::AHardwareBufferLockPlanes),
+            ("AMediaFormat_new",                     BionicFuncId::AMediaFormatNew),
+            ("AMediaFormat_delete",                  BionicFuncId::AMediaFormatDelete),
+            ("AMediaFormat_setString",               BionicFuncId::AMediaFormatSetString),
+            ("AMediaFormat_getString",               BionicFuncId::AMediaFormatGetString),
+            ("AMediaFormat_setInt32",                BionicFuncId::AMediaFormatSetInt32),
+            ("AMediaFormat_getInt32",                BionicFuncId::AMediaFormatGetInt32),
+            ("AMediaFormat_setInt64",                BionicFuncId::AMediaFormatSetInt64),
+            ("AMediaFormat_getInt64",                BionicFuncId::AMediaFormatGetInt64),
+            ("AMediaFormat_setFloat",                BionicFuncId::AMediaFormatSetFloat),
+            ("AMediaFormat_getFloat",                BionicFuncId::AMediaFormatGetFloat),
+            ("AMediaFormat_toString",                BionicFuncId::AMediaFormatToString),
+            ("AMediaCodec_createDecoderByType",      BionicFuncId::AMediaCodecCreateDecoderByType),
+            ("AMediaCodec_createEncoderByType",      BionicFuncId::AMediaCodecCreateEncoderByType),
+            ("AMediaCodec_createCodecByName",        BionicFuncId::AMediaCodecCreateCodecByName),
+            ("AMediaCodec_delete",                   BionicFuncId::AMediaCodecDelete),
+            ("AMediaCodec_configure",                BionicFuncId::AMediaCodecConfigure),
+            ("AMediaCodec_start",                    BionicFuncId::AMediaCodecStart),
+            ("AMediaCodec_stop",                     BionicFuncId::AMediaCodecStop),
+            ("AMediaCodec_flush",                    BionicFuncId::AMediaCodecFlush),
+            ("AMediaCodec_dequeueInputBuffer",       BionicFuncId::AMediaCodecDequeueInputBuffer),
+            ("AMediaCodec_getInputBuffer",           BionicFuncId::AMediaCodecGetInputBuffer),
+            ("AMediaCodec_queueInputBuffer",         BionicFuncId::AMediaCodecQueueInputBuffer),
+            ("AMediaCodec_dequeueOutputBuffer",      BionicFuncId::AMediaCodecDequeueOutputBuffer),
+            ("AMediaCodec_getOutputBuffer",          BionicFuncId::AMediaCodecGetOutputBuffer),
+            ("AMediaCodec_releaseOutputBuffer",      BionicFuncId::AMediaCodecReleaseOutputBuffer),
+            ("AMediaCodec_getOutputFormat",          BionicFuncId::AMediaCodecGetOutputFormat),
         ];
 
         for (name, id) in funcs {
@@ -3493,6 +3606,32 @@ impl BionicBridge {
             BionicFuncId::AHardwareBufferUnlock,
             BionicFuncId::AHardwareBufferIsSupported,
             BionicFuncId::AHardwareBufferLockPlanes,
+            BionicFuncId::AMediaFormatNew,
+            BionicFuncId::AMediaFormatDelete,
+            BionicFuncId::AMediaFormatSetString,
+            BionicFuncId::AMediaFormatGetString,
+            BionicFuncId::AMediaFormatSetInt32,
+            BionicFuncId::AMediaFormatGetInt32,
+            BionicFuncId::AMediaFormatSetInt64,
+            BionicFuncId::AMediaFormatGetInt64,
+            BionicFuncId::AMediaFormatSetFloat,
+            BionicFuncId::AMediaFormatGetFloat,
+            BionicFuncId::AMediaFormatToString,
+            BionicFuncId::AMediaCodecCreateDecoderByType,
+            BionicFuncId::AMediaCodecCreateEncoderByType,
+            BionicFuncId::AMediaCodecCreateCodecByName,
+            BionicFuncId::AMediaCodecDelete,
+            BionicFuncId::AMediaCodecConfigure,
+            BionicFuncId::AMediaCodecStart,
+            BionicFuncId::AMediaCodecStop,
+            BionicFuncId::AMediaCodecFlush,
+            BionicFuncId::AMediaCodecDequeueInputBuffer,
+            BionicFuncId::AMediaCodecGetInputBuffer,
+            BionicFuncId::AMediaCodecQueueInputBuffer,
+            BionicFuncId::AMediaCodecDequeueOutputBuffer,
+            BionicFuncId::AMediaCodecGetOutputBuffer,
+            BionicFuncId::AMediaCodecReleaseOutputBuffer,
+            BionicFuncId::AMediaCodecGetOutputFormat,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -8844,6 +8983,439 @@ impl BionicBridge {
                     cpu.set_reg(Reg::R0, 0); // OK
                 } else {
                     cpu.set_reg(Reg::R0, (-22i32) as u32);
+                }
+            }
+
+            // Android Media NDK Subsystem (Stage 100)
+            BionicFuncId::AMediaFormatNew => {
+                let id = self.next_media_format_id;
+                self.next_media_format_id += 1;
+                self.media_formats.insert(id, MediaFormatData::default());
+                cpu.set_reg(Reg::R0, id);
+            }
+            BionicFuncId::AMediaFormatDelete => {
+                let id = cpu.reg(Reg::R0);
+                self.media_formats.remove(&id);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AMediaFormatSetString => {
+                let id = cpu.reg(Reg::R0);
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let val_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                if id != 0 && name_ptr.as_u32() != 0 && val_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    let val = Self::read_c_string(mem, val_ptr)?;
+                    let str_addr = self.heap_alloc(val.len() as u32 + 1);
+                    let mut b = val.as_bytes().to_vec();
+                    b.push(0);
+                    mem.write_bytes(str_addr, &b)?;
+
+                    if let Some(fmt) = self.media_formats.get_mut(&id) {
+                        fmt.strings.insert(name, (val, str_addr));
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AMediaFormatGetString => {
+                let id = cpu.reg(Reg::R0);
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let out_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                let mut found = false;
+                if id != 0 && name_ptr.as_u32() != 0 && out_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    if let Some(fmt) = self.media_formats.get(&id) {
+                        if let Some((_, str_addr)) = fmt.strings.get(&name) {
+                            mem.write_u32(out_ptr, str_addr.as_u32())?;
+                            found = true;
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, if found { 1 } else { 0 });
+            }
+            BionicFuncId::AMediaFormatSetInt32 => {
+                let id = cpu.reg(Reg::R0);
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let val = cpu.reg(Reg::R2) as i32;
+
+                if id != 0 && name_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    if let Some(fmt) = self.media_formats.get_mut(&id) {
+                        fmt.int32s.insert(name, val);
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AMediaFormatGetInt32 => {
+                let id = cpu.reg(Reg::R0);
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let out_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                let mut found = false;
+                if id != 0 && name_ptr.as_u32() != 0 && out_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    if let Some(fmt) = self.media_formats.get(&id) {
+                        if let Some(&val) = fmt.int32s.get(&name) {
+                            mem.write_u32(out_ptr, val as u32)?;
+                            found = true;
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, if found { 1 } else { 0 });
+            }
+            BionicFuncId::AMediaFormatSetInt64 => {
+                let id = cpu.reg(Reg::R0);
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                // 64-bit value in R2:R3 or stack
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let val = if sp.as_u32() != 0 {
+                    let low = mem.read_u32(sp).unwrap_or(0) as u64;
+                    let high = mem.read_u32(sp.add(4)).unwrap_or(0) as u64;
+                    let v = (low | (high << 32)) as i64;
+                    if v != 0 { v } else { ((cpu.reg(Reg::R2) as u64) | ((cpu.reg(Reg::R3) as u64) << 32)) as i64 }
+                } else {
+                    ((cpu.reg(Reg::R2) as u64) | ((cpu.reg(Reg::R3) as u64) << 32)) as i64
+                };
+
+                if id != 0 && name_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    if let Some(fmt) = self.media_formats.get_mut(&id) {
+                        fmt.int64s.insert(name, val);
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AMediaFormatGetInt64 => {
+                let id = cpu.reg(Reg::R0);
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let out_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                let mut found = false;
+                if id != 0 && name_ptr.as_u32() != 0 && out_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    if let Some(fmt) = self.media_formats.get(&id) {
+                        if let Some(&val) = fmt.int64s.get(&name) {
+                            mem.write_u32(out_ptr, val as u32)?;
+                            mem.write_u32(out_ptr.add(4), (val >> 32) as u32)?;
+                            found = true;
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, if found { 1 } else { 0 });
+            }
+            BionicFuncId::AMediaFormatSetFloat => {
+                let id = cpu.reg(Reg::R0);
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let val = cpu.s_reg(0);
+
+                if id != 0 && name_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    if let Some(fmt) = self.media_formats.get_mut(&id) {
+                        fmt.floats.insert(name, val);
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AMediaFormatGetFloat => {
+                let id = cpu.reg(Reg::R0);
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let out_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                let mut found = false;
+                if id != 0 && name_ptr.as_u32() != 0 && out_ptr.as_u32() != 0 {
+                    let name = Self::read_c_string(mem, name_ptr)?;
+                    if let Some(fmt) = self.media_formats.get(&id) {
+                        if let Some(&val) = fmt.floats.get(&name) {
+                            mem.write_u32(out_ptr, val.to_bits())?;
+                            found = true;
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, if found { 1 } else { 0 });
+            }
+            BionicFuncId::AMediaFormatToString => {
+                let id = cpu.reg(Reg::R0);
+                let repr_opt = self.media_formats.get(&id).map(|fmt| {
+                    (fmt.debug_str_addr, format!("AMediaFormat{{strings={:?}, int32s={:?}}}", fmt.strings.keys(), fmt.int32s))
+                });
+                if let Some((curr_addr, repr)) = repr_opt {
+                    let addr = if curr_addr.as_u32() != 0 {
+                        curr_addr
+                    } else {
+                        let new_addr = self.heap_alloc(repr.len() as u32 + 1);
+                        let mut b = repr.into_bytes();
+                        b.push(0);
+                        let _ = mem.write_bytes(new_addr, &b);
+                        if let Some(fmt) = self.media_formats.get_mut(&id) {
+                            fmt.debug_str_addr = new_addr;
+                        }
+                        new_addr
+                    };
+                    cpu.set_reg(Reg::R0, addr.as_u32());
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::AMediaCodecCreateDecoderByType => {
+                let mime_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let mime = if mime_ptr.as_u32() != 0 {
+                    Self::read_c_string(mem, mime_ptr).unwrap_or_else(|_| "video/avc".to_string())
+                } else {
+                    "video/avc".to_string()
+                };
+
+                let handle = self.next_media_codec_id;
+                self.next_media_codec_id += 1;
+                self.media_codecs.insert(handle, MediaCodecData {
+                    handle,
+                    name: format!("transd.decoder.{}", mime),
+                    mime_type: mime,
+                    is_encoder: false,
+                    is_started: false,
+                    format_id: 0,
+                    surface_handle: 0,
+                    input_buffers: Vec::new(),
+                    output_buffers: Vec::new(),
+                    input_queue: VecDeque::new(),
+                    output_queue: VecDeque::new(),
+                });
+                cpu.set_reg(Reg::R0, handle);
+            }
+            BionicFuncId::AMediaCodecCreateEncoderByType => {
+                let mime_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let mime = if mime_ptr.as_u32() != 0 {
+                    Self::read_c_string(mem, mime_ptr).unwrap_or_else(|_| "video/avc".to_string())
+                } else {
+                    "video/avc".to_string()
+                };
+
+                let handle = self.next_media_codec_id;
+                self.next_media_codec_id += 1;
+                self.media_codecs.insert(handle, MediaCodecData {
+                    handle,
+                    name: format!("transd.encoder.{}", mime),
+                    mime_type: mime,
+                    is_encoder: true,
+                    is_started: false,
+                    format_id: 0,
+                    surface_handle: 0,
+                    input_buffers: Vec::new(),
+                    output_buffers: Vec::new(),
+                    input_queue: VecDeque::new(),
+                    output_queue: VecDeque::new(),
+                });
+                cpu.set_reg(Reg::R0, handle);
+            }
+            BionicFuncId::AMediaCodecCreateCodecByName => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let name = if name_ptr.as_u32() != 0 {
+                    Self::read_c_string(mem, name_ptr).unwrap_or_else(|_| "c2.android.avc.decoder".to_string())
+                } else {
+                    "c2.android.avc.decoder".to_string()
+                };
+
+                let handle = self.next_media_codec_id;
+                self.next_media_codec_id += 1;
+                self.media_codecs.insert(handle, MediaCodecData {
+                    handle,
+                    name,
+                    mime_type: "video/avc".to_string(),
+                    is_encoder: false,
+                    is_started: false,
+                    format_id: 0,
+                    surface_handle: 0,
+                    input_buffers: Vec::new(),
+                    output_buffers: Vec::new(),
+                    input_queue: VecDeque::new(),
+                    output_queue: VecDeque::new(),
+                });
+                cpu.set_reg(Reg::R0, handle);
+            }
+            BionicFuncId::AMediaCodecDelete => {
+                let handle = cpu.reg(Reg::R0);
+                self.media_codecs.remove(&handle);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AMediaCodecConfigure => {
+                let handle = cpu.reg(Reg::R0);
+                let fmt_id = cpu.reg(Reg::R1);
+                let surface = cpu.reg(Reg::R2);
+
+                if self.media_codecs.contains_key(&handle) {
+                    let mut in_bufs = Vec::with_capacity(4);
+                    let mut out_bufs = Vec::with_capacity(4);
+                    for _ in 0..4 {
+                        in_bufs.push((self.heap_alloc(65536), 65536));
+                        out_bufs.push((self.heap_alloc(65536), 65536));
+                    }
+
+                    if let Some(codec) = self.media_codecs.get_mut(&handle) {
+                        codec.format_id = fmt_id;
+                        codec.surface_handle = surface;
+                        codec.input_buffers = in_bufs;
+                        codec.output_buffers = out_bufs;
+                        codec.input_queue.clear();
+                        codec.output_queue.clear();
+                        for i in 0..4 {
+                            codec.input_queue.push_back(i);
+                        }
+                    }
+                    cpu.set_reg(Reg::R0, 0); // AMEDIA_OK
+                } else {
+                    cpu.set_reg(Reg::R0, (-10003i32) as u32); // AMEDIA_ERROR_INVALID_OBJECT
+                }
+            }
+            BionicFuncId::AMediaCodecStart => {
+                let handle = cpu.reg(Reg::R0);
+                if let Some(codec) = self.media_codecs.get_mut(&handle) {
+                    codec.is_started = true;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, (-10003i32) as u32);
+                }
+            }
+            BionicFuncId::AMediaCodecStop => {
+                let handle = cpu.reg(Reg::R0);
+                if let Some(codec) = self.media_codecs.get_mut(&handle) {
+                    codec.is_started = false;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, (-10003i32) as u32);
+                }
+            }
+            BionicFuncId::AMediaCodecFlush => {
+                let handle = cpu.reg(Reg::R0);
+                if let Some(codec) = self.media_codecs.get_mut(&handle) {
+                    codec.output_queue.clear();
+                    codec.input_queue.clear();
+                    for i in 0..codec.input_buffers.len() {
+                        codec.input_queue.push_back(i);
+                    }
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, (-10003i32) as u32);
+                }
+            }
+            BionicFuncId::AMediaCodecDequeueInputBuffer => {
+                let handle = cpu.reg(Reg::R0);
+                if let Some(codec) = self.media_codecs.get_mut(&handle) {
+                    if let Some(idx) = codec.input_queue.pop_front() {
+                        cpu.set_reg(Reg::R0, idx as u32);
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX); // -1 (INFO_TRY_AGAIN_LATER)
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+            BionicFuncId::AMediaCodecGetInputBuffer => {
+                let handle = cpu.reg(Reg::R0);
+                let idx = cpu.reg(Reg::R1) as usize;
+                let out_size_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                if let Some(codec) = self.media_codecs.get(&handle) {
+                    if idx < codec.input_buffers.len() {
+                        let (addr, size) = codec.input_buffers[idx];
+                        if out_size_ptr.as_u32() != 0 {
+                            mem.write_u32(out_size_ptr, size as u32)?;
+                        }
+                        cpu.set_reg(Reg::R0, addr.as_u32());
+                    } else {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::AMediaCodecQueueInputBuffer => {
+                let handle = cpu.reg(Reg::R0);
+                let idx = cpu.reg(Reg::R1) as usize;
+                let _offset = cpu.reg(Reg::R2) as usize;
+                let size = cpu.reg(Reg::R3) as usize;
+
+                let sp = GuestAddr::new(cpu.reg(Reg::SP));
+                let pts = if sp.as_u32() != 0 {
+                    let low = mem.read_u32(sp).unwrap_or(0) as u64;
+                    let high = mem.read_u32(sp.add(4)).unwrap_or(0) as u64;
+                    (low | (high << 32)) as i64
+                } else {
+                    0
+                };
+                let flags = if sp.as_u32() != 0 {
+                    mem.read_u32(sp.add(8)).unwrap_or(0)
+                } else {
+                    0
+                };
+
+                if let Some(codec) = self.media_codecs.get_mut(&handle) {
+                    if idx < codec.input_buffers.len() {
+                        // Produce matching output buffer
+                        let out_idx = idx % codec.output_buffers.len();
+                        codec.output_queue.push_back((out_idx, size, pts, flags));
+                        codec.input_queue.push_back(idx);
+                        cpu.set_reg(Reg::R0, 0); // AMEDIA_OK
+                    } else {
+                        cpu.set_reg(Reg::R0, (-10004i32) as u32);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, (-10003i32) as u32);
+                }
+            }
+            BionicFuncId::AMediaCodecDequeueOutputBuffer => {
+                let handle = cpu.reg(Reg::R0);
+                let info_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+
+                if let Some(codec) = self.media_codecs.get_mut(&handle) {
+                    if let Some((idx, size, pts, flags)) = codec.output_queue.pop_front() {
+                        if info_ptr.as_u32() != 0 {
+                            mem.write_u32(info_ptr, 0)?; // offset
+                            mem.write_u32(info_ptr.add(4), size as u32)?; // size
+                            mem.write_u32(info_ptr.add(8), pts as u32)?; // time low
+                            mem.write_u32(info_ptr.add(12), (pts >> 32) as u32)?; // time high
+                            mem.write_u32(info_ptr.add(16), flags)?; // flags
+                        }
+                        cpu.set_reg(Reg::R0, idx as u32);
+                    } else {
+                        cpu.set_reg(Reg::R0, u32::MAX); // -1 (TRY_AGAIN_LATER)
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, u32::MAX);
+                }
+            }
+            BionicFuncId::AMediaCodecGetOutputBuffer => {
+                let handle = cpu.reg(Reg::R0);
+                let idx = cpu.reg(Reg::R1) as usize;
+                let out_size_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+
+                if let Some(codec) = self.media_codecs.get(&handle) {
+                    if idx < codec.output_buffers.len() {
+                        let (addr, size) = codec.output_buffers[idx];
+                        if out_size_ptr.as_u32() != 0 {
+                            mem.write_u32(out_size_ptr, size as u32)?;
+                        }
+                        cpu.set_reg(Reg::R0, addr.as_u32());
+                    } else {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
+                }
+            }
+            BionicFuncId::AMediaCodecReleaseOutputBuffer => {
+                let handle = cpu.reg(Reg::R0);
+                if self.media_codecs.contains_key(&handle) {
+                    cpu.set_reg(Reg::R0, 0); // AMEDIA_OK
+                } else {
+                    cpu.set_reg(Reg::R0, (-10003i32) as u32);
+                }
+            }
+            BionicFuncId::AMediaCodecGetOutputFormat => {
+                let handle = cpu.reg(Reg::R0);
+                if let Some(codec) = self.media_codecs.get(&handle) {
+                    cpu.set_reg(Reg::R0, codec.format_id);
+                } else {
+                    cpu.set_reg(Reg::R0, 0);
                 }
             }
             BionicFuncId::Memmove => {
