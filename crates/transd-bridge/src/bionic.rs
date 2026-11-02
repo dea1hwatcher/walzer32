@@ -517,6 +517,17 @@ pub enum BionicFuncId {
     SchedGetPriorityMax = 758,
     SchedRrGetInterval  = 759,
 
+    // POSIX Shared Memory, Anonymous Files & Android Ashmem (Stage 80)
+    ShmOpen             = 770,
+    ShmUnlink           = 771,
+    MemfdCreate         = 772,
+    AshmemCreateRegion  = 773,
+    AshmemSetProtRegion = 774,
+    AshmemGetProtRegion = 775,
+    AshmemGetSizeRegion = 776,
+    AshmemPinRegion     = 777,
+    AshmemUnpinRegion   = 778,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1043,6 +1054,15 @@ impl BionicFuncId {
             757 => Some(Self::SchedGetPriorityMin),
             758 => Some(Self::SchedGetPriorityMax),
             759 => Some(Self::SchedRrGetInterval),
+            770 => Some(Self::ShmOpen),
+            771 => Some(Self::ShmUnlink),
+            772 => Some(Self::MemfdCreate),
+            773 => Some(Self::AshmemCreateRegion),
+            774 => Some(Self::AshmemSetProtRegion),
+            775 => Some(Self::AshmemGetProtRegion),
+            776 => Some(Self::AshmemGetSizeRegion),
+            777 => Some(Self::AshmemPinRegion),
+            778 => Some(Self::AshmemUnpinRegion),
             _ => None,
         }
     }
@@ -1751,6 +1771,15 @@ impl BionicBridge {
             ("sched_get_priority_min",      BionicFuncId::SchedGetPriorityMin),
             ("sched_get_priority_max",      BionicFuncId::SchedGetPriorityMax),
             ("sched_rr_get_interval",       BionicFuncId::SchedRrGetInterval),
+            ("shm_open",                    BionicFuncId::ShmOpen),
+            ("shm_unlink",                  BionicFuncId::ShmUnlink),
+            ("memfd_create",                BionicFuncId::MemfdCreate),
+            ("ashmem_create_region",        BionicFuncId::AshmemCreateRegion),
+            ("ashmem_set_prot_region",      BionicFuncId::AshmemSetProtRegion),
+            ("ashmem_get_prot_region",      BionicFuncId::AshmemGetProtRegion),
+            ("ashmem_get_size_region",      BionicFuncId::AshmemGetSizeRegion),
+            ("ashmem_pin_region",           BionicFuncId::AshmemPinRegion),
+            ("ashmem_unpin_region",         BionicFuncId::AshmemUnpinRegion),
         ];
 
         for (name, id) in funcs {
@@ -2231,6 +2260,15 @@ impl BionicBridge {
             BionicFuncId::SchedGetPriorityMin,
             BionicFuncId::SchedGetPriorityMax,
             BionicFuncId::SchedRrGetInterval,
+            BionicFuncId::ShmOpen,
+            BionicFuncId::ShmUnlink,
+            BionicFuncId::MemfdCreate,
+            BionicFuncId::AshmemCreateRegion,
+            BionicFuncId::AshmemSetProtRegion,
+            BionicFuncId::AshmemGetProtRegion,
+            BionicFuncId::AshmemGetSizeRegion,
+            BionicFuncId::AshmemPinRegion,
+            BionicFuncId::AshmemUnpinRegion,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -4100,6 +4138,102 @@ impl BionicBridge {
                 }
                 cpu.set_reg(Reg::R0, 0);
             }
+            // POSIX Shared Memory, Anonymous Files & Android Ashmem (Stage 80)
+            BionicFuncId::ShmOpen => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let oflag = cpu.reg(Reg::R1);
+                let _mode = cpu.reg(Reg::R2);
+                let name = if name_ptr.as_u32() != 0 {
+                    Self::read_c_string(mem, name_ptr).unwrap_or_else(|_| "shm".to_string())
+                } else {
+                    "shm".to_string()
+                };
+                let fd = match self.vfs.open("/dev/ashmem", oflag) {
+                    Ok(fd) => {
+                        if let Some(region) = self.vfs.ashmem_regions.get_mut(&fd) {
+                            region.name = format!("/dev/shm/{}", name.trim_start_matches('/'));
+                        }
+                        fd
+                    }
+                    Err(_) => 0xFFFF_FFFF,
+                };
+                cpu.set_reg(Reg::R0, fd);
+            }
+            BionicFuncId::ShmUnlink => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::MemfdCreate => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let _flags = cpu.reg(Reg::R1);
+                let name = if name_ptr.as_u32() != 0 {
+                    Self::read_c_string(mem, name_ptr).unwrap_or_else(|_| "memfd".to_string())
+                } else {
+                    "memfd".to_string()
+                };
+                let fd = match self.vfs.open("/dev/ashmem", 2) {
+                    Ok(fd) => {
+                        if let Some(region) = self.vfs.ashmem_regions.get_mut(&fd) {
+                            region.name = name;
+                        }
+                        fd
+                    }
+                    Err(_) => 0xFFFF_FFFF,
+                };
+                cpu.set_reg(Reg::R0, fd);
+            }
+            BionicFuncId::AshmemCreateRegion => {
+                let name_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let size = cpu.reg(Reg::R1) as usize;
+                let name = if name_ptr.as_u32() != 0 {
+                    Self::read_c_string(mem, name_ptr).unwrap_or_else(|_| "ashmem".to_string())
+                } else {
+                    "ashmem".to_string()
+                };
+                let fd = match self.vfs.open("/dev/ashmem", 2) {
+                    Ok(fd) => {
+                        if let Some(region) = self.vfs.ashmem_regions.get_mut(&fd) {
+                            region.name = name;
+                            region.size = size;
+                            if let Ok(mut lock) = region.data.lock() {
+                                lock.resize(size, 0);
+                            }
+                            region.is_initialized = true;
+                        }
+                        fd
+                    }
+                    Err(_) => 0xFFFF_FFFF,
+                };
+                cpu.set_reg(Reg::R0, fd);
+            }
+            BionicFuncId::AshmemSetProtRegion => {
+                let fd = cpu.reg(Reg::R0);
+                let prot = cpu.reg(Reg::R1);
+                if let Some(region) = self.vfs.ashmem_regions.get_mut(&fd) {
+                    region.prot_mask = prot;
+                    cpu.set_reg(Reg::R0, 0);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::AshmemGetProtRegion => {
+                let fd = cpu.reg(Reg::R0);
+                if let Some(region) = self.vfs.ashmem_regions.get(&fd) {
+                    cpu.set_reg(Reg::R0, region.prot_mask);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::AshmemGetSizeRegion => {
+                let fd = cpu.reg(Reg::R0);
+                if let Some(region) = self.vfs.ashmem_regions.get(&fd) {
+                    cpu.set_reg(Reg::R0, region.size as u32);
+                } else {
+                    cpu.set_reg(Reg::R0, 0xFFFF_FFFF);
+                }
+            }
+            BionicFuncId::AshmemPinRegion | BionicFuncId::AshmemUnpinRegion => {
+                cpu.set_reg(Reg::R0, 0);
+            }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
                 let src = GuestAddr::new(cpu.reg(Reg::R1));
@@ -5653,7 +5787,15 @@ impl BionicBridge {
             }
 
             BionicFuncId::Ftruncate | BionicFuncId::Ftruncate64 => {
-                // ftruncate(fd, length) -> 0 (stub)
+                let fd = cpu.reg(Reg::R0);
+                let len = cpu.reg(Reg::R1) as usize;
+                if let Some(region) = self.vfs.ashmem_regions.get_mut(&fd) {
+                    region.size = len;
+                    if let Ok(mut lock) = region.data.lock() {
+                        lock.resize(len, 0);
+                    }
+                    region.is_initialized = true;
+                }
                 cpu.set_reg(Reg::R0, 0);
             }
             // ── Stage 62: Extended libm (Single-precision f32) ───────────
