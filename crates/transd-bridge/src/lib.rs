@@ -3,6 +3,7 @@ pub mod audio;
 pub mod audio_resample;
 pub mod audio_ring;
 pub mod bionic;
+pub mod bionic_regex;
 pub mod gles;
 pub mod hardware_buffer;
 pub mod host;

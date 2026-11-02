@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use transd_core::{GuestAddr, Memory, MemoryError, Reg};
 use transd_elf::{DsoRegistry, SymbolResolver};
+use crate::bionic_regex::{count_capture_groups, fnmatch_internal, regex_match_internal, CompiledRegex};
 pub use transd_elf::{RTLD_DEFAULT, RTLD_NEXT};
 
 pub const BIONIC_SVC_MAGIC: u32 = 0xB10000;
@@ -610,6 +611,17 @@ pub enum BionicFuncId {
     AConfigurationSetLanguage       = 924,
     AConfigurationSetCountry        = 925,
 
+    // POSIX Regular Expressions & Pattern Matching APIs (Stage 87)
+    Regcomp                         = 940,
+    Regexec                         = 941,
+    Regerror                        = 942,
+    Regfree                         = 943,
+    Fnmatch                         = 944,
+    Glob                            = 945,
+    Globfree                        = 946,
+    Wordexp                         = 947,
+    Wordfree                        = 948,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1215,6 +1227,15 @@ impl BionicFuncId {
             923 => Some(Self::AConfigurationGetCountry),
             924 => Some(Self::AConfigurationSetLanguage),
             925 => Some(Self::AConfigurationSetCountry),
+            940 => Some(Self::Regcomp),
+            941 => Some(Self::Regexec),
+            942 => Some(Self::Regerror),
+            943 => Some(Self::Regfree),
+            944 => Some(Self::Fnmatch),
+            945 => Some(Self::Glob),
+            946 => Some(Self::Globfree),
+            947 => Some(Self::Wordexp),
+            948 => Some(Self::Wordfree),
             _ => None,
         }
     }
@@ -1318,6 +1339,9 @@ pub struct BionicBridge {
     pub asset_store: HashMap<String, Vec<u8>>,
     pub configurations: HashMap<u32, AndroidConfiguration>,
     pub next_config_id: u32,
+    // POSIX Regular Expressions (Stage 87)
+    pub regex_table: HashMap<u32, CompiledRegex>,
+    pub next_regex_handle: u32,
 
     pub dso_registry: DsoRegistry,
     pub last_dlerror: Option<String>,
@@ -1388,6 +1412,8 @@ impl BionicBridge {
             asset_store: HashMap::new(),
             configurations: HashMap::new(),
             next_config_id: 700,
+            regex_table: HashMap::new(),
+            next_regex_handle: 800,
             dso_registry: DsoRegistry::new(),
             last_dlerror: None,
             dlerror_addr: stub_base.add(0x800),
@@ -2057,6 +2083,15 @@ impl BionicBridge {
             ("AConfiguration_getCountry",        BionicFuncId::AConfigurationGetCountry),
             ("AConfiguration_setLanguage",       BionicFuncId::AConfigurationSetLanguage),
             ("AConfiguration_setCountry",        BionicFuncId::AConfigurationSetCountry),
+            ("regcomp",                          BionicFuncId::Regcomp),
+            ("regexec",                          BionicFuncId::Regexec),
+            ("regerror",                         BionicFuncId::Regerror),
+            ("regfree",                          BionicFuncId::Regfree),
+            ("fnmatch",                          BionicFuncId::Fnmatch),
+            ("glob",                             BionicFuncId::Glob),
+            ("globfree",                         BionicFuncId::Globfree),
+            ("wordexp",                          BionicFuncId::Wordexp),
+            ("wordfree",                         BionicFuncId::Wordfree),
         ];
 
         for (name, id) in funcs {
@@ -2616,6 +2651,15 @@ impl BionicBridge {
             BionicFuncId::AConfigurationGetCountry,
             BionicFuncId::AConfigurationSetLanguage,
             BionicFuncId::AConfigurationSetCountry,
+            BionicFuncId::Regcomp,
+            BionicFuncId::Regexec,
+            BionicFuncId::Regerror,
+            BionicFuncId::Regfree,
+            BionicFuncId::Fnmatch,
+            BionicFuncId::Glob,
+            BionicFuncId::Globfree,
+            BionicFuncId::Wordexp,
+            BionicFuncId::Wordfree,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -5251,6 +5295,227 @@ impl BionicBridge {
                             cfg.country = [buf[0], buf[1], 0, 0];
                         }
                     }
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            // POSIX Regular Expressions & Pattern Matching APIs (Stage 87)
+            BionicFuncId::Regcomp => {
+                let preg_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let regex_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let cflags = cpu.reg(Reg::R2) as i32;
+                if preg_ptr.as_u32() != 0 && regex_ptr.as_u32() != 0 {
+                    if let Ok(pattern) = Self::read_c_string(mem, regex_ptr) {
+                        let sub_count = count_capture_groups(&pattern);
+                        let handle = self.next_regex_handle;
+                        self.next_regex_handle += 1;
+                        self.regex_table.insert(handle, CompiledRegex { pattern, cflags, sub_count });
+
+                        mem.write_u32(preg_ptr, 0x0283)?; // re_magic
+                        mem.write_u32(preg_ptr.add(4), sub_count as u32)?; // re_nsub
+                        mem.write_u32(preg_ptr.add(8), 0)?; // re_endp
+                        mem.write_u32(preg_ptr.add(12), handle)?; // re_g
+
+                        cpu.set_reg(Reg::R0, 0); // REG_OK
+                    } else {
+                        cpu.set_reg(Reg::R0, 2); // REG_BADPAT
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 2);
+                }
+            }
+            BionicFuncId::Regexec => {
+                let preg_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let string_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let nmatch = cpu.reg(Reg::R2) as usize;
+                let pmatch_ptr = GuestAddr::new(cpu.reg(Reg::R3));
+
+                let mut res = 1; // REG_NOMATCH
+                if preg_ptr.as_u32() != 0 && string_ptr.as_u32() != 0 {
+                    let handle = mem.read_u32(preg_ptr.add(12)).unwrap_or(0);
+                    if let Some(compiled) = self.regex_table.get(&handle) {
+                        if let Ok(text) = Self::read_c_string(mem, string_ptr) {
+                            if let Some(caps) = regex_match_internal(&compiled.pattern, &text, compiled.cflags) {
+                                res = 0; // REG_OK
+                                if pmatch_ptr.as_u32() != 0 && nmatch > 0 {
+                                    for i in 0..nmatch {
+                                        let match_addr = pmatch_ptr.add((i * 8) as u32);
+                                        if let Some(&(so, eo)) = caps.get(&i) {
+                                            mem.write_u32(match_addr, so as u32)?;
+                                            mem.write_u32(match_addr.add(4), eo as u32)?;
+                                        } else {
+                                            mem.write_u32(match_addr, u32::MAX)?;
+                                            mem.write_u32(match_addr.add(4), u32::MAX)?;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, res);
+            }
+            BionicFuncId::Regerror => {
+                let errcode = cpu.reg(Reg::R0);
+                let errbuf_ptr = GuestAddr::new(cpu.reg(Reg::R2));
+                let errbuf_size = cpu.reg(Reg::R3) as usize;
+
+                let msg = match errcode {
+                    0 => "Success\0",
+                    1 => "No match\0",
+                    _ => "Regex error\0",
+                };
+                let bytes = msg.as_bytes();
+                if errbuf_ptr.as_u32() != 0 && errbuf_size > 0 {
+                    let to_copy = errbuf_size.min(bytes.len());
+                    mem.write_bytes(errbuf_ptr, &bytes[..to_copy])?;
+                    if to_copy > 0 {
+                        mem.write_u8(errbuf_ptr.add((to_copy - 1) as u32), 0)?;
+                    }
+                }
+                cpu.set_reg(Reg::R0, bytes.len() as u32);
+            }
+            BionicFuncId::Regfree => {
+                let preg_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if preg_ptr.as_u32() != 0 {
+                    if let Ok(handle) = mem.read_u32(preg_ptr.add(12)) {
+                        self.regex_table.remove(&handle);
+                        let _ = mem.write_u32(preg_ptr.add(12), 0);
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Fnmatch => {
+                let pat_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let str_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                let flags = cpu.reg(Reg::R2) as i32;
+
+                let mut matched = false;
+                if pat_ptr.as_u32() != 0 && str_ptr.as_u32() != 0 {
+                    if let (Ok(pat), Ok(s)) = (Self::read_c_string(mem, pat_ptr), Self::read_c_string(mem, str_ptr)) {
+                        matched = fnmatch_internal(&pat, &s, flags);
+                    }
+                }
+                cpu.set_reg(Reg::R0, if matched { 0 } else { 1 });
+            }
+            BionicFuncId::Glob => {
+                let pat_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let flags = cpu.reg(Reg::R1);
+                let pglob_ptr = GuestAddr::new(cpu.reg(Reg::R3));
+
+                let mut ret = 3; // GLOB_NOMATCH
+                if pat_ptr.as_u32() != 0 && pglob_ptr.as_u32() != 0 {
+                    if let Ok(pattern) = Self::read_c_string(mem, pat_ptr) {
+                        let mut matches = Vec::new();
+                        for path in self.vfs.virtual_files.keys() {
+                            if fnmatch_internal(&pattern, path, 2) {
+                                matches.push(path.clone());
+                            }
+                        }
+                        for path in self.asset_store.keys() {
+                            if fnmatch_internal(&pattern, path, 2) && !matches.contains(path) {
+                                matches.push(path.clone());
+                            }
+                        }
+
+                        if !matches.is_empty() {
+                            if (flags & 4) == 0 { // GLOB_NOSORT = 4
+                                matches.sort();
+                            }
+
+                            let mut ptrs = Vec::new();
+                            for m in &matches {
+                                let bytes = m.as_bytes();
+                                let align_len = ((bytes.len() as u32) + 1 + 3) & !3;
+                                if self.heap_current.add(align_len) <= self.heap_limit {
+                                    let str_addr = self.heap_current;
+                                    self.heap_current = self.heap_current.add(align_len);
+                                    mem.write_bytes(str_addr, bytes)?;
+                                    mem.write_u8(str_addr.add(bytes.len() as u32), 0)?;
+                                    ptrs.push(str_addr.as_u32());
+                                }
+                            }
+
+                            let array_len = ((ptrs.len() + 1) * 4) as u32;
+                            if self.heap_current.add(array_len) <= self.heap_limit {
+                                let array_addr = self.heap_current;
+                                self.heap_current = self.heap_current.add(array_len);
+                                for (i, p) in ptrs.iter().enumerate() {
+                                    mem.write_u32(array_addr.add((i * 4) as u32), *p)?;
+                                }
+                                mem.write_u32(array_addr.add((ptrs.len() * 4) as u32), 0)?;
+
+                                mem.write_u32(pglob_ptr, ptrs.len() as u32)?;
+                                mem.write_u32(pglob_ptr.add(4), array_addr.as_u32())?;
+                                mem.write_u32(pglob_ptr.add(8), 0)?;
+                                ret = 0;
+                            }
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, ret);
+            }
+            BionicFuncId::Globfree => {
+                let pglob_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if pglob_ptr.as_u32() != 0 {
+                    let _ = mem.write_u32(pglob_ptr, 0);
+                    let _ = mem.write_u32(pglob_ptr.add(4), 0);
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Wordexp => {
+                let words_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let pwordexp_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+
+                let mut ret = 1;
+                if words_ptr.as_u32() != 0 && pwordexp_ptr.as_u32() != 0 {
+                    if let Ok(raw_words) = Self::read_c_string(mem, words_ptr) {
+                        let mut expanded_words = Vec::new();
+                        for token in raw_words.split_whitespace() {
+                            if token.starts_with('$') {
+                                let var_name = token.trim_start_matches('$').trim_matches(|c| c == '{' || c == '}');
+                                let val = self.env_vars.get(var_name).cloned().unwrap_or_default();
+                                expanded_words.push(val);
+                            } else {
+                                expanded_words.push(token.to_string());
+                            }
+                        }
+
+                        let mut ptrs = Vec::new();
+                        for word in &expanded_words {
+                            let bytes = word.as_bytes();
+                            let align_len = ((bytes.len() as u32) + 1 + 3) & !3;
+                            if self.heap_current.add(align_len) <= self.heap_limit {
+                                let str_addr = self.heap_current;
+                                self.heap_current = self.heap_current.add(align_len);
+                                mem.write_bytes(str_addr, bytes)?;
+                                mem.write_u8(str_addr.add(bytes.len() as u32), 0)?;
+                                ptrs.push(str_addr.as_u32());
+                            }
+                        }
+
+                        let array_len = ((ptrs.len() + 1) * 4) as u32;
+                        if self.heap_current.add(array_len) <= self.heap_limit {
+                            let array_addr = self.heap_current;
+                            self.heap_current = self.heap_current.add(array_len);
+                            for (i, p) in ptrs.iter().enumerate() {
+                                mem.write_u32(array_addr.add((i * 4) as u32), *p)?;
+                            }
+                            mem.write_u32(array_addr.add((ptrs.len() * 4) as u32), 0)?;
+
+                            mem.write_u32(pwordexp_ptr, ptrs.len() as u32)?;
+                            mem.write_u32(pwordexp_ptr.add(4), array_addr.as_u32())?;
+                            mem.write_u32(pwordexp_ptr.add(8), 0)?;
+                            ret = 0;
+                        }
+                    }
+                }
+                cpu.set_reg(Reg::R0, ret);
+            }
+            BionicFuncId::Wordfree => {
+                let pwordexp_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if pwordexp_ptr.as_u32() != 0 {
+                    let _ = mem.write_u32(pwordexp_ptr, 0);
+                    let _ = mem.write_u32(pwordexp_ptr.add(4), 0);
                 }
                 cpu.set_reg(Reg::R0, 0);
             }
