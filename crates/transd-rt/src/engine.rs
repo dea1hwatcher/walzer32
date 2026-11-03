@@ -618,6 +618,7 @@ pub struct DbtEngine<M: Memory> {
     pub telemetry: crate::telemetry::TelemetryManager,
     pub async_jit: Option<crate::async_jit::AsyncJit>,
     pub smc_guard_pages: bool,
+    pub last_direct_exit: Option<(GuestAddr, GuestAddr)>,
 }
 
 impl<M: Memory> DbtEngine<M> {
@@ -632,6 +633,7 @@ impl<M: Memory> DbtEngine<M> {
             telemetry: crate::telemetry::TelemetryManager::new(),
             async_jit: None,
             smc_guard_pages: false,
+            last_direct_exit: None,
         }
     }
 
@@ -872,6 +874,27 @@ impl<M: Memory> DbtEngine<M> {
                     let guest_size = compiled.guest_byte_size;
                     if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
                         self.cache.insert_committed(pc, compiled, committed.code_ptr);
+
+                        // Auto-chain Phase 2:
+                        // 1. Any existing blocks waiting to jump to this newly compiled block
+                        if let Some(callers) = self.cache.incoming_edges.get(&pc).cloned() {
+                            for src in callers {
+                                self.chain_blocks(src, pc);
+                            }
+                        }
+                        if let Some((src, dst)) = self.last_direct_exit.take() {
+                            if dst == pc {
+                                self.chain_blocks(src, dst);
+                            } else {
+                                self.last_direct_exit = Some((src, dst));
+                            }
+                        }
+                        // 2. Any blocks that this block jumps to that are already compiled
+                        if let Some(targets) = self.cache.outgoing_edges.get(&pc).cloned() {
+                            for dst in targets {
+                                self.chain_blocks(pc, dst);
+                            }
+                        }
                     } else {
                         self.cache.insert(pc, compiled);
                     }
@@ -897,6 +920,11 @@ impl<M: Memory> DbtEngine<M> {
                                 self.telemetry.record_tier2_compilation();
                                 if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
                                     self.cache.insert_superblock(pc, compiled, committed.code_ptr);
+                                    if let Some(callers) = self.cache.incoming_edges.get(&pc).cloned() {
+                                        for src in callers {
+                                            self.chain_blocks(src, pc);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -919,13 +947,27 @@ impl<M: Memory> DbtEngine<M> {
                 let exit_payload = res as u32;
 
                 match exit_reason {
-                    transd_emitter_a64::EXIT_REASON_DIRECT | transd_emitter_a64::EXIT_REASON_INDIRECT => {
+                    transd_emitter_a64::EXIT_REASON_DIRECT => {
+                        let next_pc = GuestAddr::new(exit_payload);
+                        self.cpu.set_pc(next_pc);
+                        let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
+                        self.total_insts_executed += inst_count;
+                        if !self.chain_blocks(pc, next_pc) {
+                            self.last_direct_exit = Some((pc, next_pc));
+                        } else {
+                            self.last_direct_exit = None;
+                        }
+                        return Ok(EngineStepResult::Continue);
+                    }
+                    transd_emitter_a64::EXIT_REASON_INDIRECT => {
+                        self.last_direct_exit = None;
                         self.cpu.set_pc(GuestAddr::new(exit_payload));
                         let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
                         self.total_insts_executed += inst_count;
                         return Ok(EngineStepResult::Continue);
                     }
                     transd_emitter_a64::EXIT_REASON_SVC => {
+                        self.last_direct_exit = None;
                         let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
                         self.total_insts_executed += inst_count;
                         let args = SyscallArgs::from_cpu(&self.cpu);
@@ -944,11 +986,13 @@ impl<M: Memory> DbtEngine<M> {
                         }
                     }
                     transd_emitter_a64::EXIT_REASON_BKPT => {
+                        self.last_direct_exit = None;
                         let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
                         self.total_insts_executed += inst_count;
                         return Ok(EngineStepResult::Breakpoint { imm: exit_payload as u16 });
                     }
                     transd_emitter_a64::EXIT_REASON_INVALID => {
+                        self.last_direct_exit = None;
                         self.cpu.set_pc(GuestAddr::new(exit_payload));
                     }
                     _ => {}
@@ -994,11 +1038,13 @@ impl<M: Memory> DbtEngine<M> {
 
     /// Invalidates all JIT compiled blocks overlapping the given guest virtual address range
     pub fn invalidate_range(&mut self, start: GuestAddr, len: usize) -> usize {
+        self.last_direct_exit = None;
         self.cache.invalidate_range(start, len)
     }
 
     /// Flushes and resets the entire JIT code cache
     pub fn invalidate_all(&mut self) {
+        self.last_direct_exit = None;
         if let Some(jit) = &self.async_jit {
             jit.clear();
         }
@@ -1049,6 +1095,7 @@ impl<M: Memory> DbtEngine<M> {
     pub fn chain_blocks(&mut self, src_addr: GuestAddr, dst_addr: GuestAddr) -> bool {
         if let (Some(src_ptr), Some(dst_ptr)) = (self.cache.lookup_ptr(src_addr), self.cache.lookup_ptr(dst_addr)) {
             if let Some(src_block) = self.cache.lookup(src_addr) {
+                let mut patched = false;
                 for site in &src_block.patch_sites {
                     let target = match site.target {
                         PatchTarget::Direct(t) => t,
@@ -1075,10 +1122,18 @@ impl<M: Memory> DbtEngine<M> {
                                     crate::jit_memory::flush_icache(slice.as_mut_ptr(), 4);
                                 }
                                 self.telemetry.record_chained_jump();
-                                return true;
+                                patched = true;
                             }
                         }
                     }
+                }
+                if patched {
+                    self.cache.incoming_edges.entry(dst_addr).or_default().insert(src_addr);
+                    let out = self.cache.outgoing_edges.entry(src_addr).or_default();
+                    if !out.contains(&dst_addr) {
+                        out.push(dst_addr);
+                    }
+                    return true;
                 }
             }
         }
@@ -1195,7 +1250,11 @@ mod tests {
         assert!(engine.cache.lookup_ptr(GuestAddr::new(0x1000)).is_some());
         assert!(engine.cache.lookup_ptr(GuestAddr::new(0x1014)).is_some());
 
-        // Test dynamic block chaining between committed blocks
+        // Verify that auto-chaining linked block 0x1000 to 0x1014 automatically during execution
+        assert!(engine.telemetry.jit_chained_jumps >= 1);
+        assert!(engine.cache.incoming_edges.get(&GuestAddr::new(0x1014)).unwrap().contains(&GuestAddr::new(0x1000)));
+
+        // Test idempotency of dynamic block chaining
         let chained = engine.chain_blocks(GuestAddr::new(0x1000), GuestAddr::new(0x1014));
         assert!(chained);
     }
