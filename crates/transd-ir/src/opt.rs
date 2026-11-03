@@ -13,6 +13,8 @@ impl SuperblockOptimizer {
         }
 
         let mut opt_insts = Vec::with_capacity(sb.insts.len());
+        let has_addrs = sb.inst_addrs.len() == sb.insts.len();
+        let mut opt_addrs = if has_addrs { Vec::with_capacity(sb.inst_addrs.len()) } else { Vec::new() };
         let mut i = 0;
 
         while i < sb.insts.len() {
@@ -67,6 +69,9 @@ impl SuperblockOptimizer {
                         && s2.amount == ShiftAmount::Imm(0)
                     {
                         opt_insts.push(inst.clone());
+                        if has_addrs {
+                            opt_addrs.push(sb.inst_addrs[i]);
+                        }
                         i += 2;
                         continue;
                     }
@@ -74,9 +79,15 @@ impl SuperblockOptimizer {
             }
 
             opt_insts.push(inst.clone());
+            if has_addrs {
+                opt_addrs.push(sb.inst_addrs[i]);
+            }
             i += 1;
         }
 
         sb.insts = opt_insts;
+        if has_addrs {
+            sb.inst_addrs = opt_addrs;
+        }
     }
 }

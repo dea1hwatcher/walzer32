@@ -89,8 +89,10 @@ pub fn invoke_guest_extended<M: Memory>(
         // Check if current instruction is an SVC (Bionic, JNI, GLES, or Audio stub)
         if let Ok((inst, _)) = transd_decoder::decode_next(&engine.mem, pc, thumb) {
             if let transd_decoder::Op::Svc { imm } = inst.op {
+                eprintln!("[Trampoline] Intercepted SVC #0x{:06x} at pc={} r0=0x{:08x}", imm, pc, engine.cpu.reg(Reg::R0));
                 // Try Bionic SVC
                 if bionic.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+                    eprintln!("[Trampoline] -> Handled by Bionic, new r0=0x{:08x}", engine.cpu.reg(Reg::R0));
                     if engine.cpu.pc() == pc {
                         let next_pc = pc.add(4);
                         engine.cpu.set_pc(next_pc);

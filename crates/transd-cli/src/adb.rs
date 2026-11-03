@@ -102,15 +102,38 @@ pub fn evaluate_compatibility(
     }
 }
 
+pub fn adb_binary() -> std::ffi::OsString {
+    if let Ok(path) = std::env::var("ADB_PATH") {
+        if std::path::Path::new(&path).exists() {
+            return path.into();
+        }
+    }
+    if Command::new("adb").arg("version").output().is_ok() {
+        return "adb".into();
+    }
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        let scrcpy_adb = std::path::Path::new(&home).join(r"Downloads\scrcpy-win64-v5.0.1\adb.exe");
+        if scrcpy_adb.exists() {
+            return scrcpy_adb.into_os_string();
+        }
+        let sdk_adb = std::path::Path::new(&home).join(r"AppData\Local\Android\Sdk\platform-tools\adb.exe");
+        if sdk_adb.exists() {
+            return sdk_adb.into_os_string();
+        }
+    }
+    "adb".into()
+}
+
 /// Queries ADB for all currently connected and authorized Android devices
 pub fn list_devices() -> Result<Vec<AdbDeviceInfo>, Box<dyn std::error::Error>> {
-    let output = Command::new("adb").arg("devices").output()?;
+    let adb = adb_binary();
+    let output = Command::new(&adb).arg("devices").output()?;
     let text = String::from_utf8_lossy(&output.stdout);
     let serials = parse_adb_devices_output(&text);
 
     let mut devices = Vec::new();
     for ser in serials {
-        let abi_out = Command::new("adb")
+        let abi_out = Command::new(&adb)
             .args(["-s", &ser, "shell", "getprop", "ro.product.cpu.abilist"])
             .output();
         let abis = match abi_out {
@@ -118,7 +141,7 @@ pub fn list_devices() -> Result<Vec<AdbDeviceInfo>, Box<dyn std::error::Error>> 
             Err(_) => "unknown".to_string(),
         };
 
-        let model_out = Command::new("adb")
+        let model_out = Command::new(&adb)
             .args(["-s", &ser, "shell", "getprop", "ro.product.model"])
             .output();
         let model = match model_out {
@@ -126,14 +149,14 @@ pub fn list_devices() -> Result<Vec<AdbDeviceInfo>, Box<dyn std::error::Error>> 
             Err(_) => "Android Device".to_string(),
         };
 
-        let sdk_out = Command::new("adb")
+        let sdk_out = Command::new(&adb)
             .args(["-s", &ser, "shell", "getprop", "ro.build.version.sdk"])
             .output();
         let sdk = sdk_out
             .ok()
             .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok());
 
-        let rel_out = Command::new("adb")
+        let rel_out = Command::new(&adb)
             .args(["-s", &ser, "shell", "getprop", "ro.build.version.release"])
             .output();
         let release = rel_out
@@ -252,7 +275,7 @@ pub fn install_apk(
         return Err(format!("APK file '{}' does not exist", apk_path).into());
     }
 
-    let mut cmd = Command::new("adb");
+    let mut cmd = Command::new(adb_binary());
     if let Some(id) = device_id {
         cmd.args(["-s", id]);
     }
@@ -321,7 +344,7 @@ pub fn launch_app(
 
     println!("Launching Component: {}", component);
 
-    let mut cmd = Command::new("adb");
+    let mut cmd = Command::new(adb_binary());
     if let Some(id) = device_id {
         cmd.args(["-s", id]);
     }

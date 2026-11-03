@@ -121,7 +121,7 @@ impl SignalManager {
 
         #[cfg(unix)]
         {
-            use libc::{sigaction, sigaltstack, stack_t, c_int, siginfo_t, c_void, SIGBUS, SIGILL, SIGSEGV, SA_ONSTACK, SA_SIGINFO, SIGSTKSZ};
+            use libc::{sigaction, sigaltstack, stack_t, c_void, SIGBUS, SIGILL, SIGSEGV, SA_ONSTACK, SA_SIGINFO, SIGSTKSZ};
             use std::mem;
 
             // 1. Allocate alternate signal stack (to survive guest stack overflow)
@@ -137,7 +137,7 @@ impl SignalManager {
 
             // 2. Configure sigaction handler
             let mut sa: sigaction = unsafe { mem::zeroed() };
-            sa.sa_sigaction = host_signal_handler as usize;
+            sa.sa_sigaction = host_signal_handler as *const () as usize;
             sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
 
             unsafe {
@@ -700,13 +700,13 @@ impl SignalState {
 
 #[cfg(unix)]
 extern "C" fn host_signal_handler(sig: libc::c_int, info: *mut libc::siginfo_t, _ucontext: *mut libc::c_void) {
-    if !info.is_null() {
-        let fault_addr = unsafe { (*info).si_addr as usize };
-        LAST_GUEST_FAULT.with(|f| {
-            *f.borrow_mut() = Some(FaultOrigin::GuestNullPointer { fault_addr });
-        });
-    }
-    // On real Android, this jumps back to recovery longjmp landing pad
+    let fault_addr = if !info.is_null() {
+        unsafe { (*info).si_addr() as usize }
+    } else {
+        0
+    };
+    eprintln!("CRITICAL: host_signal_handler caught signal {} at fault_addr 0x{:x}", sig, fault_addr);
+    std::process::abort();
 }
 
 #[cfg(test)]

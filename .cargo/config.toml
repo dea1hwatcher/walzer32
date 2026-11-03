@@ -11,8 +11,8 @@
 #   cargo build --target aarch64-linux-android --release
 #
 [target.aarch64-linux-android]
-linker = "aarch64-linux-android35-clang"
-ar = "llvm-ar"
+linker = "D:/Android/Sdk/ndk/21.4.7075529/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android29-clang.cmd"
+ar = "D:/Android/Sdk/ndk/21.4.7075529/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
 rustflags = [
     # Enable AArch64 crypto extensions (SHA2, AES) available on Cortex-X3
     "-C", "target-cpu=cortex-a55",

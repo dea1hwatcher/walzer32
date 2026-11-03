@@ -1,5 +1,5 @@
 use transd_core::{GuestAddr, Memory, MemoryError, Reg};
-use transd_decoder::{decode_next, BranchTarget, Op};
+use transd_decoder::{decode_next, AluOp, ArmInst, BranchTarget, Op, Operand2};
 use crate::ir::{BlockExit, IrBlock};
 
 pub const DEFAULT_MAX_BLOCK_INSTS: usize = 64;
@@ -40,6 +40,7 @@ impl Lifter {
 
             let next_pc = cur_pc.add(len as u32);
             block.insts.push(inst);
+            block.inst_addrs.push(cur_pc);
             block.byte_size += len;
 
             // Check if this instruction terminates the basic block
@@ -51,19 +52,60 @@ impl Lifter {
                             cur_pc.add(pc_base).offset(offset)
                         }
                         BranchTarget::Reg(r) => {
-                            block.exit = BlockExit::Indirect(r);
+                            if link {
+                                let ret_addr = if is_thumb {
+                                    next_pc.as_u32() | 1
+                                } else {
+                                    next_pc.as_u32()
+                                };
+                                block.insts.push(ArmInst::new(
+                                    inst.cond,
+                                    Op::Alu {
+                                        op: AluOp::Mov,
+                                        set_flags: false,
+                                        rd: Reg::LR,
+                                        rn: Reg::R0,
+                                        op2: Operand2::Imm(ret_addr),
+                                    },
+                                    0,
+                                ));
+                                block.inst_addrs.push(cur_pc);
+                            }
+                            if inst.cond.is_always() {
+                                block.exit = BlockExit::Indirect(r);
+                            } else {
+                                block.exit = BlockExit::IndirectCond {
+                                    cond: inst.cond,
+                                    rm: r,
+                                    fallthrough: next_pc,
+                                };
+                            }
                             break;
                         }
                     };
 
-                    if inst.cond.is_always() {
-                        if link {
-                            // BL call: in a DBT, function call ends the basic block
-                            block.exit = BlockExit::Direct(target_addr);
+                    if link {
+                        let ret_addr = if is_thumb {
+                            next_pc.as_u32() | 1
                         } else {
-                            // Unconditional B
-                            block.exit = BlockExit::Direct(target_addr);
-                        }
+                            next_pc.as_u32()
+                        };
+                        block.insts.push(ArmInst::new(
+                            inst.cond,
+                            Op::Alu {
+                                op: AluOp::Mov,
+                                set_flags: false,
+                                rd: Reg::LR,
+                                rn: Reg::R0,
+                                op2: Operand2::Imm(ret_addr),
+                            },
+                            0,
+                        ));
+                        block.inst_addrs.push(cur_pc);
+                    }
+
+                    if inst.cond.is_always() {
+                        block.exit = BlockExit::Direct(target_addr);
                     } else {
                         // Conditional B<cond>
                         block.exit = BlockExit::BranchCond {
@@ -74,29 +116,80 @@ impl Lifter {
                     }
                     break;
                 }
-                Op::BranchExchange { rm, .. } => {
+                Op::BranchExchange { link, rm } => {
                     // BX / BLX
-                    block.exit = BlockExit::Indirect(rm);
+                    if link {
+                        let ret_addr = if is_thumb {
+                            next_pc.as_u32() | 1
+                        } else {
+                            next_pc.as_u32()
+                        };
+                        block.insts.push(ArmInst::new(
+                            inst.cond,
+                            Op::Alu {
+                                op: AluOp::Mov,
+                                set_flags: false,
+                                rd: Reg::LR,
+                                rn: Reg::R0,
+                                op2: Operand2::Imm(ret_addr),
+                            },
+                            0,
+                        ));
+                        block.inst_addrs.push(cur_pc);
+                    }
+                    if inst.cond.is_always() {
+                        block.exit = BlockExit::Indirect(rm);
+                    } else {
+                        block.exit = BlockExit::IndirectCond {
+                            cond: inst.cond,
+                            rm,
+                            fallthrough: next_pc,
+                        };
+                    }
                     break;
                 }
                 Op::LoadStoreMultiple { reg_list, .. } => {
                     // If loading into PC (e.g. POP {..., pc})
                     if (reg_list & (1 << Reg::PC.index())) != 0 {
-                        block.exit = BlockExit::Indirect(Reg::PC);
+                        if inst.cond.is_always() {
+                            block.exit = BlockExit::Indirect(Reg::PC);
+                        } else {
+                            block.exit = BlockExit::IndirectCond {
+                                cond: inst.cond,
+                                rm: Reg::PC,
+                                fallthrough: next_pc,
+                            };
+                        }
                         break;
                     }
                 }
                 Op::LoadStore { is_load, rd, .. } => {
                     // If loading into PC (e.g. LDR pc, [sp], #4)
                     if is_load && rd.is_pc() {
-                        block.exit = BlockExit::Indirect(Reg::PC);
+                        if inst.cond.is_always() {
+                            block.exit = BlockExit::Indirect(Reg::PC);
+                        } else {
+                            block.exit = BlockExit::IndirectCond {
+                                cond: inst.cond,
+                                rm: Reg::PC,
+                                fallthrough: next_pc,
+                            };
+                        }
                         break;
                     }
                 }
                 Op::Alu { rd, .. } => {
                     // If writing to PC (e.g. MOV pc, lr)
                     if rd.is_pc() {
-                        block.exit = BlockExit::Indirect(Reg::PC);
+                        if inst.cond.is_always() {
+                            block.exit = BlockExit::Indirect(Reg::PC);
+                        } else {
+                            block.exit = BlockExit::IndirectCond {
+                                cond: inst.cond,
+                                rm: Reg::PC,
+                                fallthrough: next_pc,
+                            };
+                        }
                         break;
                     }
                 }

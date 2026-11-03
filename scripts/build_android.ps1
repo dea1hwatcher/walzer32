@@ -46,16 +46,21 @@ try {
 
 # 3. Locate and copy libtransd.so into jniLibs
 Write-Host "`n[3/4] Copying libtransd.so into Android container jniLibs..." -ForegroundColor Yellow
-$builtSoPath = Join-Path $RootDir "target\$Target\$Profile\libtransd.so"
-
-if (-not (Test-Path $builtSoPath)) {
-    # Check debug/release fallback
-    $fallbackPath = Join-Path $RootDir "target\$Target\release\libtransd.so"
-    if (Test-Path $fallbackPath) {
-        $builtSoPath = $fallbackPath
-    } else {
-        throw "Could not find compiled libtransd.so at '$builtSoPath'"
+$candidates = @(
+    (Join-Path $RootDir "target\$Target\$Profile\libtransd_android.so"),
+    (Join-Path $RootDir "target\$Target\$Profile\libtransd.so"),
+    (Join-Path $RootDir "target\$Target\release\libtransd_android.so"),
+    (Join-Path $RootDir "target\$Target\release\libtransd.so")
+)
+$builtSoPath = $null
+foreach ($c in $candidates) {
+    if (Test-Path $c) {
+        $builtSoPath = $c
+        break
     }
+}
+if (-not $builtSoPath) {
+    throw "Could not find compiled libtransd_android.so or libtransd.so at target\$Target\$Profile"
 }
 
 if (-not (Test-Path $JniLibsDir)) {

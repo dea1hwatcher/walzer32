@@ -41,6 +41,29 @@ pub fn pinned_reg(reg: Reg) -> Option<A64Reg> {
 /// Loads a guest 32-bit register.
 /// If pinned (R0-R7), returns the pinned host register directly with 0 instructions emitted.
 /// Otherwise loads from CpuState at [X0 + offset] into scratch.
+/// Loads a guest 32-bit register with architectural PC awareness.
+/// If `reg == Reg::PC`:
+/// Emits `MOV scratch, #pc_val` (zero memory access latency, 100% ARM compliant).
+/// If pinned (R0-R7), returns the pinned host register directly with 0 instructions emitted.
+/// Otherwise loads from CpuState at [X0 + offset] into scratch.
+pub fn load_guest_reg_with_pc(
+    asm: &mut A64Assembler,
+    scratch: A64Reg,
+    reg: Reg,
+    pc_val: u32,
+) -> A64Reg {
+    if reg == Reg::PC {
+        asm.mov_imm32(scratch, pc_val);
+        scratch
+    } else if let Some(pinned) = pinned_reg(reg) {
+        pinned
+    } else {
+        let offset = (reg.index() * 4) as u32;
+        asm.ldr_w_imm(scratch, A64Reg::X0, offset);
+        scratch
+    }
+}
+
 pub fn load_guest_reg(asm: &mut A64Assembler, scratch: A64Reg, reg: Reg) -> A64Reg {
     if let Some(pinned) = pinned_reg(reg) {
         pinned
@@ -106,7 +129,8 @@ impl A64Compiler {
         Self::emit_prologue(&mut asm);
 
         // 2. Pre-scan for dead flag elimination
-        let flags_needed = matches!(block.exit, BlockExit::BranchCond { cond, .. } if !cond.is_always());
+        let flags_needed = matches!(block.exit, BlockExit::BranchCond { cond, .. } | BlockExit::IndirectCond { cond, .. } if !cond.is_always())
+            || block.insts.iter().any(|i| !i.cond.is_always());
         let last_flag_idx = if flags_needed {
             block.insts.iter().rposition(|inst| match &inst.op {
                 Op::Alu { op, set_flags, .. } => *set_flags || op.is_test(),
@@ -119,7 +143,9 @@ impl A64Compiler {
 
         // 3. Compile instructions with zero-spill register pinning and flag elimination
         for (idx, inst) in block.insts.iter().enumerate() {
-            Self::compile_inst(&mut asm, inst, idx, flags_needed, last_flag_idx);
+            let pc_val = block.pc_read_val(idx);
+            let pc_mem_val = block.pc_mem_read_val(idx);
+            Self::compile_guarded_inst(&mut asm, inst, idx, flags_needed, last_flag_idx, pc_val, pc_mem_val);
         }
 
         // 4. Compile block exit (handles fallbacks, chaining sites, and epilogue restore)
@@ -168,7 +194,9 @@ impl A64Compiler {
                 side_exit_stubs.push((b_cond_idx, se.cond, se.target));
             }
 
-            Self::compile_inst(&mut asm, inst, idx, true, None);
+            let pc_val = sb.pc_read_val(idx);
+            let pc_mem_val = sb.pc_mem_read_val(idx);
+            Self::compile_guarded_inst(&mut asm, inst, idx, true, None, pc_val, pc_mem_val);
         }
 
         while se_idx < sb.side_exits.len() {
@@ -282,12 +310,51 @@ impl A64Compiler {
         }
     }
 
+    fn compile_guarded_inst(
+        asm: &mut A64Assembler,
+        inst: &ArmInst,
+        idx: usize,
+        flags_needed: bool,
+        last_flag_idx: Option<usize>,
+        pc_val: u32,
+        pc_mem_val: u32,
+    ) {
+        let skip_site = if let Some(inv_cond) = inst.cond.invert() {
+            let skip_idx = asm.cursor();
+            asm.b_cond(inv_cond, 0);
+            Some((skip_idx, inv_cond))
+        } else if inst.cond == Cond::NV {
+            let skip_idx = asm.cursor();
+            asm.b(0);
+            Some((skip_idx, Cond::NV))
+        } else {
+            None
+        };
+
+        Self::compile_inst(asm, inst, idx, flags_needed, last_flag_idx, pc_val, pc_mem_val);
+
+        if let Some((skip_idx, inv_cond)) = skip_site {
+            let end_idx = asm.cursor();
+            let offset_words = (end_idx as i32) - (skip_idx as i32);
+            if inv_cond == Cond::NV {
+                let imm26 = (offset_words as u32) & 0x03FF_FFFF;
+                asm.patch(skip_idx, 0x1400_0000 | imm26);
+            } else {
+                let imm19 = (offset_words as u32) & 0x7FFFF;
+                let cond_field = (inv_cond as u32) & 0xF;
+                asm.patch(skip_idx, 0x5400_0000 | (imm19 << 5) | cond_field);
+            }
+        }
+    }
+
     fn compile_inst(
         asm: &mut A64Assembler,
         inst: &ArmInst,
         idx: usize,
         flags_needed: bool,
         last_flag_idx: Option<usize>,
+        pc_val: u32,
+        pc_mem_val: u32,
     ) {
         match &inst.op {
             Op::Nop => {
@@ -300,7 +367,9 @@ impl A64Compiler {
                 rn,
                 op2,
             } => {
-                let effective_set_flags = flags_needed && (Some(idx) == last_flag_idx) && (*set_flags || op.is_test());
+                let effective_set_flags = flags_needed
+                    && (*set_flags || op.is_test())
+                    && (last_flag_idx.is_none() || Some(idx) == last_flag_idx);
                 if op.is_test() && !effective_set_flags {
                     // Dead test instruction eliminated!
                     return;
@@ -310,7 +379,7 @@ impl A64Compiler {
                 let dst_reg = pinned_reg(*rd).unwrap_or(A64Reg::X11);
 
                 // 2. Load rn: if pinned, returns host pinned register directly with 0 instructions
-                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                let rn_reg = load_guest_reg_with_pc(asm, A64Reg::X9, *rn, pc_val);
 
                 // 3. Fast-path for small immediate operands
                 if let Operand2::Imm(imm) = op2 {
@@ -361,19 +430,48 @@ impl A64Compiler {
                         A64Reg::X10
                     }
                     Operand2::Reg { rm, shift } => {
-                        let rm_reg = load_guest_reg(asm, A64Reg::X10, *rm);
+                        let rm_reg = load_guest_reg_with_pc(asm, A64Reg::X10, *rm, pc_val);
                         match shift.amount {
                             ShiftAmount::Imm(shift_imm) => {
-                                if shift_imm > 0 {
+                                if shift.shift_type == ShiftType::Rrx {
+                                    // RRX Rm: (C << 31) | (Rm >> 1)
+                                    asm.mov_imm32(A64Reg::X11, 0x8000_0000);
+                                    asm.mov_imm32(A64Reg::X12, 0);
+                                    asm.csel_w(A64Reg::X11, A64Reg::X11, A64Reg::X12, Cond::CS);
+                                    asm.lsr_w_imm(A64Reg::X10, rm_reg, 1);
+                                    asm.orr_w_reg(A64Reg::X10, A64Reg::X10, A64Reg::X11);
+                                    A64Reg::X10
+                                } else if shift_imm > 0 {
                                     match shift.shift_type {
-                                        ShiftType::Lsl => asm.lsl_w_imm(A64Reg::X10, rm_reg, shift_imm),
-                                        ShiftType::Lsr => asm.lsr_w_imm(A64Reg::X10, rm_reg, shift_imm),
-                                        ShiftType::Asr => asm.asr_w_imm(A64Reg::X10, rm_reg, shift_imm),
+                                        ShiftType::Lsl => {
+                                            asm.lsl_w_imm(A64Reg::X10, rm_reg, shift_imm);
+                                            if effective_set_flags && shift_imm <= 32 {
+                                                asm.ubfx_w(A64Reg::X12, rm_reg, (32 - shift_imm) as u8, 1);
+                                                asm.lsl_w_imm(A64Reg::X12, A64Reg::X12, 31);
+                                                asm.adds_w_reg(A64Reg::SP, A64Reg::X12, A64Reg::X12);
+                                            }
+                                        }
+                                        ShiftType::Lsr => {
+                                            asm.lsr_w_imm(A64Reg::X10, rm_reg, shift_imm);
+                                            if effective_set_flags && shift_imm <= 32 {
+                                                asm.ubfx_w(A64Reg::X12, rm_reg, (shift_imm - 1) as u8, 1);
+                                                asm.lsl_w_imm(A64Reg::X12, A64Reg::X12, 31);
+                                                asm.adds_w_reg(A64Reg::SP, A64Reg::X12, A64Reg::X12);
+                                            }
+                                        }
+                                        ShiftType::Asr => {
+                                            asm.asr_w_imm(A64Reg::X10, rm_reg, shift_imm);
+                                            if effective_set_flags && shift_imm <= 32 {
+                                                asm.ubfx_w(A64Reg::X12, rm_reg, (shift_imm - 1) as u8, 1);
+                                                asm.lsl_w_imm(A64Reg::X12, A64Reg::X12, 31);
+                                                asm.adds_w_reg(A64Reg::SP, A64Reg::X12, A64Reg::X12);
+                                            }
+                                        }
                                         ShiftType::Ror => {
                                             asm.mov_imm32(A64Reg::X12, shift_imm as u32);
                                             asm.ror_w_reg(A64Reg::X10, rm_reg, A64Reg::X12);
                                         }
-                                        ShiftType::Rrx => {}
+                                        ShiftType::Rrx => unreachable!(),
                                     }
                                     A64Reg::X10
                                 } else {
@@ -381,7 +479,7 @@ impl A64Compiler {
                                 }
                             }
                             ShiftAmount::Reg(rs) => {
-                                let rs_reg = load_guest_reg(asm, A64Reg::X12, rs);
+                                let rs_reg = load_guest_reg_with_pc(asm, A64Reg::X12, rs, pc_val);
                                 match shift.shift_type {
                                     ShiftType::Lsl => asm.lsl_w_reg(A64Reg::X10, rm_reg, rs_reg),
                                     ShiftType::Lsr => asm.lsr_w_reg(A64Reg::X10, rm_reg, rs_reg),
@@ -489,6 +587,41 @@ impl A64Compiler {
                     let rd_offset = (rd.index() * 4) as u32;
                     asm.str_w_imm(dst_reg, A64Reg::X0, rd_offset);
                 }
+            }
+            Op::MulLong {
+                signed,
+                accumulate,
+                set_flags: _,
+                rd_hi,
+                rd_lo,
+                rm,
+                rs,
+            } => {
+                let rm_reg = load_guest_reg(asm, A64Reg::X9, *rm);
+                let rs_reg = load_guest_reg(asm, A64Reg::X10, *rs);
+
+                if *accumulate {
+                    let _hi_reg = load_guest_reg(asm, A64Reg::X12, *rd_hi);
+                    let lo_reg = load_guest_reg(asm, A64Reg::X13, *rd_lo);
+                    asm.lsl_x_imm(A64Reg::X12, A64Reg::X12, 32);
+                    asm.add_x_uxtw(A64Reg::X13, A64Reg::X12, lo_reg);
+
+                    if *signed {
+                        asm.smaddl_x(A64Reg::X11, rm_reg, rs_reg, A64Reg::X13);
+                    } else {
+                        asm.umaddl_x(A64Reg::X11, rm_reg, rs_reg, A64Reg::X13);
+                    }
+                } else {
+                    if *signed {
+                        asm.smull_x(A64Reg::X11, rm_reg, rs_reg);
+                    } else {
+                        asm.umull_x(A64Reg::X11, rm_reg, rs_reg);
+                    }
+                }
+
+                store_guest_reg(asm, A64Reg::X11, *rd_lo);
+                asm.lsr_x_imm(A64Reg::X12, A64Reg::X11, 32);
+                store_guest_reg(asm, A64Reg::X12, *rd_hi);
             }
             Op::Umaal {
                 rd_lo,
@@ -1161,8 +1294,8 @@ impl A64Compiler {
                 rn,
                 addr_mode,
             } => {
-                // 1. Load rn
-                let rn_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                // 1. Load rn (using pc_mem_val for PC-relative memory operations)
+                let rn_reg = load_guest_reg_with_pc(asm, A64Reg::X9, *rn, pc_mem_val);
 
                 // 2. Compute offset
                 let (offset_val, add, is_post) = match addr_mode {
@@ -1185,7 +1318,7 @@ impl A64Compiler {
                         shift_type,
                         shift_imm,
                     } => {
-                        let rm_reg = load_guest_reg(asm, A64Reg::X10, *rm);
+                        let rm_reg = load_guest_reg_with_pc(asm, A64Reg::X10, *rm, pc_val);
                         if *shift_imm > 0 {
                             match shift_type {
                                 ShiftType::Lsl => asm.lsl_w_imm(A64Reg::X10, rm_reg, *shift_imm),
@@ -1269,7 +1402,7 @@ impl A64Compiler {
                         }
                     }
                 } else {
-                    let src_reg = load_guest_reg(asm, A64Reg::X11, *rd);
+                    let src_reg = load_guest_reg_with_pc(asm, A64Reg::X11, *rd, pc_val);
                     match size {
                         MemSize::Byte => {
                             asm.strb_w_uxtw(src_reg, A64Reg::X1, A64Reg::X12);
@@ -1360,11 +1493,11 @@ impl A64Compiler {
                             VfpOp::Abs => asm.fabs_s(2, 0),
                             VfpOp::Neg => asm.fneg_s(2, 0),
                             VfpOp::Sqrt => asm.fsqrt_s(2, 0),
-                            VfpOp::Fma => {
+                            VfpOp::Fma | VfpOp::Mla => {
                                 asm.ldr_s_imm(3, A64Reg::X0, dst_off);
                                 asm.fmadd_s(2, 0, 1, 3);
                             }
-                            VfpOp::Fms => {
+                            VfpOp::Fms | VfpOp::Mls => {
                                 asm.ldr_s_imm(3, A64Reg::X0, dst_off);
                                 asm.fmsub_s(2, 0, 1, 3);
                             }
@@ -1386,11 +1519,11 @@ impl A64Compiler {
                             VfpOp::Abs => asm.fabs_d(2, 0),
                             VfpOp::Neg => asm.fneg_d(2, 0),
                             VfpOp::Sqrt => asm.fsqrt_d(2, 0),
-                            VfpOp::Fma => {
+                            VfpOp::Fma | VfpOp::Mla => {
                                 asm.ldr_d_imm(3, A64Reg::X0, dst_off);
                                 asm.fmadd_d(2, 0, 1, 3);
                             }
-                            VfpOp::Fms => {
+                            VfpOp::Fms | VfpOp::Mls => {
                                 asm.ldr_d_imm(3, A64Reg::X0, dst_off);
                                 asm.fmsub_d(2, 0, 1, 3);
                             }
@@ -1487,13 +1620,14 @@ impl A64Compiler {
                 rn,
                 offset,
             } => {
-                let base = load_guest_reg(asm, A64Reg::X9, *rn);
+                let base = load_guest_reg_with_pc(asm, A64Reg::X9, *rn, pc_mem_val);
                 let vfp_off = Self::vfp_offset(vfp_reg);
                 if *offset >= 0 {
-                    asm.add_x_imm(A64Reg::X10, base, *offset as u16);
+                    asm.add_w_imm(A64Reg::X10, base, *offset as u16);
                 } else {
-                    asm.sub_x_imm(A64Reg::X10, base, (-*offset) as u16);
+                    asm.sub_w_imm(A64Reg::X10, base, (-*offset) as u16);
                 }
+                asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X10);
                 match size {
                     VfpSize::F32 => {
                         if *is_load {
@@ -1524,15 +1658,23 @@ impl A64Compiler {
                 start_reg,
                 count,
             } => {
-                let base_reg = load_guest_reg(asm, A64Reg::X9, *rn);
+                let base_reg = load_guest_reg_with_pc(asm, A64Reg::X9, *rn, pc_mem_val);
                 let elem_size: u32 = if *is_double { 8 } else { 4 };
                 let total_bytes = (*count as u32) * elem_size;
 
                 if *is_add {
-                    asm.mov_x_reg(A64Reg::X10, base_reg);
+                    asm.mov_w_reg(A64Reg::X12, base_reg);
+                    if *writeback {
+                        asm.add_w_imm(A64Reg::X11, base_reg, total_bytes as u16);
+                        store_guest_reg(asm, A64Reg::X11, *rn);
+                    }
                 } else {
-                    asm.sub_x_imm(A64Reg::X10, base_reg, total_bytes as u16);
+                    asm.sub_w_imm(A64Reg::X12, base_reg, total_bytes as u16);
+                    if *writeback {
+                        store_guest_reg(asm, A64Reg::X12, *rn);
+                    }
                 }
+                asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
 
                 for i in 0..(*count as usize) {
                     let reg_idx = (*start_reg as usize + i) as u8;
@@ -1559,16 +1701,6 @@ impl A64Compiler {
                             asm.str_s_imm(0, A64Reg::X10, mem_off);
                         }
                     }
-                }
-
-                if *writeback {
-                    let new_base = if *is_add {
-                        asm.add_x_imm(A64Reg::X10, base_reg, total_bytes as u16);
-                        A64Reg::X10
-                    } else {
-                        A64Reg::X10
-                    };
-                    store_guest_reg(asm, new_base, *rn);
                 }
             }
             Op::VfpCvt { op, dst, src } => {
@@ -1728,6 +1860,22 @@ impl A64Compiler {
                     (NeonOp::Add, _) => asm.neon_add_int(2, 0, 1, *is_quad),
                     (NeonOp::Sub, _) => asm.neon_sub_int(2, 0, 1, *is_quad),
                     (NeonOp::Mul, _) => asm.neon_mul_int(2, 0, 1, *is_quad),
+                    (NeonOp::Mla, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_mla_int(2, 0, 1, *is_quad, sz);
+                    }
+                    (NeonOp::Mls, _) => {
+                        let sz = match size {
+                            NeonSize::I8 => 0,
+                            NeonSize::I16 => 1,
+                            _ => 2,
+                        };
+                        asm.neon_mls_int(2, 0, 1, *is_quad, sz);
+                    }
 
                     // Saturating operations
                     (NeonOp::Sqadd, _) => {
@@ -2279,10 +2427,43 @@ impl A64Compiler {
                     asm.str_d_imm(2, A64Reg::X0, vd_off);
                 }
             }
+            Op::VfpMovImm { dst, val_bits, is_double } => {
+                let vfp_off = Self::vfp_offset(dst);
+                if *is_double {
+                    asm.mov_imm64(A64Reg::X9, *val_bits);
+                    asm.str_x_imm(A64Reg::X9, A64Reg::X0, vfp_off);
+                } else {
+                    asm.mov_imm32(A64Reg::X9, *val_bits as u32);
+                    asm.str_w_imm(A64Reg::X9, A64Reg::X0, vfp_off);
+                }
+            }
+            Op::NeonMovImm { dst, is_quad, val64 } => {
+                let d0 = *dst as usize;
+                if d0 < 32 {
+                    let vfp_off0 = (OFFSET_VFP + d0 * 8) as u32;
+                    asm.mov_imm64(A64Reg::X9, *val64);
+                    asm.str_x_imm(A64Reg::X9, A64Reg::X0, vfp_off0);
+                    if *is_quad && d0 + 1 < 32 {
+                        let vfp_off1 = (OFFSET_VFP + (d0 + 1) * 8) as u32;
+                        asm.str_x_imm(A64Reg::X9, A64Reg::X0, vfp_off1);
+                    }
+                }
+            }
+            Op::NeonMovCoreLane { to_core, core_reg, d_reg, lane } => {
+                let off = (OFFSET_VFP + (*d_reg as usize) * 8 + (*lane as usize) * 4) as u32;
+                if *to_core {
+                    asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, off);
+                    store_guest_reg(asm, A64Reg::X9, *core_reg);
+                } else {
+                    let src = load_guest_reg(asm, A64Reg::X9, *core_reg);
+                    asm.str_w_imm(src, A64Reg::X0, off);
+                }
+            }
             _ => {
                 // Branches and exchanges are fully handled in compile_exit; avoid spurious NOPs
             }
         }
+
     }
 
     fn compile_exit(
@@ -2345,6 +2526,32 @@ impl A64Compiler {
                 asm.ret(None);
             }
             BlockExit::Indirect(rm) => {
+                let rm_reg = load_guest_reg(asm, A64Reg::X9, *rm);
+                if rm_reg != A64Reg::X9 {
+                    asm.mov_w_reg(A64Reg::X9, rm_reg);
+                }
+                asm.movk_x(A64Reg::X9, EXIT_REASON_INDIRECT as u16, 32);
+                Self::emit_epilogue(asm);
+                asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
+                asm.ret(None);
+            }
+            BlockExit::IndirectCond { cond, rm, fallthrough } => {
+                let b_cond_idx = asm.cursor();
+                asm.b_cond(*cond, 0);
+
+                // Fallthrough path:
+                asm.mov_imm32(A64Reg::X9, fallthrough.as_u32());
+                Self::emit_epilogue(asm);
+                asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
+                asm.ret(None);
+
+                // Taken path (indirect branch to rm):
+                let taken_target_idx = asm.cursor();
+                let offset_words = (taken_target_idx as i32) - (b_cond_idx as i32);
+                let imm19 = (offset_words as u32) & 0x7FFFF;
+                let cond_field = (*cond as u32) & 0xF;
+                asm.patch(b_cond_idx, 0x5400_0000 | (imm19 << 5) | cond_field);
+
                 let rm_reg = load_guest_reg(asm, A64Reg::X9, *rm);
                 if rm_reg != A64Reg::X9 {
                     asm.mov_w_reg(A64Reg::X9, rm_reg);

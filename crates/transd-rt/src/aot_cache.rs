@@ -334,6 +334,12 @@ impl AotDiskCache {
                     record_data.push(*rm as u8);
                     record_data.extend_from_slice(&inst_pc.as_u32().to_le_bytes());
                 }
+                BlockExit::IndirectCond { cond, rm, fallthrough } => {
+                    record_data.push(8);
+                    record_data.push(*cond as u8);
+                    record_data.push(*rm as u8);
+                    record_data.extend_from_slice(&fallthrough.as_u32().to_le_bytes());
+                }
             }
 
             // Patch sites
@@ -548,6 +554,15 @@ impl AotDiskCache {
                     r_off += 4;
                     BlockExit::TableBranch { is_halfword, rn, rm, inst_pc }
                 }
+                8 => {
+                    let cond = Cond::from_u8(record_slice[r_off]);
+                    r_off += 1;
+                    let rm = Reg::from_u8(record_slice[r_off]).unwrap_or(Reg::R0);
+                    r_off += 1;
+                    let fallthrough = GuestAddr::new(LittleEndian::read_u32(&record_slice[r_off..r_off + 4]));
+                    r_off += 4;
+                    BlockExit::IndirectCond { cond, rm, fallthrough }
+                }
                 _ => {
                     let addr = GuestAddr::new(LittleEndian::read_u32(&record_slice[r_off..r_off + 4]));
                     r_off += 4;
@@ -728,6 +743,9 @@ impl AotScanner {
                     }
                     BlockExit::CompareBranch { target, fallthrough, .. } => {
                         worklist.push_back(target);
+                        worklist.push_back(fallthrough);
+                    }
+                    BlockExit::IndirectCond { fallthrough, .. } => {
                         worklist.push_back(fallthrough);
                     }
                     _ => {}

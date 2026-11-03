@@ -466,8 +466,79 @@ impl ArmDecoder {
             ));
         }
 
+        // NEON Modified Immediate (VMOV / VMVN: 1111 001i 1 D 000 imm4 Vd cmode 0 Q 1 imm4)
+        if (raw & 0xFE80_0010) == 0xF280_0010 && ((raw >> 19) & 0x7) == 0 {
+            let i = (raw >> 24) & 1;
+            let d = (raw >> 22) & 1;
+            let imm4h = (raw >> 16) & 0xF;
+            let vd = (raw >> 12) & 0xF;
+            let cmode = (raw >> 8) & 0xF;
+            let q = (raw >> 6) & 1;
+            let op = (raw >> 5) & 1;
+            let imm4l = raw & 0xF;
+            let imm8 = (i << 7) | (imm4h << 4) | imm4l;
+            let reg_idx = ((d << 4) | vd) as u8;
+            let is_quad = q != 0;
+
+            let val64 = match cmode {
+                0b0000 | 0b0001 => {
+                    let v32 = imm8 as u32;
+                    ((v32 as u64) << 32) | (v32 as u64)
+                }
+                0b0010 | 0b0011 => {
+                    let v32 = (imm8 as u32) << 8;
+                    ((v32 as u64) << 32) | (v32 as u64)
+                }
+                0b0100 | 0b0101 => {
+                    let v32 = (imm8 as u32) << 16;
+                    ((v32 as u64) << 32) | (v32 as u64)
+                }
+                0b0110 | 0b0111 => {
+                    let v32 = (imm8 as u32) << 24;
+                    ((v32 as u64) << 32) | (v32 as u64)
+                }
+                0b1000 | 0b1001 => {
+                    let v16 = imm8 as u32;
+                    let v32 = (v16 << 16) | v16;
+                    ((v32 as u64) << 32) | (v32 as u64)
+                }
+                0b1010 | 0b1011 => {
+                    let v16 = (imm8 as u32) << 8;
+                    let v32 = (v16 << 16) | v16;
+                    ((v32 as u64) << 32) | (v32 as u64)
+                }
+                0b1100 | 0b1101 => {
+                    let v32 = (imm8 as u32) | ((imm8 as u32) << 8) | ((imm8 as u32) << 16) | ((imm8 as u32) << 24);
+                    ((v32 as u64) << 32) | (v32 as u64)
+                }
+                0b1110 => {
+                    (imm8 as u64) * 0x0101_0101_0101_0101
+                }
+                _ => {
+                    let mut v: u64 = 0;
+                    for b in 0..8 {
+                        if (imm8 & (1 << b)) != 0 {
+                            v |= 0xFFu64 << (b * 8);
+                        }
+                    }
+                    v
+                }
+            };
+
+            let final_val = if op != 0 { !val64 } else { val64 };
+            return Some(ArmInst::new(
+                Cond::AL,
+                Op::NeonMovImm {
+                    dst: reg_idx,
+                    is_quad,
+                    val64: final_val,
+                },
+                raw,
+            ));
+        }
+
         // NEON Data Processing (3-register same: 1111 001x ...)
-        if (raw & 0xFE00_0000) == 0xF200_0000 {
+        if (raw & 0xFE00_0000) == 0xF200_0000 && (raw & (1 << 23)) == 0 {
             let d_bit = (raw >> 22) & 1;
             let n_bit = (raw >> 7) & 1;
             let m_bit = (raw >> 5) & 1;
@@ -598,12 +669,19 @@ impl ArmDecoder {
                 ));
             }
 
-            // Integer VMUL: op_code == 0b1001, bit4 == 1
-            if op_code == 0b1001 && bit4 == 1 {
+            // Integer VMUL / VMLA / VMLS: op_code == 0b1001
+            if op_code == 0b1001 {
+                let op = if bit4 == 1 {
+                    NeonOp::Mul
+                } else if bit24 == 0 {
+                    NeonOp::Mla
+                } else {
+                    NeonOp::Mls
+                };
                 return Some(ArmInst::new(
                     Cond::AL,
                     Op::NeonAlu {
-                        op: NeonOp::Mul,
+                        op,
                         size,
                         is_quad,
                         dst: vd as u8,
@@ -1603,6 +1681,27 @@ impl ArmDecoder {
             return Op::VfpMsrFpscr { rt };
         }
 
+        // VMOV between ARM core register and scalar: cond 1110 u opc1 1 Vn Rt 1011 N opc2 1 0000
+        if (raw & 0x0F00_0F1F) == 0x0E00_0B10 {
+            let to_core = ((raw >> 20) & 1) != 0;
+            let rt = Reg::from_u8(((raw >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let vn = ((raw >> 16) & 0xF) as u8;
+            let n = ((raw >> 7) & 1) as u8;
+            let d_reg = (n << 4) | vn;
+            let opc1 = ((raw >> 21) & 0x3) as u8;
+            let opc2 = ((raw >> 5) & 0x3) as u8;
+            let lane = match opc2 {
+                0 => opc1 & 1,
+                _ => (opc1 << 1) | ((opc2 >> 1) & 1),
+            };
+            return Op::NeonMovCoreLane {
+                to_core,
+                core_reg: rt,
+                d_reg,
+                lane,
+            };
+        }
+
         // VMOV between core and single-precision float (s0..s31)
         // VMOV Rd, Sn (0x_E10_0A10) / VMOV Sn, Rd (0x_E00_0A10)
         if (raw & 0x0FE0_0F10) == 0x0E00_0A10 {
@@ -1718,7 +1817,32 @@ impl ArmDecoder {
         // VFP 1-register extension / VCMP: bits [23:20] == 0b1D11, bits [11:9] == 0b101
         if ((raw >> 20) & 0b1011) == 0b1011 && ((raw >> 9) & 0x7) == 0b101 {
             let opc2 = (raw >> 16) & 0xF;
-            if opc2 == 0b0100 || opc2 == 0b0101 {
+            if opc2 == 0b0010 {
+                // VMOV immediate
+                let imm4h = (raw >> 16) & 0xF;
+                let imm4l = raw & 0xF;
+                let imm8 = ((imm4h as u8) << 4) | (imm4l as u8);
+                let val_bits = if is_double {
+                    let a = ((imm8 >> 7) & 1) as u64;
+                    let b = ((imm8 >> 6) & 1) as u64;
+                    let not_b = b ^ 1;
+                    let b_rep8 = if b != 0 { 0xFF } else { 0 };
+                    let lower6 = (imm8 & 0x3F) as u64;
+                    (a << 63) | (not_b << 62) | (b_rep8 << 54) | (lower6 << 48)
+                } else {
+                    let a = ((imm8 >> 7) & 1) as u32;
+                    let b = ((imm8 >> 6) & 1) as u32;
+                    let not_b = b ^ 1;
+                    let b_rep5 = if b != 0 { 0x1F } else { 0 };
+                    let lower6 = (imm8 & 0x3F) as u32;
+                    ((a << 31) | (not_b << 30) | (b_rep5 << 25) | (lower6 << 19)) as u64
+                };
+                return Op::VfpMovImm {
+                    dst,
+                    val_bits,
+                    is_double,
+                };
+            } else if opc2 == 0b0100 || opc2 == 0b0101 {
                 let with_zero = opc2 == 0b0101;
                 let op = if with_zero {
                     VfpOp::CmpZero
@@ -1808,10 +1932,12 @@ impl ArmDecoder {
         // VDIV: 0x0E80_0A00 (bits [23:20] == 0b1000, bit 6 == 0)
         // VFMA: 0x0EA0_0A00 (bits [23:20] == 0b1010, bit 6 == 0)
         // VFMS: 0x0EA0_0A40 (bits [23:20] == 0b1010, bit 6 == 1)
-        let op_code = (raw >> 20) & 0xF;
+        let op_code = (raw >> 20) & 0b1011;
         let bit6 = (raw >> 6) & 1;
 
         let vfp_op = match (op_code, bit6) {
+            (0b0000, 0) => VfpOp::Mla,
+            (0b0001, 0) => VfpOp::Mls,
             (0b0011, 0) => VfpOp::Add,
             (0b0011, 1) => VfpOp::Sub,
             (0b0010, 0) => VfpOp::Mul,
@@ -2970,5 +3096,25 @@ mod tests {
         // MOVT r2, #0xABC0 -> 0xE34A_2BC0
         let inst = ArmDecoder::decode(0xE34A_2BC0);
         assert_eq!(inst.op, Op::Movt { rd: Reg::R2, imm: 0xABC0 });
+    }
+
+    #[test]
+    fn test_neon_and_vfp_regression_instructions() {
+        let insts = [
+            ("vmla.f64 D17", 0xee401ba0),
+            ("vmla.f64 D8", 0xee018ba0),
+            ("vmov.f64 #36", 0xeef20b04),
+            ("vmov.i32 q9, #3", 0xf2c02053),
+            ("vmov.i32 q10, #4", 0xf2c04054),
+            ("vmov.i32 q11, #1", 0xf2c06051),
+            ("vmla.i32", 0xf26069e2),
+            ("vmov.i32 q8, #0", 0xf2c00050),
+            ("vdup.32", 0xf3fc2c60),
+            ("vmov.32 core from lane", 0xee105b90),
+        ];
+        for (desc, raw) in insts {
+            let inst = ArmDecoder::decode(raw);
+            assert!(!matches!(inst.op, Op::Unknown(_)), "Failed to decode {}: 0x{:08x}", desc, raw);
+        }
     }
 }

@@ -257,6 +257,8 @@ pub enum VfpOp {
     CmpZero,
     Fma,
     Fms,
+    Mla,
+    Mls,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -688,6 +690,22 @@ pub enum Op {
         is_quad: bool,
         vd: u8,
         vm: u8,
+    },
+    VfpMovImm {
+        dst: VfpReg,
+        val_bits: u64,
+        is_double: bool,
+    },
+    NeonMovImm {
+        dst: u8,
+        is_quad: bool,
+        val64: u64,
+    },
+    NeonMovCoreLane {
+        to_core: bool,
+        core_reg: Reg,
+        d_reg: u8,
+        lane: u8,
     },
     Nop,
     Unknown(u32),

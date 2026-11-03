@@ -85,13 +85,15 @@ impl JitPool {
         // Ensure we have a page with enough room.
         let needs_new_page = match &self.current {
             None => true,
-            Some(p) => p.len() + needed > p.capacity(),
+            Some(p) => p.is_committed() || (p.len() + needed > p.capacity()),
         };
 
         if needs_new_page {
             // Commit and archive the old page if one exists.
             if let Some(mut old) = self.current.take() {
-                old.commit()?;
+                if !old.is_committed() {
+                    old.commit()?;
+                }
                 self.committed_pages.push(old);
             }
             // Allocate a fresh page large enough for at least this block.
@@ -129,8 +131,11 @@ impl JitPool {
     /// Forcibly commit the current (partially filled) page to R+X.
     /// Call this before dispatching any block in the pool.
     pub fn flush_current(&mut self) -> std::io::Result<()> {
-        if let Some(page) = &mut self.current {
-            page.commit()?;
+        if let Some(mut page) = self.current.take() {
+            if !page.is_committed() {
+                page.commit()?;
+            }
+            self.committed_pages.push(page);
         }
         Ok(())
     }

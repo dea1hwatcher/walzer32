@@ -1121,6 +1121,22 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// MLA Vd.<T>, Vn.<T>, Vm.<T> (Vector integer multiply-accumulate: Vd += Vn * Vm)
+    pub fn neon_mla_int(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool, size: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x0E20_9400 | q | (((size as u32) & 0x3) << 22) | (((rm as u32) & 0x1F) << 16) | (((rn as u32) & 0x1F) << 5) | ((rd as u32) & 0x1F);
+        self.emit(inst);
+    }
+
+    /// MLS Vd.<T>, Vn.<T>, Vm.<T> (Vector integer multiply-subtract: Vd -= Vn * Vm)
+    pub fn neon_mls_int(&mut self, rd: u8, rn: u8, rm: u8, is_quad: bool, size: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let q = if is_quad { 1 << 30 } else { 0 };
+        let inst = 0x2E20_9400 | q | (((size as u32) & 0x3) << 22) | (((rm as u32) & 0x1F) << 16) | (((rn as u32) & 0x1F) << 5) | ((rd as u32) & 0x1F);
+        self.emit(inst);
+    }
+
     pub fn neon_add_4s(&mut self, rd: u8, rn: u8, rm: u8) {
         self.neon_add_int(rd, rn, rm, true);
     }

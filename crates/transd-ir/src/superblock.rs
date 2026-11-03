@@ -29,6 +29,8 @@ pub struct Superblock {
     pub is_thumb: bool,
     /// Flattened instruction stream across all traced blocks
     pub insts: Vec<ArmInst>,
+    /// Exact guest address of each instruction in this superblock
+    pub inst_addrs: Vec<GuestAddr>,
     /// Guarded side exits along the trace
     pub side_exits: Vec<SideExit>,
     /// Final exit of the superblock
@@ -47,11 +49,43 @@ impl Superblock {
             entry,
             is_thumb,
             insts: Vec::new(),
+            inst_addrs: Vec::new(),
             side_exits: Vec::new(),
             exit: BlockExit::Invalid(entry),
             block_count: 0,
             byte_size: 0,
             is_loop: false,
+        }
+    }
+
+    /// Resolves the guest address for the instruction at `idx`
+    pub fn inst_pc(&self, idx: usize) -> GuestAddr {
+        if let Some(&addr) = self.inst_addrs.get(idx) {
+            addr
+        } else if self.is_thumb {
+            self.entry.add((idx * 2) as u32)
+        } else {
+            self.entry.add((idx * 4) as u32)
+        }
+    }
+
+    /// Computes the architectural PC read value for instruction `idx` (+8 for ARM, +4 for Thumb)
+    pub fn pc_read_val(&self, idx: usize) -> u32 {
+        let addr = self.inst_pc(idx).as_u32();
+        if self.is_thumb {
+            addr + 4
+        } else {
+            addr + 8
+        }
+    }
+
+    /// Computes PC value for PC-relative memory operations (+8 for ARM, (addr + 4) & !3 for Thumb)
+    pub fn pc_mem_read_val(&self, idx: usize) -> u32 {
+        let addr = self.inst_pc(idx).as_u32();
+        if self.is_thumb {
+            (addr + 4) & !3
+        } else {
+            addr + 8
         }
     }
 }
@@ -109,6 +143,7 @@ impl TraceBuilder {
             match exit {
                 BlockExit::Direct(target) => {
                     sb.insts.extend(block.insts);
+                    sb.inst_addrs.extend(block.inst_addrs);
                     if target == entry {
                         sb.is_loop = true;
                         sb.exit = BlockExit::Direct(target);
@@ -121,6 +156,7 @@ impl TraceBuilder {
                     if target == entry {
                         // Loop backedge taken
                         sb.insts.extend(block.insts);
+                        sb.inst_addrs.extend(block.inst_addrs);
                         sb.is_loop = true;
                         sb.exit = BlockExit::BranchCond { cond, target, fallthrough };
                         break;
@@ -131,6 +167,7 @@ impl TraceBuilder {
                     let inst_count = block.insts.len();
                     if inst_count > 1 {
                         sb.insts.extend_from_slice(&block.insts[..inst_count - 1]);
+                        sb.inst_addrs.extend_from_slice(&block.inst_addrs[..inst_count - 1]);
                     }
                     let guard_index = sb.insts.len();
                     sb.side_exits.push(SideExit {
@@ -144,6 +181,7 @@ impl TraceBuilder {
                 _ => {
                     // Indirect, SVC, BKPT, Invalid terminate the trace
                     sb.insts.extend(block.insts);
+                    sb.inst_addrs.extend(block.inst_addrs);
                     sb.exit = exit;
                     break;
                 }

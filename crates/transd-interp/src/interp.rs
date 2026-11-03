@@ -1302,14 +1302,14 @@ impl Interpreter {
                             VfpOp::Abs => res = s1.abs(),
                             VfpOp::Neg => res = -s1,
                             VfpOp::Sqrt => res = s1.sqrt(),
-                            VfpOp::Fma => {
+                            VfpOp::Fma | VfpOp::Mla => {
                                 let dst_val = match dst {
                                     VfpReg::S(idx) => cpu.s_reg(idx),
                                     _ => 0.0,
                                 };
                                 res = s1.mul_add(s2, dst_val);
                             }
-                            VfpOp::Fms => {
+                            VfpOp::Fms | VfpOp::Mls => {
                                 let dst_val = match dst {
                                     VfpReg::S(idx) => cpu.s_reg(idx),
                                     _ => 0.0,
@@ -1366,14 +1366,14 @@ impl Interpreter {
                             VfpOp::Abs => res = d1.abs(),
                             VfpOp::Neg => res = -d1,
                             VfpOp::Sqrt => res = d1.sqrt(),
-                            VfpOp::Fma => {
+                            VfpOp::Fma | VfpOp::Mla => {
                                 let dst_val = match dst {
                                     VfpReg::D(idx) => cpu.d_reg(idx),
                                     _ => 0.0,
                                 };
                                 res = d1.mul_add(d2, dst_val);
                             }
-                            VfpOp::Fms => {
+                            VfpOp::Fms | VfpOp::Mls => {
                                 let dst_val = match dst {
                                     VfpReg::D(idx) => cpu.d_reg(idx),
                                     _ => 0.0,
@@ -1907,6 +1907,28 @@ impl Interpreter {
                                 let r1 = (a1.wrapping_mul(b1) as u64) << 32;
                                 r0 | r1
                             }
+                            (NeonOp::Mla, NeonSize::I32) => {
+                                let a0 = (a & 0xFFFF_FFFF) as u32;
+                                let a1 = (a >> 32) as u32;
+                                let b0 = (b & 0xFFFF_FFFF) as u32;
+                                let b1 = (b >> 32) as u32;
+                                let acc0 = (acc & 0xFFFF_FFFF) as u32;
+                                let acc1 = (acc >> 32) as u32;
+                                let r0 = acc0.wrapping_add(a0.wrapping_mul(b0)) as u64;
+                                let r1 = (acc1.wrapping_add(a1.wrapping_mul(b1)) as u64) << 32;
+                                r0 | r1
+                            }
+                            (NeonOp::Mls, NeonSize::I32) => {
+                                let a0 = (a & 0xFFFF_FFFF) as u32;
+                                let a1 = (a >> 32) as u32;
+                                let b0 = (b & 0xFFFF_FFFF) as u32;
+                                let b1 = (b >> 32) as u32;
+                                let acc0 = (acc & 0xFFFF_FFFF) as u32;
+                                let acc1 = (acc >> 32) as u32;
+                                let r0 = acc0.wrapping_sub(a0.wrapping_mul(b0)) as u64;
+                                let r1 = (acc1.wrapping_sub(a1.wrapping_mul(b1)) as u64) << 32;
+                                r0 | r1
+                            }
                             (NeonOp::Add, NeonSize::I16) => {
                                 let mut r = 0u64;
                                 for k in 0..4 {
@@ -1937,6 +1959,28 @@ impl Interpreter {
                                 }
                                 r
                             }
+                            (NeonOp::Mla, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak = ((a >> (k * 16)) & 0xFFFF) as u16;
+                                    let bk = ((b >> (k * 16)) & 0xFFFF) as u16;
+                                    let acck = ((acc >> (k * 16)) & 0xFFFF) as u16;
+                                    let rk = (acck.wrapping_add(ak.wrapping_mul(bk)) as u64) << (k * 16);
+                                    r |= rk;
+                                }
+                                r
+                            }
+                            (NeonOp::Mls, NeonSize::I16) => {
+                                let mut r = 0u64;
+                                for k in 0..4 {
+                                    let ak = ((a >> (k * 16)) & 0xFFFF) as u16;
+                                    let bk = ((b >> (k * 16)) & 0xFFFF) as u16;
+                                    let acck = ((acc >> (k * 16)) & 0xFFFF) as u16;
+                                    let rk = (acck.wrapping_sub(ak.wrapping_mul(bk)) as u64) << (k * 16);
+                                    r |= rk;
+                                }
+                                r
+                            }
                             (NeonOp::Add, NeonSize::I8) => {
                                 let mut r = 0u64;
                                 for byte_idx in 0..8 {
@@ -1963,6 +2007,28 @@ impl Interpreter {
                                     let ab = ((a >> (byte_idx * 8)) & 0xFF) as u8;
                                     let bb = ((b >> (byte_idx * 8)) & 0xFF) as u8;
                                     let rb = (ab.wrapping_mul(bb) as u64) << (byte_idx * 8);
+                                    r |= rb;
+                                }
+                                r
+                            }
+                            (NeonOp::Mla, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for byte_idx in 0..8 {
+                                    let ab = ((a >> (byte_idx * 8)) & 0xFF) as u8;
+                                    let bb = ((b >> (byte_idx * 8)) & 0xFF) as u8;
+                                    let accb = ((acc >> (byte_idx * 8)) & 0xFF) as u8;
+                                    let rb = (accb.wrapping_add(ab.wrapping_mul(bb)) as u64) << (byte_idx * 8);
+                                    r |= rb;
+                                }
+                                r
+                            }
+                            (NeonOp::Mls, NeonSize::I8) => {
+                                let mut r = 0u64;
+                                for byte_idx in 0..8 {
+                                    let ab = ((a >> (byte_idx * 8)) & 0xFF) as u8;
+                                    let bb = ((b >> (byte_idx * 8)) & 0xFF) as u8;
+                                    let accb = ((acc >> (byte_idx * 8)) & 0xFF) as u8;
+                                    let rb = (accb.wrapping_sub(ab.wrapping_mul(bb)) as u64) << (byte_idx * 8);
                                     r |= rb;
                                 }
                                 r
@@ -3240,6 +3306,45 @@ impl Interpreter {
                     cpu.vfp[d] = out;
                 }
 
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::VfpMovImm { dst, val_bits, is_double: _ } => {
+                match dst {
+                    VfpReg::D(idx) => cpu.set_d_reg(idx, f64::from_bits(val_bits)),
+                    VfpReg::S(idx) => cpu.set_s_reg(idx, f32::from_bits(val_bits as u32)),
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonMovImm { dst, is_quad, val64 } => {
+                let d0 = dst as usize;
+                if d0 < 32 {
+                    cpu.vfp[d0] = val64;
+                    if is_quad && d0 + 1 < 32 {
+                        cpu.vfp[d0 + 1] = val64;
+                    }
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::NeonMovCoreLane { to_core, core_reg, d_reg, lane } => {
+                let d_idx = d_reg as usize;
+                if d_idx < 32 {
+                    let d_val = cpu.vfp[d_idx];
+                    if to_core {
+                        let val32 = if lane == 0 { d_val as u32 } else { (d_val >> 32) as u32 };
+                        cpu.set_reg(core_reg, val32);
+                    } else {
+                        let val32 = cpu.reg(core_reg) as u64;
+                        let new_d = if lane == 0 {
+                            (d_val & 0xFFFF_FFFF_0000_0000) | val32
+                        } else {
+                            (val32 << 32) | (d_val & 0x0000_0000_FFFF_FFFF)
+                        };
+                        cpu.vfp[d_idx] = new_d;
+                    }
+                }
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }

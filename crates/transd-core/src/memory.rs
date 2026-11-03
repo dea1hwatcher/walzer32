@@ -198,7 +198,7 @@ impl Memory for FlatMemory {
 
     #[inline(always)]
     fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.data.as_mut_ptr()
+        ((self.data.as_mut_ptr() as usize).wrapping_sub(self.base.as_u32() as usize)) as *mut u8
     }
 }
 

@@ -38,7 +38,7 @@ impl JitPage {
     /// Allocate a RW anonymous page of at least `min_size` bytes.
     pub fn allocate(min_size: usize) -> std::io::Result<Self> {
         use libc::{
-            MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE, mmap, munmap,
+            MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE, mmap,
         };
         let len = align_up(min_size.max(PAGE_SIZE), PAGE_SIZE);
         let ptr = unsafe {
@@ -109,6 +109,10 @@ impl JitPage {
         // Transmute usize → fn pointer of the caller's function type.
         // This is the canonical unsafe pattern for JIT-generated code.
         unsafe { std::mem::transmute_copy(&raw) }
+    }
+
+    pub fn is_committed(&self) -> bool {
+        self.committed
     }
 
     pub fn len(&self) -> usize {
@@ -212,6 +216,10 @@ impl JitPage {
         assert!(byte_offset < self.write_cursor);
         let raw = unsafe { self.ptr.add(byte_offset) } as usize;
         unsafe { std::mem::transmute_copy(&raw) }
+    }
+
+    pub fn is_committed(&self) -> bool {
+        self.committed
     }
 
     pub fn len(&self) -> usize {

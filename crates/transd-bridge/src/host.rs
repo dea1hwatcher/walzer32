@@ -76,7 +76,8 @@ impl HostBridge {
     ///
     /// On non-Android this is a no-op and `available()` returns `false`.
     pub fn new() -> Self {
-        let bridge = Self {
+        #[allow(unused_mut)]
+        let mut bridge = Self {
             _handles: Vec::new(),
             symbols: HashMap::new(),
         };
