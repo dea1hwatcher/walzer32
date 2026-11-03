@@ -1724,26 +1724,33 @@ impl Interpreter {
             Op::AtomicLoadEx { rd, rn } => {
                 let addr = GuestAddr::new(cpu.reg(rn));
                 let val = mem.read_u32(addr)?;
-                cpu.exclusive_addr = addr.as_u32();
+                let granule = addr.as_u32() & transd_core::RESERVATION_MASK;
+                cpu.exclusive_addr = granule;
+                transd_core::GlobalExclusiveMonitor::global().set_reservation(cpu.thread_id as usize, addr.as_u32());
                 cpu.set_reg(rd, val);
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
             Op::AtomicStoreEx { rd, rm, rn } => {
                 let addr = cpu.reg(rn);
-                if cpu.exclusive_addr == addr {
+                let thread_id = cpu.thread_id as usize;
+                let monitor = transd_core::GlobalExclusiveMonitor::global();
+                if monitor.check_and_clear(thread_id, addr) {
                     let val = cpu.reg(rm);
                     mem.write_u32(GuestAddr::new(addr), val)?;
+                    monitor.clear_all(addr);
+                    cpu.exclusive_addr = transd_core::INVALID_RESERVATION;
                     cpu.set_reg(rd, 0); // 0 indicates success in ARM STREX
-                    cpu.exclusive_addr = 0xFFFF_FFFF;
                 } else {
+                    cpu.exclusive_addr = transd_core::INVALID_RESERVATION;
                     cpu.set_reg(rd, 1); // 1 indicates exclusive reservation failed
                 }
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
             Op::Clrex => {
-                cpu.exclusive_addr = 0xFFFF_FFFF;
+                transd_core::GlobalExclusiveMonitor::global().clear_thread(cpu.thread_id as usize);
+                cpu.exclusive_addr = transd_core::INVALID_RESERVATION;
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }

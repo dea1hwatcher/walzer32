@@ -137,24 +137,28 @@ impl Memory for FlatMemory {
     fn write_u8(&mut self, addr: GuestAddr, val: u8) -> Result<(), MemoryError> {
         let off = self.check_access(addr, 1, true)?;
         self.data[off] = val;
+        crate::GlobalExclusiveMonitor::global().clear_all(addr.as_u32());
         Ok(())
     }
 
     fn write_u16(&mut self, addr: GuestAddr, val: u16) -> Result<(), MemoryError> {
         let off = self.check_access(addr, 2, true)?;
         LittleEndian::write_u16(&mut self.data[off..off + 2], val);
+        crate::GlobalExclusiveMonitor::global().clear_all(addr.as_u32());
         Ok(())
     }
 
     fn write_u32(&mut self, addr: GuestAddr, val: u32) -> Result<(), MemoryError> {
         let off = self.check_access(addr, 4, true)?;
         LittleEndian::write_u32(&mut self.data[off..off + 4], val);
+        crate::GlobalExclusiveMonitor::global().clear_all(addr.as_u32());
         Ok(())
     }
 
     fn write_u64(&mut self, addr: GuestAddr, val: u64) -> Result<(), MemoryError> {
         let off = self.check_access(addr, 8, true)?;
         LittleEndian::write_u64(&mut self.data[off..off + 8], val);
+        crate::GlobalExclusiveMonitor::global().clear_all(addr.as_u32());
         Ok(())
     }
 
@@ -167,6 +171,7 @@ impl Memory for FlatMemory {
     fn write_bytes(&mut self, addr: GuestAddr, buf: &[u8]) -> Result<(), MemoryError> {
         let off = self.check_access(addr, buf.len(), true)?;
         self.data[off..off + buf.len()].copy_from_slice(buf);
+        crate::GlobalExclusiveMonitor::global().clear_all(addr.as_u32());
         Ok(())
     }
 

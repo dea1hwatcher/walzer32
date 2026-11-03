@@ -408,6 +408,7 @@ impl Memory for ArenaMemory {
         unsafe {
             *self.base_ptr.add(addr.as_u32() as usize) = val;
         }
+        crate::GlobalExclusiveMonitor::global().clear_all(addr.as_u32());
         Ok(())
     }
 
@@ -419,6 +420,7 @@ impl Memory for ArenaMemory {
                 val,
             );
         }
+        crate::GlobalExclusiveMonitor::global().clear_all(addr.as_u32());
         Ok(())
     }
 
@@ -430,6 +432,7 @@ impl Memory for ArenaMemory {
                 val,
             );
         }
+        crate::GlobalExclusiveMonitor::global().clear_all(addr.as_u32());
         Ok(())
     }
 
@@ -441,6 +444,7 @@ impl Memory for ArenaMemory {
                 val,
             );
         }
+        crate::GlobalExclusiveMonitor::global().clear_all(addr.as_u32());
         Ok(())
     }
 
@@ -461,6 +465,7 @@ impl Memory for ArenaMemory {
             std::slice::from_raw_parts_mut(self.base_ptr.add(addr.as_u32() as usize), buf.len())
                 .copy_from_slice(buf);
         }
+        crate::GlobalExclusiveMonitor::global().clear_all(addr.as_u32());
         Ok(())
     }
 
