@@ -3051,4 +3051,39 @@ mod tests {
         assert!(!compiled.code_bytes.is_empty());
         assert_eq!(compiled.patch_sites.len(), 1);
     }
+
+    #[test]
+    fn test_compile_thumb_it_block_guarded_execution() {
+        let mut block = IrBlock::new(GuestAddr::new(0x6000), true);
+        // Instruction with EQ condition (e.g. ADDEQ r0, r0, #1)
+        block.insts.push(ArmInst::new(
+            Cond::EQ,
+            Op::Alu {
+                op: AluOp::Add,
+                set_flags: false,
+                rd: Reg::R0,
+                rn: Reg::R0,
+                op2: Operand2::Imm(1),
+            },
+            0,
+        ));
+        block.exit = BlockExit::Direct(GuestAddr::new(0x6004));
+
+        let compiled = A64Compiler::compile(&block);
+        assert_eq!(compiled.inst_count, 1);
+        assert!(!compiled.code_bytes.is_empty());
+
+        // The emitted code must contain B.NE (inverted condition) to skip the ADD when Z == 0
+        // AArch64 B.cond encoding: 0x54000000 | (imm19 << 5) | cond
+        // Cond::NE field in AArch64 is 0b0001
+        let mut found_b_ne = false;
+        for chunk in compiled.code_bytes.chunks_exact(4) {
+            let inst = u32::from_le_bytes(chunk.try_into().unwrap());
+            if (inst & 0xFF00_001F) == 0x5400_0001 {
+                found_b_ne = true;
+                break;
+            }
+        }
+        assert!(found_b_ne, "Compiled guarded instruction must contain B.NE skip branch!");
+    }
 }

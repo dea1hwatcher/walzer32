@@ -1,4 +1,4 @@
-use transd_core::{GuestAddr, Memory, MemoryError, Reg};
+use transd_core::{Cond, GuestAddr, Memory, MemoryError, Reg};
 use transd_decoder::{decode_next, AluOp, ArmInst, BranchTarget, Op, Operand2};
 use crate::ir::{BlockExit, IrBlock};
 
@@ -25,9 +25,10 @@ impl Lifter {
         let mut block = IrBlock::new(entry, is_thumb);
         let mut cur_pc = entry;
         let mut hit_invalid = false;
+        let mut it_state: u8 = 0;
 
-        while block.insts.len() < max_insts {
-            let (inst, len) = match decode_next(mem, cur_pc, is_thumb) {
+        while block.insts.len() < max_insts || it_state != 0 {
+            let (mut inst, len) = match decode_next(mem, cur_pc, is_thumb) {
                 Ok(res) => res,
                 Err(e) => {
                     if block.insts.is_empty() {
@@ -41,6 +42,24 @@ impl Lifter {
             };
 
             let next_pc = cur_pc.add(len as u32);
+
+            // In Thumb mode, track IT (If-Then) block predication
+            if is_thumb {
+                if let Op::It { firstcond, mask } = inst.op {
+                    it_state = ((firstcond as u8) << 4) | (mask & 0x0F);
+                    inst.cond = Cond::AL;
+                } else if it_state != 0 {
+                    let cond_u8 = it_state >> 4;
+                    inst.cond = Cond::from_u8(cond_u8);
+                    let next_it = (it_state & 0xE0) | ((it_state << 1) & 0x1F);
+                    if (next_it & 0x0F) == 0 {
+                        it_state = 0;
+                    } else {
+                        it_state = next_it;
+                    }
+                }
+            }
+
             block.insts.push(inst);
             block.inst_addrs.push(cur_pc);
             block.byte_size += len;
@@ -272,5 +291,35 @@ mod tests {
                 fallthrough: GuestAddr::new(0x200C),
             }
         );
+    }
+
+    #[test]
+    fn test_lift_thumb_it_block() {
+        let mut mem = FlatMemory::new(GuestAddr::new(0x3000), 0x1000);
+
+        // 0x3000: ITTE EQ           (0xBF06) - firstcond=EQ, mask=0b0110 (T, T, E)
+        // 0x3002: ADDEQ r0, #1      (0x3001)
+        // 0x3004: ADDEQ r1, #2      (0x3102)
+        // 0x3006: ADDNE r2, #3      (0x3203)
+        // 0x3008: MOV r3, #4        (0x2304) - outside IT block, unconditional
+        mem.write_u16(GuestAddr::new(0x3000), 0xBF06).unwrap();
+        mem.write_u16(GuestAddr::new(0x3002), 0x3001).unwrap();
+        mem.write_u16(GuestAddr::new(0x3004), 0x3102).unwrap();
+        mem.write_u16(GuestAddr::new(0x3006), 0x3203).unwrap();
+        mem.write_u16(GuestAddr::new(0x3008), 0x2304).unwrap();
+
+        let block = Lifter::lift_block_with_limit(&mem, GuestAddr::new(0x3000), true, 5).unwrap();
+        assert_eq!(block.insts.len(), 5);
+
+        // Inst 0: IT instruction
+        assert_eq!(block.insts[0].cond, Cond::AL);
+        // Inst 1: First THEN
+        assert_eq!(block.insts[1].cond, Cond::EQ);
+        // Inst 2: Second THEN
+        assert_eq!(block.insts[2].cond, Cond::EQ);
+        // Inst 3: ELSE
+        assert_eq!(block.insts[3].cond, Cond::NE);
+        // Inst 4: After IT block
+        assert_eq!(block.insts[4].cond, Cond::AL);
     }
 }
