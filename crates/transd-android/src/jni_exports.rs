@@ -20,6 +20,12 @@ pub const JNI_ERR_LOAD_FAIL: JInt = -3;
 /// Standard JNI lifecycle entrypoint
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn JNI_OnLoad(_vm: *mut c_void, _reserved: *mut c_void) -> JInt {
+    log_i!("Transd: JNI_OnLoad called by ART");
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let _ = session.ensure_bundled_apk_loaded();
+        }
+    }
     0x0001_0006 // JNI_VERSION_1_6
 }
 
@@ -33,9 +39,18 @@ pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeInit(
     _clazz: JClass,
     _apk_path: JString,
 ) -> JInt {
+    log_i!("Transd: TransdEngine.nativeInit called");
     match get_or_init_session() {
-        Ok(_) => JNI_OK,
-        Err(_) => JNI_ERR_GENERIC,
+        Ok(mut guard) => {
+            if let Some(session) = guard.as_mut() {
+                let _ = session.ensure_bundled_apk_loaded();
+            }
+            JNI_OK
+        }
+        Err(e) => {
+            log_e!("Transd: get_or_init_session failed: {:?}", e);
+            JNI_ERR_GENERIC
+        }
     }
 }
 
@@ -395,7 +410,7 @@ pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeSetAudioVolum
     };
 
     if let Some(session) = guard.as_mut() {
-        session.set_audio_volume(millibels as i32);
+        session.set_audio_volume(millibels);
         JNI_OK
     } else {
         JNI_ERR_GENERIC
@@ -798,21 +813,39 @@ pub unsafe extern "C" fn Java_com_noodlecake_lib_font_NoodleBitmap_nativeInitBit
 pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIAccelerometer_onSensorChanged(
     _env: JNIEnv,
     _clazz: JClass,
-    _x: JFloat,
-    _y: JFloat,
-    _z: JFloat,
-    _timestamp: JLong,
+    x: JFloat,
+    y: JFloat,
+    z: JFloat,
+    timestamp: JLong,
 ) {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_com_noodlecake_lib_uikit_UIAccelerometer_onSensorChanged") {
+                let fn_ptr = info.fn_ptr;
+                let _ = session.call_native(fn_ptr, &[env_ptr, 1, x.to_bits(), y.to_bits(), z.to_bits(), timestamp as u32, (timestamp >> 32) as u32]);
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIAlertView_returnAlertView(
     _env: JNIEnv,
     _clazz: JClass,
-    _alert_id: JInt,
-    _button_idx: JInt,
+    alert_id: JInt,
+    button_idx: JInt,
     _text: JString,
 ) {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_com_noodlecake_lib_uikit_UIAlertView_returnAlertView") {
+                let fn_ptr = info.fn_ptr;
+                let _ = session.call_native(fn_ptr, &[env_ptr, 1, alert_id as u32, button_idx as u32, 0]);
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -820,6 +853,16 @@ pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIApplication_appDidBecom
     _env: JNIEnv,
     _clazz: JClass,
 ) {
+    log_i!("Transd: appDidBecomeActive called");
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_com_noodlecake_lib_uikit_UIApplication_appDidBecomeActive") {
+                let fn_ptr = info.fn_ptr;
+                let _ = session.call_native(fn_ptr, &[env_ptr, 1]);
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -827,6 +870,16 @@ pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIApplication_appDidEnter
     _env: JNIEnv,
     _clazz: JClass,
 ) {
+    log_i!("Transd: appDidEnterBackground called");
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_com_noodlecake_lib_uikit_UIApplication_appDidEnterBackground") {
+                let fn_ptr = info.fn_ptr;
+                let _ = session.call_native(fn_ptr, &[env_ptr, 1]);
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -834,6 +887,15 @@ pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIApplication_appDidRecei
     _env: JNIEnv,
     _clazz: JClass,
 ) {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_com_noodlecake_lib_uikit_UIApplication_appDidReceiveMemoryWarning") {
+                let fn_ptr = info.fn_ptr;
+                let _ = session.call_native(fn_ptr, &[env_ptr, 1]);
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -841,6 +903,16 @@ pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIApplication_appWillEnte
     _env: JNIEnv,
     _clazz: JClass,
 ) {
+    log_i!("Transd: appWillEnterForeground called");
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_com_noodlecake_lib_uikit_UIApplication_appWillEnterForeground") {
+                let fn_ptr = info.fn_ptr;
+                let _ = session.call_native(fn_ptr, &[env_ptr, 1]);
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -848,6 +920,16 @@ pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIApplication_appWillResi
     _env: JNIEnv,
     _clazz: JClass,
 ) {
+    log_i!("Transd: appWillResignActive called");
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_com_noodlecake_lib_uikit_UIApplication_appWillResignActive") {
+                let fn_ptr = info.fn_ptr;
+                let _ = session.call_native(fn_ptr, &[env_ptr, 1]);
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -855,6 +937,16 @@ pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIApplication_appWillTerm
     _env: JNIEnv,
     _clazz: JClass,
 ) {
+    log_i!("Transd: appWillTerminate called");
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_com_noodlecake_lib_uikit_UIApplication_appWillTerminate") {
+                let fn_ptr = info.fn_ptr;
+                let _ = session.call_native(fn_ptr, &[env_ptr, 1]);
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -872,6 +964,15 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeDeleteBack
     _env: JNIEnv,
     _clazz: JClass,
 ) {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeDeleteBackward") {
+                let fn_ptr = info.fn_ptr;
+                let _ = session.call_native(fn_ptr, &[env_ptr, 1]);
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -889,9 +990,21 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit(
     width: JInt,
     height: JInt,
 ) {
+    log_i!("Transd: Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit({}, {}) called", width, height);
     if let Ok(mut guard) = get_or_init_session() {
         if let Some(session) = guard.as_mut() {
             session.on_surface_created(0, width as u32, height as u32);
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit") {
+                let fn_ptr = info.fn_ptr;
+                log_i!("Transd: Invoking guest nativeInit at 0x{:08x}...", fn_ptr.as_u32());
+                match session.call_native(fn_ptr, &[env_ptr, 1, width as u32, height as u32]) {
+                    Ok(res) => log_i!("Transd: guest nativeInit finished with 0x{:08x}", res),
+                    Err(e) => log_e!("Transd: guest nativeInit error: {:?}", e),
+                }
+            } else {
+                log_i!("Transd: Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit not found in guest libs");
+            }
         }
     }
 }
@@ -908,8 +1021,20 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInsertText
 pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeKeyDown(
     _env: JNIEnv,
     _clazz: JClass,
-    _key_code: JInt,
+    key_code: JInt,
 ) -> JInt {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeKeyDown") {
+                let fn_ptr = info.fn_ptr;
+                match session.call_native(fn_ptr, &[env_ptr, 1, key_code as u32]) {
+                    Ok(r) => return r as JInt,
+                    Err(_) => return 0,
+                }
+            }
+        }
+    }
     0
 }
 
@@ -918,9 +1043,26 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender(
     _env: JNIEnv,
     _clazz: JClass,
 ) {
+    static FRAME_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let f = FRAME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if f == 0 || f.is_multiple_of(300) {
+        log_i!("Transd: nativeRender frame {}", f);
+    }
     if let Ok(mut guard) = get_or_init_session() {
         if let Some(session) = guard.as_mut() {
             let _ = session.on_draw_frame();
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender") {
+                let fn_ptr = info.fn_ptr;
+                match session.call_native(fn_ptr, &[env_ptr, 1]) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        if f.is_multiple_of(300) {
+                            log_e!("Transd: guest nativeRender error: {:?}", e);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -932,9 +1074,15 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeSurfaceCha
     width: JInt,
     height: JInt,
 ) {
+    log_i!("Transd: Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeSurfaceChanged({}, {}) called", width, height);
     if let Ok(mut guard) = get_or_init_session() {
         if let Some(session) = guard.as_mut() {
             session.on_surface_changed(width as u32, height as u32);
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeSurfaceChanged") {
+                let fn_ptr = info.fn_ptr;
+                let _ = session.call_native(fn_ptr, &[env_ptr, 1, width as u32, height as u32]);
+            }
         }
     }
 }
@@ -946,11 +1094,16 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesBeg
     id: JInt,
     x: JFloat,
     y: JFloat,
-    _timestamp: JLong,
+    timestamp: JLong,
 ) {
     if let Ok(mut guard) = get_or_init_session() {
         if let Some(session) = guard.as_mut() {
             session.on_touch_event(0, x, y, id as u32);
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesBegin") {
+                let fn_ptr = info.fn_ptr;
+                let _ = session.call_native(fn_ptr, &[env_ptr, 1, id as u32, x.to_bits(), y.to_bits(), timestamp as u32, (timestamp >> 32) as u32]);
+            }
         }
     }
 }
@@ -962,11 +1115,16 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesEnd
     id: JInt,
     x: JFloat,
     y: JFloat,
-    _timestamp: JLong,
+    timestamp: JLong,
 ) {
     if let Ok(mut guard) = get_or_init_session() {
         if let Some(session) = guard.as_mut() {
             session.on_touch_event(1, x, y, id as u32);
+            let env_ptr = session.jni.env_ptr.as_u32();
+            if let Some(info) = session.jni_registry.find_by_symbol("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesEnd") {
+                let fn_ptr = info.fn_ptr;
+                let _ = session.call_native(fn_ptr, &[env_ptr, 1, id as u32, x.to_bits(), y.to_bits(), timestamp as u32, (timestamp >> 32) as u32]);
+            }
         }
     }
 }

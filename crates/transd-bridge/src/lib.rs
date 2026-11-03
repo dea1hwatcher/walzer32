@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments, clippy::collapsible_if, clippy::type_complexity)]
 pub mod asset;
 pub mod audio;
 pub mod audio_resample;

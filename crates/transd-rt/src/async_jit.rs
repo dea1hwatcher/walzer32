@@ -326,8 +326,9 @@ impl AsyncJit {
                                 max_blocks,
                                 max_insts,
                             ) {
-                                if sb.block_count > 1 || sb.is_loop {
+                                if (sb.block_count > 1 || sb.is_loop) && !sb.insts.is_empty() {
                                     SuperblockOptimizer::optimize(&mut sb);
+                                    if sb.insts.is_empty() { return None; }
                                     let compiled = A64Compiler::compile_superblock(&sb);
                                     let compile_us = t0.elapsed().as_micros() as u64;
                                     return Some(CompilationResult {

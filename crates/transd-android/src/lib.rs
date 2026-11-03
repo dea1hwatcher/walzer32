@@ -1,3 +1,6 @@
+#![allow(clippy::missing_safety_doc, clippy::too_many_arguments, clippy::collapsible_if, clippy::manual_div_ceil)]
+#[macro_use]
+pub mod log;
 pub mod dynamic_jni;
 pub mod jni_exports;
 pub mod session;

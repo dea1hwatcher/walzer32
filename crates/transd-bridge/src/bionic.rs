@@ -1,3 +1,7 @@
+#[cfg(target_os = "android")]
+unsafe extern "C" {
+    fn __android_log_print(prio: std::os::raw::c_int, tag: *const std::os::raw::c_char, fmt: *const std::os::raw::c_char, ...) -> std::os::raw::c_int;
+}
 use std::collections::{HashMap, HashSet, VecDeque};
 use transd_core::{GuestAddr, Memory, MemoryError, Reg};
 use transd_elf::{DsoRegistry, SymbolResolver};
@@ -3934,6 +3938,19 @@ impl BionicBridge {
                 let tag = Self::read_c_string(mem, tag_addr)?;
                 let fmt = Self::read_c_string(mem, fmt_addr)?;
 
+                #[cfg(target_os = "android")]
+                {
+                    if let (Ok(c_tag), Ok(c_text)) = (std::ffi::CString::new(tag.as_bytes()), std::ffi::CString::new(fmt.as_bytes())) {
+                        unsafe {
+                            __android_log_print(prio as i32, c_tag.as_ptr(), b"%s\0".as_ptr() as *const _, c_text.as_ptr());
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    eprintln!("[GuestLog] [{}] {}", tag, fmt);
+                }
+
                 self.logs.push(LogMessage {
                     priority: prio,
                     tag,
@@ -3949,6 +3966,19 @@ impl BionicBridge {
 
                 let tag = Self::read_c_string(mem, tag_addr)?;
                 let text = Self::read_c_string(mem, text_addr)?;
+
+                #[cfg(target_os = "android")]
+                {
+                    if let (Ok(c_tag), Ok(c_text)) = (std::ffi::CString::new(tag.as_bytes()), std::ffi::CString::new(text.as_bytes())) {
+                        unsafe {
+                            __android_log_print(prio as i32, c_tag.as_ptr(), b"%s\0".as_ptr() as *const _, c_text.as_ptr());
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    eprintln!("[GuestLog] [{}] {}", tag, text);
+                }
 
                 self.logs.push(LogMessage {
                     priority: prio,
@@ -12640,6 +12670,19 @@ impl BionicBridge {
 
                 let tag = Self::read_c_string(mem, tag_addr).unwrap_or_default();
                 let text = Self::read_c_string(mem, text_addr).unwrap_or_default();
+
+                #[cfg(target_os = "android")]
+                {
+                    if let (Ok(c_tag), Ok(c_text)) = (std::ffi::CString::new(tag.as_bytes()), std::ffi::CString::new(text.as_bytes())) {
+                        unsafe {
+                            __android_log_print(prio as i32, c_tag.as_ptr(), b"%s\0".as_ptr() as *const _, c_text.as_ptr());
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    eprintln!("[GuestLog] [{}] {}", tag, text);
+                }
 
                 self.logs.push(LogMessage {
                     priority: prio,

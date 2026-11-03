@@ -24,6 +24,7 @@ impl Lifter {
     ) -> Result<IrBlock, MemoryError> {
         let mut block = IrBlock::new(entry, is_thumb);
         let mut cur_pc = entry;
+        let mut hit_invalid = false;
 
         while block.insts.len() < max_insts {
             let (inst, len) = match decode_next(mem, cur_pc, is_thumb) {
@@ -33,6 +34,7 @@ impl Lifter {
                         return Err(e);
                     } else {
                         block.exit = BlockExit::Invalid(cur_pc);
+                        hit_invalid = true;
                         break;
                     }
                 }
@@ -221,7 +223,11 @@ impl Lifter {
                     break;
                 }
                 Op::Unknown(_) => {
+                    block.insts.pop();
+                    block.inst_addrs.pop();
+                    block.byte_size -= len;
                     block.exit = BlockExit::Invalid(cur_pc);
+                    hit_invalid = true;
                     break;
                 }
                 _ => {}
@@ -231,7 +237,7 @@ impl Lifter {
         }
 
         // If limit was reached without a terminator, fallthrough to next_pc
-        if matches!(block.exit, BlockExit::Invalid(_)) && !block.insts.is_empty() {
+        if !hit_invalid && matches!(block.exit, BlockExit::Invalid(_)) && !block.insts.is_empty() {
             block.exit = BlockExit::Direct(cur_pc);
         }
 

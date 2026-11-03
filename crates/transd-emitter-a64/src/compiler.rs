@@ -215,30 +215,38 @@ impl A64Compiler {
         }
 
         // 4. Handle final exit or loop backedge
-        if sb.is_loop {
+        if sb.is_loop && !sb.insts.is_empty() {
             match &sb.exit {
                 BlockExit::BranchCond { cond, target, fallthrough } if *target == sb.entry => {
                     // Conditional loop backedge: B.<cond> back to loop_start_cursor
                     let cur_idx = asm.cursor();
                     let offset_words = (loop_start_cursor as i32) - (cur_idx as i32);
-                    asm.b_cond(*cond, offset_words);
+                    if offset_words < 0 {
+                        asm.b_cond(*cond, offset_words);
 
-                    // Fallthrough path (loop exit)
-                    let ft_site_offset = asm.cursor() * 4;
-                    patch_sites.push(PatchSite {
-                        byte_offset: ft_site_offset,
-                        target: PatchTarget::BranchFallthrough(*fallthrough),
-                    });
-                    asm.mov_imm32(A64Reg::X9, fallthrough.as_u32());
-                    Self::emit_epilogue(&mut asm);
-                    asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
-                    asm.ret(None);
+                        // Fallthrough path (loop exit)
+                        let ft_site_offset = asm.cursor() * 4;
+                        patch_sites.push(PatchSite {
+                            byte_offset: ft_site_offset,
+                            target: PatchTarget::BranchFallthrough(*fallthrough),
+                        });
+                        asm.mov_imm32(A64Reg::X9, fallthrough.as_u32());
+                        Self::emit_epilogue(&mut asm);
+                        asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
+                        asm.ret(None);
+                    } else {
+                        Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites);
+                    }
                 }
                 BlockExit::Direct(target) if *target == sb.entry => {
-                    // Unconditional loop backedge: B back to loop_start_cursor
+                    // Unconditional loop backedge: ONLY valid if there are side exits!
                     let cur_idx = asm.cursor();
                     let offset_words = (loop_start_cursor as i32) - (cur_idx as i32);
-                    asm.b(offset_words);
+                    if offset_words < 0 && !side_exit_stubs.is_empty() {
+                        asm.b(offset_words);
+                    } else {
+                        Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites);
+                    }
                 }
                 _ => {
                     Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites);
@@ -1778,8 +1786,12 @@ impl A64Compiler {
                 asm.mov_imm32(A64Reg::X9, 0xFFFF_FFFF);
                 asm.str_w_imm(A64Reg::X9, A64Reg::X0, OFFSET_EXCLUSIVE as u32);
             }
-            Op::MemoryBarrier { .. } => {
-                asm.dmb_ish();
+            Op::MemoryBarrier { is_data } => {
+                if *is_data {
+                    asm.dmb_ish();
+                } else {
+                    asm.isb();
+                }
             }
             Op::Cp15Move {
                 is_mrc,

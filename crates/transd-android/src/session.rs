@@ -461,7 +461,153 @@ impl TransdSession {
             vfs.register_file("/system/build.prop", build_prop.into_bytes());
         }
     }
+
+    /// Automatically detects if running inside a repackaged Android APK and loads bundled guest libraries
+    pub fn ensure_bundled_apk_loaded(&mut self) -> Result<usize, SessionError> {
+        if !self.loaded_libraries.is_empty() {
+            return Ok(self.loaded_libraries.len());
+        }
+
+        let apk_path = match find_self_apk_path() {
+            Some(p) => p,
+            None => {
+                log_i!("Transd: No self APK found in /proc/self/maps");
+                return Ok(0);
+            }
+        };
+
+        log_i!("Transd: Auto-discovered own APK at: {}", apk_path);
+
+        let apk_bytes = match std::fs::read(&apk_path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log_e!("Transd: Failed to read {}: {:?}", apk_path, e);
+                return Ok(0);
+            }
+        };
+
+        self.attach_apk(apk_bytes.clone());
+
+        let apk = match ApkPackage::open(&apk_bytes) {
+            Ok(a) => a,
+            Err(e) => {
+                log_e!("Transd: Failed to parse APK {}: {:?}", apk_path, e);
+                return Ok(0);
+            }
+        };
+
+        let mut primary_lib = None;
+        if let Ok(config_bytes) = apk.archive().read_file("assets/transd_config.prop") {
+            if let Ok(config_str) = std::str::from_utf8(&config_bytes) {
+                for line in config_str.lines() {
+                    let line = line.trim();
+                    if let Some(val) = line.strip_prefix("transd.guest.primary_lib=") {
+                        primary_lib = Some(val.to_string());
+                    }
+                }
+            }
+        }
+
+        let mut arm32_libs = apk.arm32_libraries();
+        if arm32_libs.is_empty() {
+            log_i!("Transd: No 32-bit ARM libraries found in APK!");
+            return Ok(0);
+        }
+
+        arm32_libs.sort_by_key(|lib| {
+            let name = lib.filename.as_str();
+            if name.contains("gnustl") || name.contains("c++_shared") {
+                0
+            } else if name.contains("objc") || name.contains("dispatch") {
+                1
+            } else if name.contains("ogg") || name.contains("vorbis") || name.contains("openal") {
+                2
+            } else if name.contains("foundation") || name.contains("coregraphics") {
+                3
+            } else if name.contains("quartzcore") || name.contains("uikit") {
+                4
+            } else if name.contains("cocos") || name.contains("noodle") || name.contains("box2d") {
+                5
+            } else if primary_lib.as_deref() == Some(name) {
+                10
+            } else {
+                6
+            }
+        });
+
+        let total_count = arm32_libs.len();
+        log_i!("Transd: Loading {} bundled 32-bit libraries (primary: {:?})...", total_count, primary_lib);
+
+        for lib in &arm32_libs {
+            let lib_data = match apk.extract_library(&lib.filename) {
+                Ok(data) => data,
+                Err(e) => {
+                    log_e!("Transd: Failed to extract {}: {:?}", lib.filename, e);
+                    continue;
+                }
+            };
+            log_i!("Transd: Loading {} ({} bytes)...", lib.filename, lib_data.len());
+            match self.load_library_bytes(&lib.filename, &lib_data) {
+                Ok(loaded) => {
+                    log_i!(
+                        "Transd: Successfully loaded {} at 0x{:08x} ({} symbols)",
+                        lib.filename,
+                        loaded.load_base.as_u32(),
+                        loaded.symbols.len()
+                    );
+                    if let Some(onload_addr) = loaded.find_symbol("JNI_OnLoad") {
+                        log_i!("Transd: Invoking JNI_OnLoad in {} at 0x{:08x}...", lib.filename, onload_addr.as_u32());
+                        let vm_ptr = self.jni.vm_ptr.as_u32();
+                        match self.call_native(onload_addr, &[vm_ptr, 0]) {
+                            Ok(ret) => log_i!("Transd: JNI_OnLoad in {} returned 0x{:08x}", lib.filename, ret),
+                            Err(e) => log_e!("Transd: JNI_OnLoad in {} error: {:?}", lib.filename, e),
+                        }
+                    }
+                }
+                Err(e) => {
+                    log_e!("Transd: Failed to load {}: {:?}", lib.filename, e);
+                }
+            }
+        }
+
+        log_i!(
+            "Transd: Finished loading {} libraries. Total registered JNI methods: {}",
+            self.loaded_libraries.len(),
+            self.jni_registry.method_count()
+        );
+
+        Ok(self.loaded_libraries.len())
+    }
 }
+
+pub fn find_self_apk_path() -> Option<String> {
+    let pkg = std::fs::read_to_string("/proc/self/cmdline")
+        .ok()
+        .map(|s| s.trim_matches('\0').trim().to_string());
+
+    let mut fallback = None;
+    if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+        for line in maps.lines() {
+            if line.contains("base.apk") {
+                if let Some(pos) = line.find('/') {
+                    let path = line[pos..].trim();
+                    if std::path::Path::new(path).exists() {
+                        if let Some(ref p) = pkg {
+                            if path.contains(p) {
+                                return Some(path.to_string());
+                            }
+                        }
+                        if fallback.is_none() {
+                            fallback = Some(path.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fallback
+}
+
 
 // Global static session protected by Mutex for JNI C ABI entry points
 static GLOBAL_SESSION: Mutex<Option<TransdSession>> = Mutex::new(None);
@@ -470,7 +616,8 @@ pub fn get_or_init_session() -> Result<std::sync::MutexGuard<'static, Option<Tra
     let mut guard = GLOBAL_SESSION.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         // Default 128MB arena starting at 0x7000_0000
-        let session = TransdSession::new(GuestAddr::new(0x7000_0000), 0x800_0000)?;
+        let mut session = TransdSession::new(GuestAddr::new(0x7000_0000), 0x800_0000)?;
+        let _ = session.ensure_bundled_apk_loaded();
         *guard = Some(session);
     }
     Ok(guard)

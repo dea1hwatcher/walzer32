@@ -865,16 +865,18 @@ impl<M: Memory> DbtEngine<M> {
             self.telemetry.record_cache_miss();
             let start_t = std::time::Instant::now();
             if let Ok(block) = Lifter::lift_block(&self.mem, pc, is_thumb) {
-                let compiled = A64Compiler::compile(&block);
-                let compile_us = start_t.elapsed().as_micros() as u64;
-                self.telemetry.record_compilation(compile_us.max(1));
-                let guest_size = compiled.guest_byte_size;
-                if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
-                    self.cache.insert_committed(pc, compiled, committed.code_ptr);
-                } else {
-                    self.cache.insert(pc, compiled);
+                if !block.insts.is_empty() || !matches!(block.exit, transd_ir::BlockExit::Invalid(_)) {
+                    let compiled = A64Compiler::compile(&block);
+                    let compile_us = start_t.elapsed().as_micros() as u64;
+                    self.telemetry.record_compilation(compile_us.max(1));
+                    let guest_size = compiled.guest_byte_size;
+                    if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
+                        self.cache.insert_committed(pc, compiled, committed.code_ptr);
+                    } else {
+                        self.cache.insert(pc, compiled);
+                    }
+                    self.protect_code_pages_for(pc, guest_size);
                 }
-                self.protect_code_pages_for(pc, guest_size);
             }
         } else {
             self.telemetry.record_cache_hit();
@@ -888,12 +890,14 @@ impl<M: Memory> DbtEngine<M> {
                 } else {
                     // Synchronous Tier-2 fallback when async JIT is not enabled
                     if let Ok(mut sb) = TraceBuilder::build_trace(&self.mem, pc, is_thumb) {
-                        if sb.block_count > 1 || sb.is_loop {
+                        if (sb.block_count > 1 || sb.is_loop) && !sb.insts.is_empty() {
                             SuperblockOptimizer::optimize(&mut sb);
-                            let compiled = A64Compiler::compile_superblock(&sb);
-                            self.telemetry.record_tier2_compilation();
-                            if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
-                                self.cache.insert_superblock(pc, compiled, committed.code_ptr);
+                            if !sb.insts.is_empty() {
+                                let compiled = A64Compiler::compile_superblock(&sb);
+                                self.telemetry.record_tier2_compilation();
+                                if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
+                                    self.cache.insert_superblock(pc, compiled, committed.code_ptr);
+                                }
                             }
                         }
                     }
@@ -943,6 +947,9 @@ impl<M: Memory> DbtEngine<M> {
                         let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
                         self.total_insts_executed += inst_count;
                         return Ok(EngineStepResult::Breakpoint { imm: exit_payload as u16 });
+                    }
+                    transd_emitter_a64::EXIT_REASON_INVALID => {
+                        self.cpu.set_pc(GuestAddr::new(exit_payload));
                     }
                     _ => {}
                 }

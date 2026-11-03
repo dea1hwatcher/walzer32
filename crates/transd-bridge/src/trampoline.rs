@@ -81,18 +81,18 @@ pub fn invoke_guest_extended<M: Memory>(
     engine.cpu.set_pc(func_addr.instruction_addr());
 
     // 5. Execution loop: handle Bionic, JNI, GLES & Audio SVC calls until returning to SENTINEL_RETURN_ADDR
-    let mut steps = 0;
-    while engine.cpu.pc() != GuestAddr::new(SENTINEL_RETURN_ADDR) {
+    #[cfg(test)]
+    let mut steps: u64 = 0;
+
+    while (engine.cpu.pc().as_u32() & !1) != (SENTINEL_RETURN_ADDR & !1) {
         let pc = engine.cpu.pc();
         let thumb = engine.cpu.is_thumb();
 
         // Check if current instruction is an SVC (Bionic, JNI, GLES, or Audio stub)
         if let Ok((inst, _)) = transd_decoder::decode_next(&engine.mem, pc, thumb) {
             if let transd_decoder::Op::Svc { imm } = inst.op {
-                eprintln!("[Trampoline] Intercepted SVC #0x{:06x} at pc={} r0=0x{:08x}", imm, pc, engine.cpu.reg(Reg::R0));
                 // Try Bionic SVC
                 if bionic.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                    eprintln!("[Trampoline] -> Handled by Bionic, new r0=0x{:08x}", engine.cpu.reg(Reg::R0));
                     if engine.cpu.pc() == pc {
                         let next_pc = pc.add(4);
                         engine.cpu.set_pc(next_pc);
@@ -101,39 +101,49 @@ pub fn invoke_guest_extended<M: Memory>(
                 }
                 // Try JNI SVC
                 if jni.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                    let next_pc = pc.add(4);
-                    engine.cpu.set_pc(next_pc);
+                    if engine.cpu.pc() == pc {
+                        let next_pc = pc.add(4);
+                        engine.cpu.set_pc(next_pc);
+                    }
                     continue;
                 }
                 // Try GLES SVC
                 if let Some(ref mut g) = gles {
                     if g.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                        let next_pc = pc.add(4);
-                        engine.cpu.set_pc(next_pc);
+                        if engine.cpu.pc() == pc {
+                            let next_pc = pc.add(4);
+                            engine.cpu.set_pc(next_pc);
+                        }
                         continue;
                     }
                 }
                 // Try Audio SVC
                 if let Some(ref mut a) = audio {
                     if a.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                        let next_pc = pc.add(4);
-                        engine.cpu.set_pc(next_pc);
+                        if engine.cpu.pc() == pc {
+                            let next_pc = pc.add(4);
+                            engine.cpu.set_pc(next_pc);
+                        }
                         continue;
                     }
                 }
                 // Try Asset SVC
                 if let Some(ref mut ast) = asset {
                     if ast.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                        let next_pc = pc.add(4);
-                        engine.cpu.set_pc(next_pc);
+                        if engine.cpu.pc() == pc {
+                            let next_pc = pc.add(4);
+                            engine.cpu.set_pc(next_pc);
+                        }
                         continue;
                     }
                 }
                 // Try HardwareBuffer SVC
                 if let Some(ref mut hb) = hw_buffer {
                     if hb.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                        let next_pc = pc.add(4);
-                        engine.cpu.set_pc(next_pc);
+                        if engine.cpu.pc() == pc {
+                            let next_pc = pc.add(4);
+                            engine.cpu.set_pc(next_pc);
+                        }
                         continue;
                     }
                 }
@@ -141,9 +151,13 @@ pub fn invoke_guest_extended<M: Memory>(
         }
 
         engine.step()?;
-        steps += 1;
-        if steps > 100_000 {
-            return Err(EngineError::Trap("Guest execution limit exceeded (possible loop)".into()));
+
+        #[cfg(test)]
+        {
+            steps += 1;
+            if steps > 10_000_000 {
+                return Err(EngineError::Trap("Guest execution limit exceeded in test".into()));
+            }
         }
     }
 

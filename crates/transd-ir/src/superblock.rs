@@ -122,7 +122,7 @@ impl TraceBuilder {
 
         while sb.block_count < max_blocks && sb.insts.len() < max_insts {
             if visited.contains(&cur_pc) {
-                if cur_pc == entry {
+                if cur_pc == entry && !sb.insts.is_empty() {
                     sb.is_loop = true;
                 }
                 break;

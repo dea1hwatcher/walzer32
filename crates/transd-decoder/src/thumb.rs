@@ -737,9 +737,15 @@ impl ThumbDecoder {
             }
         }
 
-        // Thumb-32 CLREX (0xF3BF 8F2F)
-        if hw1 == 0xF3BF && (hw2 & 0xFFF0) == 0x8F20 {
-            return ArmInst::new(Cond::AL, Op::Clrex, raw);
+        // Thumb-32 DMB / DSB / ISB / CLREX: 1111 0011 1011 1111 1000 1111 <op:4> <opt:4>
+        if hw1 == 0xF3BF {
+            match hw2 & 0xFFF0 {
+                0x8F20 => return ArmInst::new(Cond::AL, Op::Clrex, raw),
+                0x8F40 => return ArmInst::new(Cond::AL, Op::MemoryBarrier { is_data: true }, raw), // DSB
+                0x8F50 => return ArmInst::new(Cond::AL, Op::MemoryBarrier { is_data: true }, raw), // DMB
+                0x8F60 => return ArmInst::new(Cond::AL, Op::MemoryBarrier { is_data: false }, raw), // ISB
+                _ => {}
+            }
         }
 
         // Thumb-32 TBB / TBH: 1110 1000 1101 Rn | 1111 0000 000H Rm
@@ -793,6 +799,40 @@ impl ThumbDecoder {
                     rd,
                     rn,
                     addr_mode,
+                },
+                raw,
+            );
+        }
+
+        // Thumb-32 Load / Store Multiple (LDM, LDMIA, LDMDB, POP.W, STM, STMIA, STMDB, PUSH.W)
+        // 1110 100x x0xx xxxx (0xE800..0xE9FF with bit 6 == 0)
+        if (hw1 & 0xFE40) == 0xE800 {
+            let is_db = (hw1 & 0x0100) != 0;
+            let mode = if is_db {
+                BlockAddrMode::Db
+            } else {
+                BlockAddrMode::Ia
+            };
+            let writeback = (hw1 & 0x0020) != 0;
+            let is_load = (hw1 & 0x0010) != 0;
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::SP);
+
+            let mut reg_list = hw2 & 0x1FFF;
+            if (hw2 & 0x4000) != 0 {
+                reg_list |= 1 << 14; // LR
+            }
+            if (hw2 & 0x8000) != 0 && is_load {
+                reg_list |= 1 << 15; // PC
+            }
+
+            return ArmInst::new(
+                Cond::AL,
+                Op::LoadStoreMultiple {
+                    is_load,
+                    rn,
+                    mode,
+                    writeback,
+                    reg_list,
                 },
                 raw,
             );
@@ -1222,6 +1262,34 @@ mod tests {
                 mode: BlockAddrMode::Ia,
                 writeback: true,
                 reg_list: 0x8010
+            }
+        );
+
+        // PUSH.W {r4-r8, lr} -> 0xE92D 0x41F0
+        let (inst32, size32) = ThumbDecoder::decode(0xE92D, Some(0x41F0));
+        assert_eq!(size32, 4);
+        assert_eq!(
+            inst32.op,
+            Op::LoadStoreMultiple {
+                is_load: false,
+                rn: Reg::SP,
+                mode: BlockAddrMode::Db,
+                writeback: true,
+                reg_list: 0x41F0,
+            }
+        );
+
+        // POP.W {r4-r8, pc} -> 0xE8BD 0x81F0
+        let (inst_pop32, size_pop32) = ThumbDecoder::decode(0xE8BD, Some(0x81F0));
+        assert_eq!(size_pop32, 4);
+        assert_eq!(
+            inst_pop32.op,
+            Op::LoadStoreMultiple {
+                is_load: true,
+                rn: Reg::SP,
+                mode: BlockAddrMode::Ia,
+                writeback: true,
+                reg_list: 0x81F0,
             }
         );
     }
