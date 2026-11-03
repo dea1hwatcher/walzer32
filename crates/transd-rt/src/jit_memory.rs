@@ -22,10 +22,14 @@ fn align_up(n: usize, align: usize) -> usize {
 // ──────────────────────────────────────────────────────────────────────────────
 #[cfg(unix)]
 pub struct JitPage {
-    ptr: *mut u8,
+    /// Writable mapping (PROT_READ | PROT_WRITE)
+    write_ptr: *mut u8,
+    /// Executable mapping (PROT_READ | PROT_EXEC)
+    rx_ptr: *mut u8,
     capacity: usize,
     write_cursor: usize,
     committed: bool,
+    fd: Option<i32>,
 }
 
 #[cfg(unix)]
@@ -35,15 +39,63 @@ unsafe impl Sync for JitPage {}
 
 #[cfg(unix)]
 impl JitPage {
-    /// Allocate a RW anonymous page of at least `min_size` bytes.
+    /// Allocate a dual-mapped RW / RX page (using memfd_create) or fallback to anonymous mmap.
     pub fn allocate(min_size: usize) -> std::io::Result<Self> {
         use libc::{
-            MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE, mmap,
+            c_char, off_t, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MAP_SHARED,
+            PROT_EXEC, PROT_READ, PROT_WRITE, mmap,
         };
         let cap = align_up(min_size.max(PAGE_SIZE), PAGE_SIZE);
+
+        // Try dual-mapped W^X via memfd_create (standard on modern Linux/Android)
+        let memfd = unsafe {
+            libc::syscall(libc::SYS_memfd_create, b"transd_jit\0".as_ptr() as *const c_char, libc::MFD_CLOEXEC) as i32
+        };
+
+        if memfd >= 0 {
+            let trunc_res = unsafe { libc::ftruncate(memfd, cap as off_t) };
+            if trunc_res == 0 {
+                let write_ptr = unsafe {
+                    mmap(
+                        std::ptr::null_mut(),
+                        cap,
+                        PROT_READ | PROT_WRITE,
+                        MAP_SHARED,
+                        memfd,
+                        0,
+                    )
+                };
+                if write_ptr != MAP_FAILED {
+                    let rx_ptr = unsafe {
+                        mmap(
+                            std::ptr::null_mut(),
+                            cap,
+                            PROT_READ | PROT_EXEC,
+                            MAP_SHARED,
+                            memfd,
+                            0,
+                        )
+                    };
+                    if rx_ptr != MAP_FAILED {
+                        return Ok(Self {
+                            write_ptr: write_ptr as *mut u8,
+                            rx_ptr: rx_ptr as *mut u8,
+                            capacity: cap,
+                            write_cursor: 0,
+                            committed: false,
+                            fd: Some(memfd),
+                        });
+                    }
+                    unsafe { libc::munmap(write_ptr, cap) };
+                }
+            }
+            unsafe { libc::close(memfd) };
+        }
+
+        // Fallback: single anonymous RW page, committed via mprotect
         let ptr = unsafe {
             mmap(
-                ptr::null_mut(),
+                std::ptr::null_mut(),
                 cap,
                 PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS,
@@ -55,16 +107,32 @@ impl JitPage {
             return Err(std::io::Error::last_os_error());
         }
         Ok(Self {
-            ptr: ptr as *mut u8,
+            write_ptr: ptr as *mut u8,
+            rx_ptr: ptr as *mut u8,
             capacity: cap,
             write_cursor: 0,
             committed: false,
+            fd: None,
         })
     }
 
-    /// Append raw bytes into the page buffer (must be called before commit).
+    /// Checks if the given executable host code pointer resides within this page
+    #[inline(always)]
+    pub fn contains_rx_ptr(&self, ptr: *const u8) -> bool {
+        let p = ptr as usize;
+        let start = self.rx_ptr as usize;
+        p >= start && p < start + self.capacity
+    }
+
+    /// Computes the corresponding writable pointer for a given executable code pointer and offset
+    #[inline(always)]
+    pub fn write_ptr_for(&self, rx_code_ptr: *const u8, byte_offset: usize) -> *mut u8 {
+        let offset = (rx_code_ptr as usize - self.rx_ptr as usize) + byte_offset;
+        unsafe { self.write_ptr.add(offset) }
+    }
+
+    /// Append raw bytes into the writable page buffer.
     pub fn write(&mut self, code: &[u8]) -> std::io::Result<usize> {
-        assert!(!self.committed, "JitPage: write after commit");
         let offset = self.write_cursor;
         let end = offset + code.len();
         if end > self.capacity {
@@ -74,40 +142,34 @@ impl JitPage {
             ));
         }
         unsafe {
-            ptr::copy_nonoverlapping(code.as_ptr(), self.ptr.add(offset), code.len());
+            ptr::copy_nonoverlapping(code.as_ptr(), self.write_ptr.add(offset), code.len());
         }
         self.write_cursor = end;
         Ok(offset)
     }
 
-    /// Flush I-cache for the written region and switch to R+X.
-    /// After this call the page must not be written to.
+    /// Flush I-cache for the written region and ensure executable permissions.
     pub fn commit(&mut self) -> std::io::Result<()> {
         use libc::{PROT_EXEC, PROT_READ, mprotect};
-        // Flush I-cache for range [ptr, ptr + write_cursor)
         if self.write_cursor > 0 {
-            flush_icache(self.ptr, self.write_cursor);
+            flush_icache(self.rx_ptr, self.write_cursor);
         }
-        let ret =
-            unsafe { mprotect(self.ptr as *mut libc::c_void, self.capacity, PROT_READ | PROT_EXEC) };
-        if ret != 0 {
-            return Err(std::io::Error::last_os_error());
+        if self.fd.is_none() {
+            let ret = unsafe {
+                mprotect(self.rx_ptr as *mut libc::c_void, self.capacity, PROT_READ | PROT_EXEC)
+            };
+            if ret != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
         }
         self.committed = true;
         Ok(())
     }
 
     /// Return a raw function pointer to the code at `byte_offset`.
-    ///
-    /// # Safety
-    /// The page must be committed and the code at the given offset must be
-    /// valid AArch64 instructions with a conforming ABI.
     pub unsafe fn fn_ptr<F: Copy>(&self, byte_offset: usize) -> F {
-        assert!(self.committed, "JitPage: fn_ptr called before commit");
         assert!(byte_offset < self.write_cursor);
-        let raw = unsafe { self.ptr.add(byte_offset) } as usize;
-        // Transmute usize → fn pointer of the caller's function type.
-        // This is the canonical unsafe pattern for JIT-generated code.
+        let raw = unsafe { self.rx_ptr.add(byte_offset) } as usize;
         unsafe { std::mem::transmute_copy(&raw) }
     }
 
@@ -123,19 +185,28 @@ impl JitPage {
         self.capacity
     }
 
-    /// Return raw pointer to the byte at `offset` within this page.
-    /// # Safety: `offset` must be `< write_cursor`.
+    /// Return raw pointer to the executable byte at `offset` within this page.
     pub unsafe fn code_ptr_at(&self, offset: usize) -> *const u8 {
-        unsafe { self.ptr.add(offset) }
+        unsafe { self.rx_ptr.add(offset) }
     }
 }
 
 #[cfg(unix)]
 impl Drop for JitPage {
     fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe {
-                libc::munmap(self.ptr as *mut libc::c_void, self.capacity);
+        unsafe {
+            if self.write_ptr != self.rx_ptr {
+                if !self.write_ptr.is_null() {
+                    libc::munmap(self.write_ptr as *mut libc::c_void, self.capacity);
+                }
+                if !self.rx_ptr.is_null() {
+                    libc::munmap(self.rx_ptr as *mut libc::c_void, self.capacity);
+                }
+            } else if !self.write_ptr.is_null() {
+                libc::munmap(self.write_ptr as *mut libc::c_void, self.capacity);
+            }
+            if let Some(fd) = self.fd {
+                libc::close(fd);
             }
         }
     }
@@ -146,7 +217,8 @@ impl Drop for JitPage {
 // ──────────────────────────────────────────────────────────────────────────────
 #[cfg(windows)]
 pub struct JitPage {
-    ptr: *mut u8,
+    write_ptr: *mut u8,
+    rx_ptr: *mut u8,
     capacity: usize,
     write_cursor: usize,
     committed: bool,
@@ -176,15 +248,28 @@ impl JitPage {
             return Err(std::io::Error::last_os_error());
         }
         Ok(Self {
-            ptr: ptr as *mut u8,
+            write_ptr: ptr as *mut u8,
+            rx_ptr: ptr as *mut u8,
             capacity: cap,
             write_cursor: 0,
             committed: false,
         })
     }
 
+    #[inline(always)]
+    pub fn contains_rx_ptr(&self, ptr: *const u8) -> bool {
+        let p = ptr as usize;
+        let start = self.rx_ptr as usize;
+        p >= start && p < start + self.capacity
+    }
+
+    #[inline(always)]
+    pub fn write_ptr_for(&self, rx_code_ptr: *const u8, byte_offset: usize) -> *mut u8 {
+        let offset = (rx_code_ptr as usize - self.rx_ptr as usize) + byte_offset;
+        unsafe { self.write_ptr.add(offset) }
+    }
+
     pub fn write(&mut self, code: &[u8]) -> std::io::Result<usize> {
-        assert!(!self.committed, "JitPage: write after commit");
         let offset = self.write_cursor;
         let end = offset + code.len();
         if end > self.capacity {
@@ -194,27 +279,20 @@ impl JitPage {
             ));
         }
         unsafe {
-            std::ptr::copy_nonoverlapping(code.as_ptr(), self.ptr.add(offset), code.len());
+            std::ptr::copy_nonoverlapping(code.as_ptr(), self.write_ptr.add(offset), code.len());
         }
         self.write_cursor = end;
         Ok(offset)
     }
 
-    /// On Windows (x86-64 dev host) the I-cache flush is handled by the CPU
-    /// hardware coherency; mprotect is not needed since we used EXECUTE_READWRITE.
     pub fn commit(&mut self) -> std::io::Result<()> {
-        // On x86-64 Windows the CPU handles I-D cache coherence automatically.
-        // On an AArch64 Windows host this would require FlushInstructionCache(),
-        // but dev-host testing is x86-64 only for now.
         self.committed = true;
         Ok(())
     }
 
-    /// # Safety
     pub unsafe fn fn_ptr<F: Copy>(&self, byte_offset: usize) -> F {
-        assert!(self.committed);
         assert!(byte_offset < self.write_cursor);
-        let raw = unsafe { self.ptr.add(byte_offset) } as usize;
+        let raw = unsafe { self.rx_ptr.add(byte_offset) } as usize;
         unsafe { std::mem::transmute_copy(&raw) }
     }
 
@@ -230,20 +308,18 @@ impl JitPage {
         self.capacity
     }
 
-    /// Return raw pointer to the byte at `offset` within this page.
-    /// # Safety: `offset` must be `< write_cursor`.
     pub unsafe fn code_ptr_at(&self, offset: usize) -> *const u8 {
-        unsafe { self.ptr.add(offset) }
+        unsafe { self.rx_ptr.add(offset) }
     }
 }
 
 #[cfg(windows)]
 impl Drop for JitPage {
     fn drop(&mut self) {
-        if !self.ptr.is_null() {
+        if !self.write_ptr.is_null() {
             use windows_sys::Win32::System::Memory::{MEM_RELEASE, VirtualFree};
             unsafe {
-                VirtualFree(self.ptr as *mut _, 0, MEM_RELEASE);
+                VirtualFree(self.write_ptr as *mut _, 0, MEM_RELEASE);
             }
         }
     }
