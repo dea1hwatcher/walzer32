@@ -937,6 +937,15 @@ impl<M: Memory> DbtEngine<M> {
         #[cfg(target_arch = "aarch64")]
         {
             if let Some(host_ptr) = self.cache.lookup_ptr(pc) {
+                // Hardware FPCR sync (FZ: Flush-to-Zero, DN: Default NaN, RMode: Rounding Mode)
+                unsafe {
+                    let mut fpcr: u64;
+                    std::arch::asm!("mrs {0}, fpcr", out(reg) fpcr, options(nostack, preserves_flags));
+                    let desired = (fpcr & !0x03C0_0000) | ((self.cpu.fpscr as u64) & 0x03C0_0000);
+                    if desired != fpcr {
+                        std::arch::asm!("msr fpcr, {0}", in(reg) desired, options(nostack, preserves_flags));
+                    }
+                }
                 let _ = self.pool.flush_current();
                 type JitFn = unsafe extern "C" fn(cpu: *mut CpuState, mem_base: *mut u8) -> u64;
                 let jit_fn: JitFn = unsafe { std::mem::transmute(host_ptr.0) };
@@ -1109,7 +1118,8 @@ impl<M: Memory> DbtEngine<M> {
                         if offset_bytes % 4 == 0 {
                             let offset_words = (offset_bytes / 4) as i32;
                             if (-0x0200_0000..=0x01FF_FFFF).contains(&offset_words) {
-                                let success = self.pool.patch_code(src_ptr.0, site.byte_offset, |slice| {
+                                let success = unsafe {
+                                    self.pool.patch_code(src_ptr.0, site.byte_offset, |slice| {
                                     match site.target {
                                         PatchTarget::Direct(_) | PatchTarget::BranchFallthrough(_) => {
                                             A64Compiler::patch_direct_branch(slice, 0, offset_words);
@@ -1118,7 +1128,7 @@ impl<M: Memory> DbtEngine<M> {
                                             A64Compiler::patch_cond_branch(slice, 0, cond, offset_words);
                                         }
                                     }
-                                });
+                                }) };
                                 if success {
                                     self.telemetry.record_chained_jump();
                                     patched = true;

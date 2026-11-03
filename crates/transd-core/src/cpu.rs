@@ -70,7 +70,7 @@ impl Default for CpuState {
         Self {
             regs: [0; 16],
             cpsr: Cpsr::empty(),
-            fpscr: 0,
+            fpscr: fpscr::RUNFAST_MODE,
             vfp: [0; 32],
             tls_ptr: 0,
             exclusive_addr: 0xFFFF_FFFF,

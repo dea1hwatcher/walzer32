@@ -140,7 +140,9 @@ impl JitPool {
     }
 
     /// Patches machine code at the given executable host address using dual mapping write aliasing
-    pub fn patch_code(
+    /// # Safety
+    /// host_rx_ptr must point to an executable JIT block allocated by this pool.
+    pub unsafe fn patch_code(
         &mut self,
         host_rx_ptr: *const u8,
         byte_offset: usize,

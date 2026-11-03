@@ -42,14 +42,14 @@ impl JitPage {
     /// Allocate a dual-mapped RW / RX page (using memfd_create) or fallback to anonymous mmap.
     pub fn allocate(min_size: usize) -> std::io::Result<Self> {
         use libc::{
-            c_char, off_t, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MAP_SHARED,
+            off_t, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MAP_SHARED,
             PROT_EXEC, PROT_READ, PROT_WRITE, mmap,
         };
         let cap = align_up(min_size.max(PAGE_SIZE), PAGE_SIZE);
 
         // Try dual-mapped W^X via memfd_create (standard on modern Linux/Android)
         let memfd = unsafe {
-            libc::syscall(libc::SYS_memfd_create, b"transd_jit\0".as_ptr() as *const c_char, libc::MFD_CLOEXEC) as i32
+            libc::syscall(libc::SYS_memfd_create, c"transd_jit".as_ptr(), libc::MFD_CLOEXEC) as i32
         };
 
         if memfd >= 0 {
@@ -167,6 +167,11 @@ impl JitPage {
     }
 
     /// Return a raw function pointer to the code at `byte_offset`.
+    ///
+    /// # Safety
+    /// `byte_offset` must be within the committed code boundary.
+    /// # Safety
+    /// `byte_offset` must be within the committed code boundary.
     pub unsafe fn fn_ptr<F: Copy>(&self, byte_offset: usize) -> F {
         assert!(byte_offset < self.write_cursor);
         let raw = unsafe { self.rx_ptr.add(byte_offset) } as usize;
@@ -181,11 +186,17 @@ impl JitPage {
         self.write_cursor
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.write_cursor == 0
+    }
+
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
     /// Return raw pointer to the executable byte at `offset` within this page.
+    /// # Safety
+    /// `offset` must be within the committed code boundary.
     pub unsafe fn code_ptr_at(&self, offset: usize) -> *const u8 {
         unsafe { self.rx_ptr.add(offset) }
     }
@@ -290,6 +301,8 @@ impl JitPage {
         Ok(())
     }
 
+    /// # Safety
+    /// `byte_offset` must be within the committed code boundary.
     pub unsafe fn fn_ptr<F: Copy>(&self, byte_offset: usize) -> F {
         assert!(byte_offset < self.write_cursor);
         let raw = unsafe { self.rx_ptr.add(byte_offset) } as usize;
@@ -304,10 +317,16 @@ impl JitPage {
         self.write_cursor
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.write_cursor == 0
+    }
+
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
+    /// # Safety
+    /// `offset` must be within the committed code boundary.
     pub unsafe fn code_ptr_at(&self, offset: usize) -> *const u8 {
         unsafe { self.rx_ptr.add(offset) }
     }
