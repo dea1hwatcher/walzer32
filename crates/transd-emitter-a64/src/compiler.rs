@@ -1781,13 +1781,59 @@ impl A64Compiler {
             Op::MemoryBarrier { .. } => {
                 asm.dmb_ish();
             }
-            Op::Cp15Move { is_mrc, rd, .. } => {
-                if *is_mrc {
-                    asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, OFFSET_TLS as u32);
-                    store_guest_reg(asm, A64Reg::X9, *rd);
-                } else {
-                    let src = load_guest_reg(asm, A64Reg::X9, *rd);
-                    asm.str_w_imm(src, A64Reg::X0, OFFSET_TLS as u32);
+            Op::Cp15Move {
+                is_mrc,
+                rd,
+                crn,
+                crm,
+                opc2,
+                ..
+            } => {
+                if *crn == 13 && *crm == 0 && (*opc2 == 2 || *opc2 == 3 || *opc2 == 4) {
+                    // TLS thread pointer registers (TPIDRURW / TPIDRURO / TPIDRPRW)
+                    if *is_mrc {
+                        asm.ldr_w_imm(A64Reg::X9, A64Reg::X0, OFFSET_TLS as u32);
+                        store_guest_reg(asm, A64Reg::X9, *rd);
+                    } else {
+                        let src = load_guest_reg(asm, A64Reg::X9, *rd);
+                        asm.str_w_imm(src, A64Reg::X0, OFFSET_TLS as u32);
+                    }
+                } else if *crn == 7 {
+                    // CP15 c7: Pre-ARMv7 memory barriers and cache ops (Unity Mono Boehm GC, ARMv5/v6)
+                    match (*crm, *opc2) {
+                        (10, 5) => {
+                            // DMB (Data Memory Barrier)
+                            asm.dmb_ish();
+                        }
+                        (10, 4) => {
+                            // DSB (Data Synchronization Barrier)
+                            asm.dsb_ish();
+                        }
+                        (5, 4) | (5, 0) | (5, 6) => {
+                            // ISB (Instruction Synchronization Barrier) / I-Cache invalidate
+                            asm.isb();
+                        }
+                        _ => {
+                            // Other cache operations: memory barrier
+                            asm.dmb_ish();
+                        }
+                    }
+                } else if *is_mrc && *crn == 0 && *crm == 0 {
+                    // CP15 c0: CPUID (MIDR / CTR)
+                    let dst = pinned_reg(*rd).unwrap_or(A64Reg::X9);
+                    let cpuid: u32 = if *opc2 == 1 { 0x8003_C003 } else { 0x412F_C0F3 };
+                    asm.movz_w(dst, (cpuid & 0xFFFF) as u16, 0);
+                    asm.movk_w(dst, (cpuid >> 16) as u16, 16);
+                    if pinned_reg(*rd).is_none() {
+                        store_guest_reg(asm, dst, *rd);
+                    }
+                } else if *is_mrc {
+                    // Harmless read for other coprocessor registers
+                    let dst = pinned_reg(*rd).unwrap_or(A64Reg::X9);
+                    asm.movz_w(dst, 0, 0);
+                    if pinned_reg(*rd).is_none() {
+                        store_guest_reg(asm, dst, *rd);
+                    }
                 }
             }
             Op::Movw { rd, imm } => {

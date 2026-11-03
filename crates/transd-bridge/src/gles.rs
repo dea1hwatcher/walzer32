@@ -155,6 +155,37 @@ pub enum GlesFuncId {
     EglDestroySyncKHR = 72,
     EglGetSyncAttribKHR = 73,
     EglWaitSyncKHR = 74,
+
+    // GLES 1.1 Fixed-Function Pipeline (Stage 102)
+    GlMatrixMode                            = 80,
+    GlLoadIdentity                          = 81,
+    GlLoadMatrixf                           = 82,
+    GlPushMatrix                            = 83,
+    GlPopMatrix                             = 84,
+    GlOrthof                                = 85,
+    GlFrustumf                              = 86,
+    GlTranslatef                            = 87,
+    GlScalef                                = 88,
+    GlRotatef                               = 89,
+    GlEnableClientState                     = 90,
+    GlDisableClientState                    = 91,
+    GlVertexPointer                         = 92,
+    GlColorPointer                          = 93,
+    GlTexCoordPointer                       = 94,
+    GlNormalPointer                         = 95,
+    GlAlphaFunc                             = 96,
+    GlColor4f                               = 97,
+    GlColor4ub                              = 98,
+    GlClientActiveTexture                   = 99,
+    GlShadeModel                            = 100,
+    GlTexEnvf                               = 101,
+    GlTexEnvi                               = 102,
+    GlLightf                                = 103,
+    GlLightfv                               = 104,
+    GlMaterialf                             = 105,
+    GlMaterialfv                            = 106,
+    GlFogf                                  = 107,
+    GlFogfv                                 = 108,
 }
 
 impl GlesFuncId {
@@ -224,6 +255,36 @@ impl GlesFuncId {
             72 => Some(Self::EglDestroySyncKHR),
             73 => Some(Self::EglGetSyncAttribKHR),
             74 => Some(Self::EglWaitSyncKHR),
+
+            80 => Some(Self::GlMatrixMode),
+            81 => Some(Self::GlLoadIdentity),
+            82 => Some(Self::GlLoadMatrixf),
+            83 => Some(Self::GlPushMatrix),
+            84 => Some(Self::GlPopMatrix),
+            85 => Some(Self::GlOrthof),
+            86 => Some(Self::GlFrustumf),
+            87 => Some(Self::GlTranslatef),
+            88 => Some(Self::GlScalef),
+            89 => Some(Self::GlRotatef),
+            90 => Some(Self::GlEnableClientState),
+            91 => Some(Self::GlDisableClientState),
+            92 => Some(Self::GlVertexPointer),
+            93 => Some(Self::GlColorPointer),
+            94 => Some(Self::GlTexCoordPointer),
+            95 => Some(Self::GlNormalPointer),
+            96 => Some(Self::GlAlphaFunc),
+            97 => Some(Self::GlColor4f),
+            98 => Some(Self::GlColor4ub),
+            99 => Some(Self::GlClientActiveTexture),
+            100 => Some(Self::GlShadeModel),
+            101 => Some(Self::GlTexEnvf),
+            102 => Some(Self::GlTexEnvi),
+            103 => Some(Self::GlLightf),
+            104 => Some(Self::GlLightfv),
+            105 => Some(Self::GlMaterialf),
+            106 => Some(Self::GlMaterialfv),
+            107 => Some(Self::GlFogf),
+            108 => Some(Self::GlFogfv),
 
             _ => None,
         }
@@ -338,6 +399,11 @@ pub struct GlesBridge {
     pub active_read_surface: u32,
     pub active_context: u32,
     pub bound_native_window: u32,
+
+    // GLES 1.1 Fixed-Function Pipeline state
+    pub matrix_mode: u32,
+    pub client_states: u32,
+    pub client_active_texture: u32,
 }
 
 impl GlesBridge {
@@ -363,6 +429,9 @@ impl GlesBridge {
             active_read_surface: 0,
             active_context: 0,
             bound_native_window: 0,
+            matrix_mode: 0x1700, // GL_MODELVIEW
+            client_states: 0,
+            client_active_texture: 0x84C0, // GL_TEXTURE0
         };
 
         bridge.register_known_symbols();
@@ -397,6 +466,37 @@ impl GlesBridge {
             ("eglCreateSync", GlesFuncId::EglCreateSyncKHR),
             ("eglClientWaitSync", GlesFuncId::EglClientWaitSyncKHR),
             ("eglDestroySync", GlesFuncId::EglDestroySyncKHR),
+
+            // GLES 1.1 Fixed-Function symbols
+            ("glMatrixMode", GlesFuncId::GlMatrixMode),
+            ("glLoadIdentity", GlesFuncId::GlLoadIdentity),
+            ("glLoadMatrixf", GlesFuncId::GlLoadMatrixf),
+            ("glPushMatrix", GlesFuncId::GlPushMatrix),
+            ("glPopMatrix", GlesFuncId::GlPopMatrix),
+            ("glOrthof", GlesFuncId::GlOrthof),
+            ("glFrustumf", GlesFuncId::GlFrustumf),
+            ("glTranslatef", GlesFuncId::GlTranslatef),
+            ("glScalef", GlesFuncId::GlScalef),
+            ("glRotatef", GlesFuncId::GlRotatef),
+            ("glEnableClientState", GlesFuncId::GlEnableClientState),
+            ("glDisableClientState", GlesFuncId::GlDisableClientState),
+            ("glVertexPointer", GlesFuncId::GlVertexPointer),
+            ("glColorPointer", GlesFuncId::GlColorPointer),
+            ("glTexCoordPointer", GlesFuncId::GlTexCoordPointer),
+            ("glNormalPointer", GlesFuncId::GlNormalPointer),
+            ("glAlphaFunc", GlesFuncId::GlAlphaFunc),
+            ("glColor4f", GlesFuncId::GlColor4f),
+            ("glColor4ub", GlesFuncId::GlColor4ub),
+            ("glClientActiveTexture", GlesFuncId::GlClientActiveTexture),
+            ("glShadeModel", GlesFuncId::GlShadeModel),
+            ("glTexEnvf", GlesFuncId::GlTexEnvf),
+            ("glTexEnvi", GlesFuncId::GlTexEnvi),
+            ("glLightf", GlesFuncId::GlLightf),
+            ("glLightfv", GlesFuncId::GlLightfv),
+            ("glMaterialf", GlesFuncId::GlMaterialf),
+            ("glMaterialfv", GlesFuncId::GlMaterialfv),
+            ("glFogf", GlesFuncId::GlFogf),
+            ("glFogfv", GlesFuncId::GlFogfv),
             ("glClearColor", GlesFuncId::GlClearColor),
             ("glClear", GlesFuncId::GlClear),
             ("glViewport", GlesFuncId::GlViewport),
@@ -501,6 +601,35 @@ impl GlesBridge {
             GlesFuncId::EglDestroySyncKHR,
             GlesFuncId::EglGetSyncAttribKHR,
             GlesFuncId::EglWaitSyncKHR,
+            GlesFuncId::GlMatrixMode,
+            GlesFuncId::GlLoadIdentity,
+            GlesFuncId::GlLoadMatrixf,
+            GlesFuncId::GlPushMatrix,
+            GlesFuncId::GlPopMatrix,
+            GlesFuncId::GlOrthof,
+            GlesFuncId::GlFrustumf,
+            GlesFuncId::GlTranslatef,
+            GlesFuncId::GlScalef,
+            GlesFuncId::GlRotatef,
+            GlesFuncId::GlEnableClientState,
+            GlesFuncId::GlDisableClientState,
+            GlesFuncId::GlVertexPointer,
+            GlesFuncId::GlColorPointer,
+            GlesFuncId::GlTexCoordPointer,
+            GlesFuncId::GlNormalPointer,
+            GlesFuncId::GlAlphaFunc,
+            GlesFuncId::GlColor4f,
+            GlesFuncId::GlColor4ub,
+            GlesFuncId::GlClientActiveTexture,
+            GlesFuncId::GlShadeModel,
+            GlesFuncId::GlTexEnvf,
+            GlesFuncId::GlTexEnvi,
+            GlesFuncId::GlLightf,
+            GlesFuncId::GlLightfv,
+            GlesFuncId::GlMaterialf,
+            GlesFuncId::GlMaterialfv,
+            GlesFuncId::GlFogf,
+            GlesFuncId::GlFogfv,
         ];
 
         for &id in &all_ids {
@@ -1191,6 +1320,50 @@ impl GlesBridge {
             }
             GlesFuncId::GlGetError => {
                 cpu.set_reg(Reg::R0, 0); // GL_NO_ERROR
+            }
+            // --- GLES 1.1 Fixed-Function State Machine ---
+            GlesFuncId::GlMatrixMode => {
+                self.matrix_mode = cpu.reg(Reg::R0);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            GlesFuncId::GlEnableClientState => {
+                self.client_states |= 1 << (cpu.reg(Reg::R0) & 0x1F);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            GlesFuncId::GlDisableClientState => {
+                self.client_states &= !(1 << (cpu.reg(Reg::R0) & 0x1F));
+                cpu.set_reg(Reg::R0, 0);
+            }
+            GlesFuncId::GlClientActiveTexture => {
+                self.client_active_texture = cpu.reg(Reg::R0);
+                cpu.set_reg(Reg::R0, 0);
+            }
+            GlesFuncId::GlLoadIdentity |
+            GlesFuncId::GlLoadMatrixf |
+            GlesFuncId::GlPushMatrix |
+            GlesFuncId::GlPopMatrix |
+            GlesFuncId::GlOrthof |
+            GlesFuncId::GlFrustumf |
+            GlesFuncId::GlTranslatef |
+            GlesFuncId::GlScalef |
+            GlesFuncId::GlRotatef |
+            GlesFuncId::GlVertexPointer |
+            GlesFuncId::GlColorPointer |
+            GlesFuncId::GlTexCoordPointer |
+            GlesFuncId::GlNormalPointer |
+            GlesFuncId::GlAlphaFunc |
+            GlesFuncId::GlColor4f |
+            GlesFuncId::GlColor4ub |
+            GlesFuncId::GlShadeModel |
+            GlesFuncId::GlTexEnvf |
+            GlesFuncId::GlTexEnvi |
+            GlesFuncId::GlLightf |
+            GlesFuncId::GlLightfv |
+            GlesFuncId::GlMaterialf |
+            GlesFuncId::GlMaterialfv |
+            GlesFuncId::GlFogf |
+            GlesFuncId::GlFogfv => {
+                cpu.set_reg(Reg::R0, 0);
             }
             _ => {
                 cpu.set_reg(Reg::R0, 0);

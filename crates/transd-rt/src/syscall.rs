@@ -99,3 +99,16 @@ impl SyscallArgs {
         }
     }
 }
+
+/// Returns true if the syscall is eligible for SA_RESTART rewinding upon signal interruption.
+/// Timed calls (nanosleep, timed futex, etc.) must NOT restart.
+pub fn is_restartable_syscall(nr: u32, arg3: u32) -> bool {
+    match nr {
+        nr::READ | nr::WRITE | nr::OPEN | nr::CLOSE | nr::IOCTL | nr::WRITEV | nr::OPENAT => true,
+        nr::FUTEX => {
+            // arg3 is timeout pointer. Untimed futex (timeout == 0) is restartable.
+            arg3 == 0
+        }
+        _ => false,
+    }
+}

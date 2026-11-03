@@ -236,3 +236,90 @@ fn test_engine_fault_translation_and_recovery() {
     assert_eq!(engine.cpu.reg(Reg::R5), 555);      // Preserved register!
     assert_eq!(engine.cpu.sp(), 0x7010_0000);      // Restored SP!
 }
+
+
+#[test]
+fn test_sa_restart_rewinds_restartable_syscall_and_restores_r0() {
+    let mem = FlatMemory::new(GuestAddr::new(0x7000_0000), 0x200_000);
+    let mut engine = DbtEngine::new(mem);
+
+    let handler_addr = 0x7002_0800;
+    let act = GuestSigaction {
+        sa_handler: handler_addr,
+        sa_flags: sa_flags::SA_SIGINFO | sa_flags::SA_RESTART,
+        sa_restorer: 0,
+        sa_mask: 0,
+    };
+    engine
+        .syscall_handler
+        .signal_state_mut()
+        .unwrap()
+        .set_action(signal_nr::SIGUSR1, Some(act))
+        .unwrap();
+
+    // 1. Simulate an interrupted restartable syscall (SYS_read)
+    let svc_pc = GuestAddr::new(0x7002_0000);
+    engine.cpu.set_pc(svc_pc.add(4)); // After executing SVC, PC advanced
+    engine.cpu.set_reg(Reg::R0, 0xFFFF_FFFC); // -EINTR (-4)
+    engine.cpu.set_sp(0x7010_0000);
+
+    let read_syscall = transd_rt::syscall::SyscallArgs {
+        nr: transd_rt::syscall::nr::READ,
+        arg0: 42, // Original file descriptor
+        arg1: 0x7005_0000,
+        arg2: 1024,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+
+    let delivered = engine
+        .deliver_guest_signal(signal_nr::SIGUSR1, None, Some(read_syscall))
+        .unwrap();
+    assert!(delivered);
+
+    // CPU is redirected to signal handler
+    assert_eq!(engine.cpu.pc(), GuestAddr::new(handler_addr));
+    assert_eq!(engine.cpu.reg(Reg::R0), signal_nr::SIGUSR1);
+
+    // Inspect ucontext on stack: arm_pc must be rewound to svc_pc, arm_r0 must be restored to 42
+    let ucontext_addr = GuestAddr::new(engine.cpu.reg(Reg::R2));
+    let ucontext = transd_rt::signals::GuestUContext::read_from_mem(&engine.mem, ucontext_addr).unwrap();
+    assert_eq!(ucontext.uc_mcontext.arm_pc, svc_pc.as_u32(), "PC must be rewound to the SVC instruction!");
+    assert_eq!(ucontext.uc_mcontext.arm_r0, 42, "R0 must be restored to original arg0 (FD 42) instead of -EINTR!");
+
+    // Restore state via rt_sigreturn
+    engine
+        .syscall_handler
+        .signal_state_mut()
+        .unwrap()
+        .restore_sigreturn(&mut engine.cpu, &engine.mem)
+        .unwrap();
+
+    assert_eq!(engine.cpu.pc(), svc_pc, "Restored PC must point back to SVC instruction for replay!");
+    assert_eq!(engine.cpu.reg(Reg::R0), 42, "Restored R0 must be original argument!");
+
+    // 2. Simulate an interrupted NON-restartable syscall (SYS_nanosleep)
+    let sleep_syscall = transd_rt::syscall::SyscallArgs {
+        nr: transd_rt::syscall::nr::NANOSLEEP,
+        arg0: 0x7005_0000,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    engine.cpu.set_pc(svc_pc.add(4));
+    engine.cpu.set_reg(Reg::R0, 0xFFFF_FFFC); // -EINTR
+
+    let delivered = engine
+        .deliver_guest_signal(signal_nr::SIGUSR1, None, Some(sleep_syscall))
+        .unwrap();
+    assert!(delivered);
+
+    let ucontext_addr2 = GuestAddr::new(engine.cpu.reg(Reg::R2));
+    let ucontext2 = transd_rt::signals::GuestUContext::read_from_mem(&engine.mem, ucontext_addr2).unwrap();
+    // Non-restartable: arm_pc must NOT be rewound, arm_r0 must remain -EINTR
+    assert_eq!(ucontext2.uc_mcontext.arm_pc, svc_pc.add(4).as_u32(), "Non-restartable call should not rewind PC!");
+    assert_eq!(ucontext2.uc_mcontext.arm_r0, 0xFFFF_FFFC, "Non-restartable call should preserve -EINTR!");
+}

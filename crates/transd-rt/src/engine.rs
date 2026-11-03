@@ -573,7 +573,7 @@ impl SyscallHandler for DefaultSyscallHandler {
             }
             nr::KILL | nr::TKILL | nr::TGKILL => {
                 let sig = if args.nr == nr::TGKILL { args.arg2 } else { args.arg1 };
-                match self.signal_state.deliver_signal(sig, None, cpu, mem, None) {
+                match self.signal_state.deliver_signal(sig, None, cpu, mem, None, None) {
                     Ok(_) => cpu.set_reg(Reg::R0, 0),
                     Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32),
                 }
@@ -639,6 +639,24 @@ impl<M: Memory> DbtEngine<M> {
     /// to a registered guest signal handler if available.
     /// Returns Ok(true) if the signal was delivered to a guest handler,
     /// or Ok(false) if unhandled (default crash / terminate).
+    /// Delivers an asynchronous or synchronous guest signal, automatically rewinding
+    /// restartable syscalls if the handler has SA_RESTART configured.
+    pub fn deliver_guest_signal(
+        &mut self,
+        sig: u32,
+        fault_addr: Option<u32>,
+        interrupted_syscall: Option<crate::syscall::SyscallArgs>,
+    ) -> Result<bool, EngineError> {
+        if let Some(signal_state) = self.syscall_handler.signal_state_mut() {
+            let handled = signal_state
+                .deliver_signal(sig, fault_addr, &mut self.cpu, &mut self.mem, None, interrupted_syscall)
+                .map_err(EngineError::Memory)?;
+            Ok(handled)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub fn handle_guest_fault(
         &mut self,
         sig: u32,
@@ -646,7 +664,7 @@ impl<M: Memory> DbtEngine<M> {
     ) -> Result<bool, EngineError> {
         if let Some(signal_state) = self.syscall_handler.signal_state_mut() {
             let handled = signal_state
-                .deliver_signal(sig, fault_addr, &mut self.cpu, &mut self.mem, None)
+                .deliver_signal(sig, fault_addr, &mut self.cpu, &mut self.mem, None, None)
                 .map_err(EngineError::Memory)?;
             Ok(handled)
         } else {

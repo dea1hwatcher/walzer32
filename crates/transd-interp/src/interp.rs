@@ -65,6 +65,7 @@ impl Interpreter {
         let mut cond = inst.cond;
         let in_it_block = is_thumb && cpu.cpsr.itstate() != 0;
         if is_thumb && !matches!(inst.op, Op::It { .. }) {
+            #[allow(clippy::collapsible_if)]
             if let Some(it_cond) = cpu.cpsr.advance_itstate() {
                 cond = it_cond;
             }
@@ -916,7 +917,7 @@ impl Interpreter {
                         n_val.map_or(ext, |n| n.wrapping_add(ext))
                     }
                     ExtendOp::Uxtb => {
-                        let ext = (rotated & 0xFF) as u32;
+                        let ext = rotated & 0xFF;
                         n_val.map_or(ext, |n| n.wrapping_add(ext))
                     }
                     ExtendOp::Sxth => {
@@ -924,7 +925,7 @@ impl Interpreter {
                         n_val.map_or(ext, |n| n.wrapping_add(ext))
                     }
                     ExtendOp::Uxth => {
-                        let ext = (rotated & 0xFFFF) as u32;
+                        let ext = rotated & 0xFFFF;
                         n_val.map_or(ext, |n| n.wrapping_add(ext))
                     }
                     ExtendOp::Sxtb16 => {
@@ -941,8 +942,8 @@ impl Interpreter {
                         }
                     }
                     ExtendOp::Uxtb16 => {
-                        let ext_lo = (rotated & 0xFF) as u32;
-                        let ext_hi = ((rotated >> 16) & 0xFF) as u32;
+                        let ext_lo = rotated & 0xFF;
+                        let ext_hi = (rotated >> 16) & 0xFF;
                         let ext = (ext_hi << 16) | ext_lo;
                         match n_val {
                             Some(n) => {
@@ -1759,14 +1760,23 @@ impl Interpreter {
                 opc2,
                 ..
             } => {
-                // CP15 c13, c0, 3: TPIDRURW (User Read/Write Thread ID Register)
-                // CP15 c13, c0, 2: TPIDRURO (User Read-Only Thread ID Register)
-                if crn == 13 && crm == 0 && (opc2 == 3 || opc2 == 2) {
+                // CP15 c13: Thread-local storage registers (TPIDRURW / TPIDRURO / TPIDRPRW)
+                if crn == 13 && crm == 0 && (opc2 == 3 || opc2 == 2 || opc2 == 4) {
                     if is_mrc {
                         cpu.set_reg(rd, cpu.tls_ptr);
                     } else {
                         cpu.tls_ptr = cpu.reg(rd);
                     }
+                } else if crn == 7 {
+                    // CP15 c7: Pre-ARMv7 memory barriers and cache ops (Unity Mono Boehm GC, ARMv5/v6)
+                    // (c7, c10, 5) -> DMB, (c7, c10, 4) -> DSB, (c7, c5, 4/0/6) -> ISB
+                    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+                } else if is_mrc && crn == 0 && crm == 0 {
+                    // CP15 c0: CPUID (MIDR / CTR)
+                    let cpuid: u32 = if opc2 == 1 { 0x8003_C003 } else { 0x412F_C0F3 };
+                    cpu.set_reg(rd, cpuid);
+                } else if is_mrc {
+                    cpu.set_reg(rd, 0);
                 }
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)

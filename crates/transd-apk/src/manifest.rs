@@ -143,8 +143,9 @@ impl<'a> ManifestParser<'a> {
                 let byte_len = char_len * 2;
                 if p + byte_len <= self.data.len() {
                     let u16s: Vec<u16> = self.data[p..p + byte_len]
-                        .chunks_exact(2)
-                        .map(LittleEndian::read_u16)
+                        .as_chunks::<2>().0
+                        .iter()
+                        .map(|c| u16::from_le_bytes(*c))
                         .collect();
                     let s = String::from_utf16_lossy(&u16s);
                     self.strings.push(s);
@@ -215,10 +216,8 @@ impl<'a> ManifestParser<'a> {
                                         is_in_main_intent = true;
                                     }
                                 }
-                                ("category", "name") => {
-                                    if attr_val == "android.intent.category.LAUNCHER" && is_in_main_intent {
-                                        info.main_activity = Some(current_activity.clone());
-                                    }
+                                ("category", "name") if attr_val == "android.intent.category.LAUNCHER" && is_in_main_intent => {
+                                    info.main_activity = Some(current_activity.clone());
                                 }
                                 _ => {}
                             }

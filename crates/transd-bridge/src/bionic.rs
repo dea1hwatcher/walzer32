@@ -823,6 +823,19 @@ pub enum BionicFuncId {
     AMediaCodecReleaseOutputBuffer          = 1264,
     AMediaCodecGetOutputFormat              = 1265,
 
+    // Android InputQueue & NativeActivity NDK APIs (Stage 101)
+    AInputQueueAttachLooper                 = 1270,
+    AInputQueueDetachLooper                 = 1271,
+    AInputQueueHasEvents                    = 1272,
+    AInputQueueGetEvent                     = 1273,
+    AInputQueuePreDispatchEvent             = 1274,
+    AInputQueueFinishEvent                  = 1275,
+    ANativeActivityFinish                   = 1280,
+    ANativeActivitySetWindowFormat          = 1281,
+    ANativeActivitySetWindowFlags           = 1282,
+    ANativeActivityShowSoftInput            = 1283,
+    ANativeActivityHideSoftInput            = 1284,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1612,6 +1625,17 @@ impl BionicFuncId {
             1263 => Some(Self::AMediaCodecGetOutputBuffer),
             1264 => Some(Self::AMediaCodecReleaseOutputBuffer),
             1265 => Some(Self::AMediaCodecGetOutputFormat),
+            1270 => Some(Self::AInputQueueAttachLooper),
+            1271 => Some(Self::AInputQueueDetachLooper),
+            1272 => Some(Self::AInputQueueHasEvents),
+            1273 => Some(Self::AInputQueueGetEvent),
+            1274 => Some(Self::AInputQueuePreDispatchEvent),
+            1275 => Some(Self::AInputQueueFinishEvent),
+            1280 => Some(Self::ANativeActivityFinish),
+            1281 => Some(Self::ANativeActivitySetWindowFormat),
+            1282 => Some(Self::ANativeActivitySetWindowFlags),
+            1283 => Some(Self::ANativeActivityShowSoftInput),
+            1284 => Some(Self::ANativeActivityHideSoftInput),
             _ => None,
         }
     }
@@ -1816,6 +1840,17 @@ pub enum AtraceEvent {
 }
 
 /// Provides Bionic C standard library stubs and forwarding for 32-bit guest code
+#[derive(Debug, Clone, Default)]
+pub struct InputQueueState {
+    pub handle: u32,
+    pub attached_looper: u32,
+    pub ident: i32,
+    pub data: u32,
+    pub callback: u32,
+    pub pending_events: Vec<u32>,
+    pub active_events: Vec<u32>,
+}
+
 pub struct BionicBridge {
     pub stub_base: GuestAddr,
     pub heap_current: GuestAddr,
@@ -1878,6 +1913,9 @@ pub struct BionicBridge {
     // Android Hardware Buffer Subsystem (Stage 99)
     pub hw_buffers: HashMap<u32, HardwareBufferData>,
     pub next_hwbuffer_id: u32,
+    // Android InputQueue Subsystem
+    pub input_queues: HashMap<u32, InputQueueState>,
+    pub next_input_queue_id: u32,
     // Android Media NDK Subsystem (Stage 100)
     pub media_formats: HashMap<u32, MediaFormatData>,
     pub next_media_format_id: u32,
@@ -2033,6 +2071,8 @@ impl BionicBridge {
             xattrs: HashMap::new(),
             hw_buffers: HashMap::new(),
             next_hwbuffer_id: 850,
+            input_queues: HashMap::new(),
+            next_input_queue_id: 1,
             media_formats: HashMap::new(),
             next_media_format_id: 650,
             media_codecs: HashMap::new(),
@@ -2891,6 +2931,17 @@ impl BionicBridge {
             ("AMediaCodec_getOutputBuffer",          BionicFuncId::AMediaCodecGetOutputBuffer),
             ("AMediaCodec_releaseOutputBuffer",      BionicFuncId::AMediaCodecReleaseOutputBuffer),
             ("AMediaCodec_getOutputFormat",          BionicFuncId::AMediaCodecGetOutputFormat),
+            ("AInputQueue_attachLooper",             BionicFuncId::AInputQueueAttachLooper),
+            ("AInputQueue_detachLooper",             BionicFuncId::AInputQueueDetachLooper),
+            ("AInputQueue_hasEvents",                BionicFuncId::AInputQueueHasEvents),
+            ("AInputQueue_getEvent",                 BionicFuncId::AInputQueueGetEvent),
+            ("AInputQueue_preDispatchEvent",         BionicFuncId::AInputQueuePreDispatchEvent),
+            ("AInputQueue_finishEvent",              BionicFuncId::AInputQueueFinishEvent),
+            ("ANativeActivity_finish",               BionicFuncId::ANativeActivityFinish),
+            ("ANativeActivity_setWindowFormat",      BionicFuncId::ANativeActivitySetWindowFormat),
+            ("ANativeActivity_setWindowFlags",       BionicFuncId::ANativeActivitySetWindowFlags),
+            ("ANativeActivity_showSoftInput",        BionicFuncId::ANativeActivityShowSoftInput),
+            ("ANativeActivity_hideSoftInput",        BionicFuncId::ANativeActivityHideSoftInput),
         ];
 
         for (name, id) in funcs {
@@ -3634,6 +3685,17 @@ impl BionicBridge {
             BionicFuncId::AMediaCodecGetOutputBuffer,
             BionicFuncId::AMediaCodecReleaseOutputBuffer,
             BionicFuncId::AMediaCodecGetOutputFormat,
+            BionicFuncId::AInputQueueAttachLooper,
+            BionicFuncId::AInputQueueDetachLooper,
+            BionicFuncId::AInputQueueHasEvents,
+            BionicFuncId::AInputQueueGetEvent,
+            BionicFuncId::AInputQueuePreDispatchEvent,
+            BionicFuncId::AInputQueueFinishEvent,
+            BionicFuncId::ANativeActivityFinish,
+            BionicFuncId::ANativeActivitySetWindowFormat,
+            BionicFuncId::ANativeActivitySetWindowFlags,
+            BionicFuncId::ANativeActivityShowSoftInput,
+            BionicFuncId::ANativeActivityHideSoftInput,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -4383,7 +4445,7 @@ impl BionicBridge {
                 let old_pc = cpu.pc();
                 cpu.set_pc(old_pc.add(4)); // Advance past SVC so sigreturn resumes at BX lr
                 let rt_sigreturn_stub = self.stub_base.add((BionicFuncId::RtSigreturn as u32) * 8);
-                match self.signal_state.deliver_signal(sig, None, cpu, mem, Some(rt_sigreturn_stub)) {
+                match self.signal_state.deliver_signal(sig, None, cpu, mem, Some(rt_sigreturn_stub), None) {
                     Ok(true) => {
                         // Signal delivered: CPU state (PC, SP, LR, R0-R2) adjusted to run handler
                     }
@@ -9516,6 +9578,95 @@ impl BionicBridge {
                 } else {
                     cpu.set_reg(Reg::R0, 0);
                 }
+            }
+            BionicFuncId::AInputQueueAttachLooper => {
+                let queue_handle = cpu.reg(Reg::R0);
+                let looper_handle = cpu.reg(Reg::R1);
+                let ident = cpu.reg(Reg::R2) as i32;
+                let callback = cpu.reg(Reg::R3);
+                let data = mem.read_u32(GuestAddr::new(cpu.sp())).unwrap_or(0);
+
+                let q = self.input_queues.entry(queue_handle).or_insert_with(|| InputQueueState {
+                    handle: queue_handle,
+                    attached_looper: looper_handle,
+                    ident,
+                    data,
+                    callback,
+                    pending_events: Vec::new(),
+                    active_events: Vec::new(),
+                });
+                q.attached_looper = looper_handle;
+                q.ident = ident;
+                q.data = data;
+                q.callback = callback;
+
+                for looper in self.loopers.values_mut() {
+                    if looper.handle == looper_handle {
+                        let fake_fd = 0x1000 + (queue_handle as i32);
+                        looper.fds.insert(fake_fd, LooperFdRegistration {
+                            fd: fake_fd,
+                            ident,
+                            events: 1, // ALOOPER_EVENT_INPUT
+                            callback,
+                            data,
+                        });
+                        break;
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AInputQueueDetachLooper => {
+                let queue_handle = cpu.reg(Reg::R0);
+                if let Some(q) = self.input_queues.get_mut(&queue_handle) {
+                    let looper_handle = q.attached_looper;
+                    for looper in self.loopers.values_mut() {
+                        if looper.handle == looper_handle {
+                            looper.fds.remove(&(0x1000 + (queue_handle as i32)));
+                            break;
+                        }
+                    }
+                    q.attached_looper = 0;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AInputQueueHasEvents => {
+                let queue_handle = cpu.reg(Reg::R0);
+                let has = self.input_queues.get(&queue_handle).map(|q| !q.pending_events.is_empty()).unwrap_or(false);
+                cpu.set_reg(Reg::R0, if has { 1 } else { 0 });
+            }
+            BionicFuncId::AInputQueueGetEvent => {
+                let queue_handle = cpu.reg(Reg::R0);
+                let out_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if let Some(q) = self.input_queues.get_mut(&queue_handle) {
+                    if let Some(ev) = q.pending_events.pop() {
+                        q.active_events.push(ev);
+                        let _ = mem.write_u32(out_ptr, ev);
+                        cpu.set_reg(Reg::R0, 0); // 0 = SUCCESS
+                    } else {
+                        cpu.set_reg(Reg::R0, (-11i32) as u32); // -EAGAIN
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, (-1i32) as u32);
+                }
+            }
+            BionicFuncId::AInputQueuePreDispatchEvent => {
+                // Return 0: event not consumed by pre-dispatch, deliver to app
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::AInputQueueFinishEvent => {
+                let queue_handle = cpu.reg(Reg::R0);
+                let event = cpu.reg(Reg::R1);
+                if let Some(q) = self.input_queues.get_mut(&queue_handle) {
+                    q.active_events.retain(|&e| e != event);
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::ANativeActivityFinish |
+            BionicFuncId::ANativeActivitySetWindowFormat |
+            BionicFuncId::ANativeActivitySetWindowFlags |
+            BionicFuncId::ANativeActivityShowSoftInput |
+            BionicFuncId::ANativeActivityHideSoftInput => {
+                cpu.set_reg(Reg::R0, 0);
             }
             BionicFuncId::Memmove => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));

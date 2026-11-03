@@ -97,7 +97,10 @@ pub fn repackage_for_arm64(
         }
 
         if name.ends_with(".so") {
-            builder.add_file_aligned(&name, &data, options.so_alignment);
+            let mut so_bytes = data;
+            // Sanitize ELF headers for 32-bit ARM libraries (strip DT_TEXTREL & normalize DT_NEEDED)
+            let _ = transd_elf::sanitize_elf_headers(&mut so_bytes);
+            builder.add_file_aligned(&name, &so_bytes, options.so_alignment);
         } else {
             builder.add_file(&name, &data);
         }

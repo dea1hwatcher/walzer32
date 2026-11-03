@@ -27,6 +27,7 @@ impl SuperblockOptimizer {
             }
 
             // 1. Self-move elimination: MOV rX, rX (without set_flags, unshifted)
+            #[allow(clippy::collapsible_if)]
             if let Op::Alu {
                 op: AluOp::Mov,
                 rd,
@@ -44,6 +45,7 @@ impl SuperblockOptimizer {
             // 2. Redundant inverse move: MOV rA, rB followed by MOV rB, rA
             if i + 1 < sb.insts.len() {
                 let next = &sb.insts[i + 1];
+                #[allow(clippy::collapsible_if)]
                 if let (
                     Op::Alu {
                         op: AluOp::Mov,

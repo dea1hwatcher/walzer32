@@ -1169,6 +1169,15 @@ impl ThumbDecoder {
             return ArmInst::new(Cond::AL, inst.op, raw);
         }
 
+        // Thumb-2 CP15 coprocessor instructions (MCR, MRC: cp=15)
+        if (hw1 & 0xEF00) == 0xEE00 && (hw2 & 0x0F00) == 0x0F00 {
+            let arm_raw = 0xE000_0000 | (((hw1 & 0x0FFF) as u32) << 16) | (hw2 as u32);
+            let inst = ArmDecoder::decode(arm_raw);
+            if !matches!(inst.op, Op::Unknown(_)) {
+                return ArmInst::new(Cond::AL, inst.op, raw);
+            }
+        }
+
         // Thumb-2 VFP instructions (Load/Store Single & Multiple, VPUSH/VPOP, ALU, Conversions)
         if (hw1 & 0xEC00) == 0xEC00 && (hw2 & 0x0E00) == 0x0A00 {
             let arm_raw = 0xE000_0000 | (((hw1 & 0x0FFF) as u32) << 16) | (hw2 as u32);

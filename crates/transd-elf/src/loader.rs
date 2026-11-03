@@ -290,10 +290,8 @@ impl DsoRegistry {
     /// Finds a loaded library by its soname
     pub fn find_by_soname(&self, soname: &str) -> Option<(u32, &LoadedLibrary)> {
         for (&h, &idx) in &self.handle_map {
-            if let Some(lib) = self.libraries.get(idx) {
-                if lib.soname.as_deref() == Some(soname) {
-                    return Some((h, lib));
-                }
+            if let Some(lib) = self.libraries.get(idx).filter(|lib| lib.soname.as_deref() == Some(soname)) {
+                return Some((h, lib));
             }
         }
         None

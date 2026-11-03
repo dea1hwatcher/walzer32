@@ -10,11 +10,13 @@ import android.view.SurfaceView
 import android.widget.FrameLayout
 
 /**
- * TransdActivity — SurfaceView Render Container & Event Router for Transd DBT
+ * TransdActivity — SurfaceView Render Container & Event Router for Transd DBT.
+ * Integrates FramePacer to guarantee smooth 60 FPS on high-refresh-rate screens (90/120/144Hz).
  */
 class TransdActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCallback {
     private lateinit var surfaceView: SurfaceView
     private var isRendering = false
+    private val framePacer = FramePacer(targetFps = 60)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -30,6 +32,7 @@ class TransdActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCa
     override fun surfaceCreated(holder: SurfaceHolder) {
         val width = surfaceView.width
         val height = surfaceView.height
+        framePacer.reset()
         TransdEngine.nativeSurfaceCreated(holder.surface, width, height)
         isRendering = true
         Choreographer.getInstance().postFrameCallback(this)
@@ -47,7 +50,9 @@ class TransdActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCa
 
     override fun doFrame(frameTimeNanos: Long) {
         if (isRendering) {
-            TransdEngine.nativeDrawFrame()
+            if (framePacer.shouldRenderFrame(frameTimeNanos)) {
+                TransdEngine.nativeDrawFrame()
+            }
             Choreographer.getInstance().postFrameCallback(this)
         }
     }

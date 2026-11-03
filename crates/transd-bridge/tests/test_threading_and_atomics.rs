@@ -304,3 +304,50 @@ fn test_aeabi_read_tp() {
     assert_eq!(res, expected_tp);
     assert_eq!(engine.cpu.reg(transd_core::Reg::R0), expected_tp);
 }
+
+
+#[test]
+fn test_cp15_memory_barriers_do_not_corrupt_tls() {
+    let mut mem = FlatMemory::new(GuestAddr::new(0x7000_0000), 0x200_000);
+    let mut bionic = BionicBridge::new(GuestAddr::new(0x7000_0000), GuestAddr::new(0x7010_0000), 0x100_000);
+    bionic.install_stubs(&mut mem).unwrap();
+    let mut jni = JniBridge::new(GuestAddr::new(0x7005_0000));
+    jni.install(&mut mem).unwrap();
+    let mut engine = DbtEngine::new(mem);
+
+    // Initial TLS pointer set in CPU state
+    const SENTINEL_TLS: u32 = 0xDEAD_BEE0;
+    engine.cpu.tls_ptr = SENTINEL_TLS;
+
+    // ARM Assembly routine:
+    // PUSH {lr}
+    // MOV r0, #0x42                ; r0 is NOT the TLS pointer
+    // MCR p15, 0, r0, c7, c10, 5   ; DMB barrier (used by Unity Mono / Boehm GC)
+    // MCR p15, 0, r0, c7, c10, 4   ; DSB barrier
+    // MCR p15, 0, r0, c7, c5, 4    ; ISB barrier
+    // MRC p15, 0, r1, c13, c0, 3   ; read TPIDRURW into r1
+    // MOV r0, r1                   ; return in r0
+    // POP {lr}
+    // BX lr
+    let code_addr = GuestAddr::new(0x7002_0000);
+    let insts = [
+        0xE52DE004, // STR lr, [sp, #-4]!
+        0xE3A00042, // MOV r0, #0x42
+        0xEE070F9A, // MCR p15, 0, r0, c7, c10, 5 (DMB)
+        0xEE070F8A, // MCR p15, 0, r0, c7, c10, 4 (DSB)
+        0xEE070F95, // MCR p15, 0, r0, c7, c5, 4  (ISB)
+        0xEE1D1F70, // MRC p15, 0, r1, c13, c0, 3 (read TLS)
+        0xE1A00001, // MOV r0, r1
+        0xE49DE004, // LDR lr, [sp], #4
+        0xE12FFF1E, // BX lr
+    ];
+
+    for (i, &word) in insts.iter().enumerate() {
+        engine.mem.write_u32(code_addr.add((i * 4) as u32), word).unwrap();
+    }
+    engine.cpu.set_sp(0x701F_F000);
+
+    let res = invoke_guest(&mut engine, &mut bionic, &mut jni, code_addr, &[]).unwrap();
+    assert_eq!(res, SENTINEL_TLS, "TLS was corrupted by CP15 memory barriers!");
+    assert_eq!(engine.cpu.tls_ptr, SENTINEL_TLS, "cpu.tls_ptr was corrupted!");
+}

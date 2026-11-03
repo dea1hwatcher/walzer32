@@ -231,10 +231,8 @@ impl Lifter {
         }
 
         // If limit was reached without a terminator, fallthrough to next_pc
-        if let BlockExit::Invalid(_) = block.exit {
-            if !block.insts.is_empty() {
-                block.exit = BlockExit::Direct(cur_pc);
-            }
+        if matches!(block.exit, BlockExit::Invalid(_)) && !block.insts.is_empty() {
+            block.exit = BlockExit::Direct(cur_pc);
         }
 
         Ok(block)

@@ -42,6 +42,7 @@ pub struct TransdSession {
     pub apk_bytes: Option<Vec<u8>>,
     pub loaded_libraries: HashMap<String, LoadedLibrary>,
     pub next_load_addr: GuestAddr,
+    pub jni_registry: crate::dynamic_jni::JniMethodRegistry,
     pub initialized: bool,
 }
 
@@ -110,6 +111,7 @@ impl TransdSession {
             apk_bytes: None,
             loaded_libraries: HashMap::new(),
             next_load_addr: lib_load_base,
+            jni_registry: crate::dynamic_jni::JniMethodRegistry::new(),
             initialized: true,
         })
     }
@@ -178,6 +180,7 @@ impl TransdSession {
 
         self.loaded_libraries.insert(name.to_string(), loaded.clone());
         let _ = self.bionic.register_library(loaded.clone());
+        self.jni_registry.register_library(&loaded);
 
         // Automatic AOT translation cache loading & pre-compilation
         if let Some(ref dir) = self.aot_cache_dir {

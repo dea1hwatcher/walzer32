@@ -229,26 +229,24 @@ impl<'a> DexParser<'a> {
 
                 last_method_idx += diff as usize;
 
-                if (access_flags & ACC_NATIVE) != 0 {
-                    if last_method_idx < self.methods.len() {
-                        let (_, _, name_idx) = self.methods[last_method_idx];
-                        let method_name = if name_idx < self.strings.len() {
-                            self.strings[name_idx].clone()
-                        } else {
-                            format!("method_{}", last_method_idx)
-                        };
+                if (access_flags & ACC_NATIVE) != 0 && last_method_idx < self.methods.len() {
+                    let (_, _, name_idx) = self.methods[last_method_idx];
+                    let method_name = if name_idx < self.strings.len() {
+                        self.strings[name_idx].clone()
+                    } else {
+                        format!("method_{}", last_method_idx)
+                    };
 
-                        let jni_symbol = Self::mangle_jni_symbol(&clean_class_name, &method_name);
-                        let is_static = (access_flags & ACC_STATIC) != 0;
+                    let jni_symbol = Self::mangle_jni_symbol(&clean_class_name, &method_name);
+                    let is_static = (access_flags & ACC_STATIC) != 0;
 
-                        native_methods.push(DexNativeMethod {
-                            class_name: clean_class_name.clone(),
-                            method_name,
-                            return_type: "V".to_string(),
-                            is_static,
-                            jni_symbol,
-                        });
-                    }
+                    native_methods.push(DexNativeMethod {
+                        class_name: clean_class_name.clone(),
+                        method_name,
+                        return_type: "V".to_string(),
+                        is_static,
+                        jni_symbol,
+                    });
                 }
                 let _ = code_off;
             }

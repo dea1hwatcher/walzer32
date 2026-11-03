@@ -1007,3 +1007,16 @@ pub unsafe extern "C" fn Java_com_noodlecake_ads_PlayHaven_nativeUnlockReward(
     _reward: JString,
 ) {
 }
+
+
+/// Android NDK NativeActivity Entry Point:
+/// Invoked by Android OS NativeActivity framework when creating a pure native C/C++ or Unity/Unreal activity.
+/// Safely handles out-of-order startup (when ANativeActivity_onCreate is invoked before JNI_OnLoad).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ANativeActivity_onCreate(
+    _activity: *mut c_void,
+    _saved_state: *mut c_void,
+    _saved_state_size: usize,
+) {
+    drop(get_or_init_session());
+}

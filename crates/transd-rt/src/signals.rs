@@ -462,6 +462,7 @@ pub struct SignalState {
     pub blocked_mask: u64,
     pub pending_mask: u64,
     pub alt_stack: GuestStackT,
+    pub last_syscall: Option<crate::syscall::SyscallArgs>,
 }
 
 impl Default for SignalState {
@@ -477,6 +478,7 @@ impl SignalState {
             blocked_mask: 0,
             pending_mask: 0,
             alt_stack: GuestStackT::default(),
+            last_syscall: None,
         }
     }
 
@@ -556,6 +558,7 @@ impl SignalState {
         cpu: &mut CpuState,
         mem: &mut (impl Memory + ?Sized),
         restorer_override: Option<GuestAddr>,
+        interrupted_syscall: Option<crate::syscall::SyscallArgs>,
     ) -> Result<bool, MemoryError> {
         if sig == 0 || sig > signal_nr::NSIG {
             return Ok(false);
@@ -591,12 +594,27 @@ impl SignalState {
         };
         siginfo.write_to_mem(mem, frame_sp)?;
 
+        // If delivering a signal over an interrupted restartable syscall with SA_RESTART:
+        let syscall_opt = interrupted_syscall.or(self.last_syscall);
+        let (saved_pc, saved_r0) = if let Some(args) = syscall_opt {
+            if (act.sa_flags & sa_flags::SA_RESTART) != 0 && crate::syscall::is_restartable_syscall(args.nr, args.arg3) {
+                // Rewind PC to the SVC instruction and restore orig_r0
+                let svc_size = if cpu.is_thumb() { 2 } else { 4 };
+                let rewound_pc = cpu.pc().as_u32().wrapping_sub(svc_size);
+                (rewound_pc, args.arg0)
+            } else {
+                (cpu.pc().as_u32(), cpu.reg(Reg::R0))
+            }
+        } else {
+            (cpu.pc().as_u32(), cpu.reg(Reg::R0))
+        };
+
         // 2. Write ucontext_t
         let sigcontext = GuestSigContext {
             trap_no: 0,
             error_code: 0,
             oldmask: self.blocked_mask as u32,
-            arm_r0: cpu.reg(Reg::R0),
+            arm_r0: saved_r0,
             arm_r1: cpu.reg(Reg::R1),
             arm_r2: cpu.reg(Reg::R2),
             arm_r3: cpu.reg(Reg::R3),
@@ -611,7 +629,7 @@ impl SignalState {
             arm_ip: cpu.reg(Reg::R12),
             arm_sp: cpu.sp(),
             arm_lr: cpu.lr(),
-            arm_pc: cpu.pc().as_u32(),
+            arm_pc: saved_pc,
             arm_cpsr: cpu.cpsr.bits(),
             fault_address: fault_addr.unwrap_or(0),
         };
@@ -888,7 +906,7 @@ mod tests {
 
         // Deliver SIGSEGV (fault address = 0xDEAD_BEEF)
         let delivered = state
-            .deliver_signal(signal_nr::SIGSEGV, Some(0xDEAD_BEEF), &mut cpu, &mut mem, None)
+            .deliver_signal(signal_nr::SIGSEGV, Some(0xDEAD_BEEF), &mut cpu, &mut mem, None, None)
             .unwrap();
         assert!(delivered);
 
