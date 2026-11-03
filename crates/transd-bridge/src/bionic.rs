@@ -1925,6 +1925,7 @@ pub struct BionicBridge {
     pub strtok_saved: Option<GuestAddr>,
     pub mmap_current: GuestAddr,
     pub mmap_regions: std::collections::HashMap<u32, usize>,
+    pub heap_allocations: HashMap<u32, u32>,
     pub vfs: transd_rt::vfs::VirtualFileSystem,
     pub cwd: String,
 }
@@ -2092,6 +2093,7 @@ impl BionicBridge {
             strtok_saved: None,
             mmap_current: GuestAddr::new(0x7100_0000),
             mmap_regions: std::collections::HashMap::new(),
+            heap_allocations: HashMap::new(),
             vfs: transd_rt::vfs::VirtualFileSystem::new(),
             cwd: "/data/data/com.transd.app".to_string(),
         };
@@ -3697,32 +3699,97 @@ impl BionicBridge {
         match func_id {
             BionicFuncId::Malloc => {
                 let size = cpu.reg(Reg::R0);
-                let align_size = (size + 7) & !7; // 8-byte alignment
-                if self.heap_current.add(align_size) <= self.heap_limit {
-                    let ptr = self.heap_current;
+                let align_size = (size.max(8) + 7) & !7; // 8-byte alignment
+                let ptr = if self.heap_current.add(align_size) <= self.heap_limit {
+                    let p = self.heap_current;
                     self.heap_current = self.heap_current.add(align_size);
-                    cpu.set_reg(Reg::R0, ptr.as_u32());
+                    p
                 } else {
-                    cpu.set_reg(Reg::R0, 0); // Out of memory
-                }
+                    // Fallback to dynamic guest memory from mmap_current
+                    let p = self.mmap_current;
+                    let aligned_len = (align_size + 0xFFF) & !0xFFF;
+                    self.mmap_current = self.mmap_current.add(aligned_len);
+                    let _ = mem.commit_range(p, aligned_len as usize);
+                    p
+                };
+                self.heap_allocations.insert(ptr.as_u32(), size);
+                cpu.set_reg(Reg::R0, ptr.as_u32());
             }
             BionicFuncId::Free => {
-                // In simple bump allocator free is no-op
+                let ptr = cpu.reg(Reg::R0);
+                if ptr != 0 {
+                    self.heap_allocations.remove(&ptr);
+                }
                 cpu.set_reg(Reg::R0, 0);
             }
             BionicFuncId::Calloc => {
                 let num = cpu.reg(Reg::R0);
                 let size = cpu.reg(Reg::R1);
                 let total = num.wrapping_mul(size);
-                let align_size = (total + 7) & !7;
-                if self.heap_current.add(align_size) <= self.heap_limit {
-                    let ptr = self.heap_current;
+                let align_size = (total.max(8) + 7) & !7;
+                let ptr = if self.heap_current.add(align_size) <= self.heap_limit {
+                    let p = self.heap_current;
                     self.heap_current = self.heap_current.add(align_size);
-                    let zeroes = vec![0u8; align_size as usize];
-                    mem.write_bytes(ptr, &zeroes)?;
-                    cpu.set_reg(Reg::R0, ptr.as_u32());
+                    p
                 } else {
+                    let p = self.mmap_current;
+                    let aligned_len = (align_size + 0xFFF) & !0xFFF;
+                    self.mmap_current = self.mmap_current.add(aligned_len);
+                    let _ = mem.commit_range(p, aligned_len as usize);
+                    p
+                };
+                let zeroes = vec![0u8; align_size as usize];
+                mem.write_bytes(ptr, &zeroes)?;
+                self.heap_allocations.insert(ptr.as_u32(), total);
+                cpu.set_reg(Reg::R0, ptr.as_u32());
+            }
+            BionicFuncId::Realloc => {
+                let old_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let new_size = cpu.reg(Reg::R1);
+                if old_ptr.as_u32() == 0 {
+                    // realloc(NULL, size) == malloc(size)
+                    let align_size = (new_size.max(8) + 7) & !7;
+                    let ptr = if self.heap_current.add(align_size) <= self.heap_limit {
+                        let p = self.heap_current;
+                        self.heap_current = self.heap_current.add(align_size);
+                        p
+                    } else {
+                        let p = self.mmap_current;
+                        let aligned_len = (align_size + 0xFFF) & !0xFFF;
+                        self.mmap_current = self.mmap_current.add(aligned_len);
+                        let _ = mem.commit_range(p, aligned_len as usize);
+                        p
+                    };
+                    self.heap_allocations.insert(ptr.as_u32(), new_size);
+                    cpu.set_reg(Reg::R0, ptr.as_u32());
+                } else if new_size == 0 {
+                    // realloc(ptr, 0) == free(ptr)
+                    self.heap_allocations.remove(&old_ptr.as_u32());
                     cpu.set_reg(Reg::R0, 0);
+                } else {
+                    let old_size = self.heap_allocations.get(&old_ptr.as_u32()).copied().unwrap_or(new_size);
+                    let align_size = (new_size.max(8) + 7) & !7;
+                    let new_ptr = if self.heap_current.add(align_size) <= self.heap_limit {
+                        let p = self.heap_current;
+                        self.heap_current = self.heap_current.add(align_size);
+                        p
+                    } else {
+                        let p = self.mmap_current;
+                        let aligned_len = (align_size + 0xFFF) & !0xFFF;
+                        self.mmap_current = self.mmap_current.add(aligned_len);
+                        let _ = mem.commit_range(p, aligned_len as usize);
+                        p
+                    };
+                    let copy_len = (old_size.min(new_size)) as usize;
+                    if copy_len > 0 {
+                        let mut buf = vec![0u8; copy_len];
+                        if mem.read_bytes(old_ptr, &mut buf).is_ok() {
+                            let _ = mem.write_bytes(new_ptr, &buf);
+                        }
+                    }
+                    self.heap_allocations.remove(&old_ptr.as_u32());
+                    self.heap_allocations.insert(new_ptr.as_u32(), new_size);
+                    cpu.set_reg(Reg::R0, new_ptr.as_u32());
                 }
             }
             BionicFuncId::Memcpy => {
@@ -3733,7 +3800,7 @@ impl BionicBridge {
                 let mut buf = vec![0u8; count];
                 mem.read_bytes(src, &mut buf)?;
                 mem.write_bytes(dst, &buf)?;
-                // Returns dst
+                cpu.set_reg(Reg::R0, dst.as_u32());
             }
             BionicFuncId::Memset => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
@@ -3742,7 +3809,22 @@ impl BionicBridge {
 
                 let buf = vec![val; count];
                 mem.write_bytes(dst, &buf)?;
-                // Returns dst
+                cpu.set_reg(Reg::R0, dst.as_u32());
+            }
+            BionicFuncId::Memcmp => {
+                let s1 = GuestAddr::new(cpu.reg(Reg::R0));
+                let s2 = GuestAddr::new(cpu.reg(Reg::R1));
+                let n = cpu.reg(Reg::R2) as usize;
+                let mut diff = 0i32;
+                for i in 0..n {
+                    let b1 = mem.read_u8(s1.add(i as u32))?;
+                    let b2 = mem.read_u8(s2.add(i as u32))?;
+                    if b1 != b2 {
+                        diff = (b1 as i32) - (b2 as i32);
+                        break;
+                    }
+                }
+                cpu.set_reg(Reg::R0, diff as u32);
             }
             BionicFuncId::Strlen => {
                 let str_ptr = GuestAddr::new(cpu.reg(Reg::R0));
@@ -3751,6 +3833,22 @@ impl BionicBridge {
                     len += 1;
                 }
                 cpu.set_reg(Reg::R0, len);
+            }
+            BionicFuncId::Strcmp => {
+                let s1 = GuestAddr::new(cpu.reg(Reg::R0));
+                let s2 = GuestAddr::new(cpu.reg(Reg::R1));
+                let mut idx = 0u32;
+                let diff;
+                loop {
+                    let b1 = mem.read_u8(s1.add(idx))?;
+                    let b2 = mem.read_u8(s2.add(idx))?;
+                    if b1 != b2 || b1 == 0 {
+                        diff = (b1 as i32) - (b2 as i32);
+                        break;
+                    }
+                    idx += 1;
+                }
+                cpu.set_reg(Reg::R0, diff as u32);
             }
             BionicFuncId::Strcpy => {
                 let dst = GuestAddr::new(cpu.reg(Reg::R0));
@@ -3764,6 +3862,7 @@ impl BionicBridge {
                     }
                     idx += 1;
                 }
+                cpu.set_reg(Reg::R0, dst.as_u32());
             }
             BionicFuncId::AndroidLogPrint => {
                 let prio = cpu.reg(Reg::R0);
@@ -8584,7 +8683,7 @@ impl BionicBridge {
                     let name = Self::read_c_string(mem, name_ptr)?;
 
                     let default_val = if name == "security.selinux" {
-                        Some(b"u:object_r:app_data_file:s0 ".to_vec())
+                        Some(b"u:object_r:app_data_file:s0\0".to_vec())
                     } else {
                         None
                     };
@@ -8620,7 +8719,7 @@ impl BionicBridge {
                     let name = Self::read_c_string(mem, name_ptr)?;
 
                     let default_val = if name == "security.selinux" {
-                        Some(b"u:object_r:app_data_file:s0 ".to_vec())
+                        Some(b"u:object_r:app_data_file:s0\0".to_vec())
                     } else {
                         None
                     };
@@ -8717,7 +8816,7 @@ impl BionicBridge {
                     let path = Self::read_c_string(mem, path_ptr)?;
                     let mut list_bytes = Vec::new();
                     // Always include security.selinux
-                    list_bytes.extend_from_slice(b"security.selinux ");
+                    list_bytes.extend_from_slice(b"security.selinux\0");
                     if let Some(m) = self.xattrs.get(&path) {
                         for k in m.keys() {
                             if k != "security.selinux" {
@@ -8744,7 +8843,7 @@ impl BionicBridge {
 
                 let path = self.vfs.fd_path(fd).unwrap_or_else(|| format!("/proc/self/fd/{}", fd));
                 let mut list_bytes = Vec::new();
-                list_bytes.extend_from_slice(b"security.selinux ");
+                list_bytes.extend_from_slice(b"security.selinux\0");
                 if let Some(m) = self.xattrs.get(&path) {
                     for k in m.keys() {
                         if k != "security.selinux" {
@@ -10509,26 +10608,34 @@ impl BionicBridge {
 
             // ── Stage 59: Extended allocator ──────────────────────────────
             BionicFuncId::MallocUsableSize => {
-                // malloc_usable_size(ptr) -> 0 (conservative stub)
-                cpu.set_reg(Reg::R0, 0);
+                let ptr = cpu.reg(Reg::R0);
+                let sz = self.heap_allocations.get(&ptr).copied().unwrap_or(0);
+                cpu.set_reg(Reg::R0, sz);
             }
 
             BionicFuncId::Memalign => {
                 // memalign(alignment, size) -> aligned pointer from heap
-                // We align our heap_current up to the requested alignment.
                 let alignment = cpu.reg(Reg::R0) as u64;
                 let size      = cpu.reg(Reg::R1);
                 let align = if alignment.is_power_of_two() && alignment >= 4 { alignment as u32 } else { 4 };
-                // Round up heap_current to alignment
                 let cur = self.heap_current.as_u32();
                 let aligned = (cur + align - 1) & !(align - 1);
                 let ptr = GuestAddr::new(aligned);
-                self.heap_current = ptr.add(size.max(4));
-                if self.heap_current.as_u32() > self.heap_limit.as_u32() {
-                    cpu.set_reg(Reg::R0, 0); // OOM
+                let alloc_sz = size.max(4);
+                let actual_ptr = if ptr.add(alloc_sz).as_u32() <= self.heap_limit.as_u32() {
+                    self.heap_current = ptr.add(alloc_sz);
+                    ptr
                 } else {
-                    cpu.set_reg(Reg::R0, ptr.as_u32());
-                }
+                    let mmap_cur = self.mmap_current.as_u32();
+                    let mmap_aligned = (mmap_cur + align - 1) & !(align - 1);
+                    let p = GuestAddr::new(mmap_aligned);
+                    let aligned_len = (alloc_sz + 0xFFF) & !0xFFF;
+                    self.mmap_current = p.add(aligned_len);
+                    let _ = mem.commit_range(p, aligned_len as usize);
+                    p
+                };
+                self.heap_allocations.insert(actual_ptr.as_u32(), size);
+                cpu.set_reg(Reg::R0, actual_ptr.as_u32());
             }
 
             BionicFuncId::PosixMemalign => {
@@ -10540,15 +10647,24 @@ impl BionicBridge {
                 let cur = self.heap_current.as_u32();
                 let aligned = (cur + align - 1) & !(align - 1);
                 let ptr = GuestAddr::new(aligned);
-                self.heap_current = ptr.add(size.max(4));
-                if self.heap_current.as_u32() > self.heap_limit.as_u32() {
-                    cpu.set_reg(Reg::R0, 12); // ENOMEM
+                let alloc_sz = size.max(4);
+                let actual_ptr = if ptr.add(alloc_sz).as_u32() <= self.heap_limit.as_u32() {
+                    self.heap_current = ptr.add(alloc_sz);
+                    ptr
                 } else {
-                    if memptr_ptr.as_u32() != 0 {
-                        mem.write_u32(memptr_ptr, ptr.as_u32())?;
-                    }
-                    cpu.set_reg(Reg::R0, 0);
+                    let mmap_cur = self.mmap_current.as_u32();
+                    let mmap_aligned = (mmap_cur + align - 1) & !(align - 1);
+                    let p = GuestAddr::new(mmap_aligned);
+                    let aligned_len = (alloc_sz + 0xFFF) & !0xFFF;
+                    self.mmap_current = p.add(aligned_len);
+                    let _ = mem.commit_range(p, aligned_len as usize);
+                    p
+                };
+                self.heap_allocations.insert(actual_ptr.as_u32(), size);
+                if memptr_ptr.as_u32() != 0 {
+                    mem.write_u32(memptr_ptr, actual_ptr.as_u32())?;
                 }
+                cpu.set_reg(Reg::R0, 0);
             }
 
             // ── Stage 59: pthread_barrier_* ───────────────────────────────
@@ -12172,7 +12288,11 @@ impl BionicBridge {
             }
             BionicFuncId::Munmap => {
                 let addr = cpu.reg(Reg::R0);
-                let _len = cpu.reg(Reg::R1) as usize;
+                let len = cpu.reg(Reg::R1) as usize;
+                if addr != 0 && len > 0 {
+                    let aligned_len = (len + 0xFFF) & !0xFFF;
+                    let _ = mem.mprotect(GuestAddr::new(addr), aligned_len, transd_core::PROT_NONE);
+                }
                 self.mmap_regions.remove(&addr);
                 cpu.set_reg(Reg::R0, 0);
             }
@@ -12287,7 +12407,7 @@ impl BionicBridge {
 
                     if let Some((sname, saddr)) = found_sym {
                         let fname_buf = self.stub_base.add(0xD00);
-                        mem.write_bytes(fname_buf, b"libc.so ")?;
+                        mem.write_bytes(fname_buf, b"libc.so\0")?;
 
                         let sname_buf = self.stub_base.add(0xE00);
                         let mut sname_bytes = sname.as_bytes().to_vec();
@@ -12437,7 +12557,6 @@ impl BionicBridge {
 
                 cpu.set_reg(Reg::R0, 0);
             }
-            _ => {}
         }
 
         Ok(true)
@@ -12593,7 +12712,7 @@ impl BionicBridge {
         cur = cur.add((name.len() as u32 + 4) & !3);
 
         let pass_addr = cur;
-        mem.write_bytes(cur, b"x ")?;
+        mem.write_bytes(cur, b"x\0")?;
         cur = cur.add(4);
 
         let gecos_addr = cur;
@@ -12644,7 +12763,7 @@ impl BionicBridge {
         cur = cur.add((name.len() as u32 + 4) & !3);
 
         let pass_addr = cur;
-        mem.write_bytes(cur, b"x ")?;
+        mem.write_bytes(cur, b"x\0")?;
         cur = cur.add(4);
 
         // Member list (char **): single NULL pointer

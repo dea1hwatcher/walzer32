@@ -68,7 +68,7 @@ impl SuperblockOptimizer {
                         && s2.shift_type == ShiftType::Lsl
                         && s2.amount == ShiftAmount::Imm(0)
                     {
-                        opt_insts.push(inst.clone());
+                        opt_insts.push(*inst);
                         if has_addrs {
                             opt_addrs.push(sb.inst_addrs[i]);
                         }
@@ -78,7 +78,7 @@ impl SuperblockOptimizer {
                 }
             }
 
-            opt_insts.push(inst.clone());
+            opt_insts.push(*inst);
             if has_addrs {
                 opt_addrs.push(sb.inst_addrs[i]);
             }

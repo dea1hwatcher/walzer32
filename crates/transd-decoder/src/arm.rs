@@ -482,33 +482,33 @@ impl ArmDecoder {
 
             let val64 = match cmode {
                 0b0000 | 0b0001 => {
-                    let v32 = imm8 as u32;
+                    let v32 = imm8;
                     ((v32 as u64) << 32) | (v32 as u64)
                 }
                 0b0010 | 0b0011 => {
-                    let v32 = (imm8 as u32) << 8;
+                    let v32 = imm8 << 8;
                     ((v32 as u64) << 32) | (v32 as u64)
                 }
                 0b0100 | 0b0101 => {
-                    let v32 = (imm8 as u32) << 16;
+                    let v32 = imm8 << 16;
                     ((v32 as u64) << 32) | (v32 as u64)
                 }
                 0b0110 | 0b0111 => {
-                    let v32 = (imm8 as u32) << 24;
+                    let v32 = imm8 << 24;
                     ((v32 as u64) << 32) | (v32 as u64)
                 }
                 0b1000 | 0b1001 => {
-                    let v16 = imm8 as u32;
+                    let v16 = imm8;
                     let v32 = (v16 << 16) | v16;
                     ((v32 as u64) << 32) | (v32 as u64)
                 }
                 0b1010 | 0b1011 => {
-                    let v16 = (imm8 as u32) << 8;
+                    let v16 = imm8 << 8;
                     let v32 = (v16 << 16) | v16;
                     ((v32 as u64) << 32) | (v32 as u64)
                 }
                 0b1100 | 0b1101 => {
-                    let v32 = (imm8 as u32) | ((imm8 as u32) << 8) | ((imm8 as u32) << 16) | ((imm8 as u32) << 24);
+                    let v32 = imm8 | (imm8 << 8) | (imm8 << 16) | (imm8 << 24);
                     ((v32 as u64) << 32) | (v32 as u64)
                 }
                 0b1110 => {

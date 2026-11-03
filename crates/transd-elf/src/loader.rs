@@ -225,10 +225,8 @@ impl LoadedLibrary {
         if let Some(list) = self.symbol_details.get(base_name) {
             if let Some(req_v) = requested_ver {
                 for sym in list {
-                    if let Some(v) = &sym.version {
-                        if v == req_v {
-                            return Some(sym.addr);
-                        }
+                    if sym.version.as_deref() == Some(req_v) {
+                        return Some(sym.addr);
                     }
                 }
             } else {
@@ -293,10 +291,8 @@ impl DsoRegistry {
     pub fn find_by_soname(&self, soname: &str) -> Option<(u32, &LoadedLibrary)> {
         for (&h, &idx) in &self.handle_map {
             if let Some(lib) = self.libraries.get(idx) {
-                if let Some(s) = &lib.soname {
-                    if s == soname {
-                        return Some((h, lib));
-                    }
+                if lib.soname.as_deref() == Some(soname) {
+                    return Some((h, lib));
                 }
             }
         }

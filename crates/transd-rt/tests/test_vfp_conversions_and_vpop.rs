@@ -47,10 +47,10 @@ fn test_vpush_vpop_callee_saved_registers() {
     assert_eq!(engine.cpu.reg(Reg::SP), 0x30000 - 64);
 
     // Verify memory was written at [0x30000 - 64]
-    for i in 0..8 {
+    for (i, &expected) in original_d.iter().enumerate() {
         let addr = GuestAddr::new(0x30000 - 64 + (i as u32) * 8);
         let val = engine.mem.read_u64(addr).unwrap();
-        assert_eq!(val, original_d[i], "Mismatch at d{}", 8 + i);
+        assert_eq!(val, expected, "Mismatch at d{}", 8 + i);
     }
 
     // Corrupt registers d8..d15
@@ -77,8 +77,8 @@ fn test_vpush_vpop_callee_saved_registers() {
     assert_eq!(engine.cpu.reg(Reg::SP), 0x30000);
 
     // Verify d8..d15 restored
-    for i in 0..8 {
-        assert_eq!(engine.cpu.vfp[8 + i], original_d[i], "Restored mismatch at d{}", 8 + i);
+    for (i, &expected) in original_d.iter().enumerate() {
+        assert_eq!(engine.cpu.vfp[8 + i], expected, "Restored mismatch at d{}", 8 + i);
     }
 }
 
@@ -90,10 +90,10 @@ fn test_scalar_vcvt_single_double() {
 
     let mut engine = DbtEngine::new(arena);
 
-    // S0 = 3.1415927
-    engine.cpu.set_s_reg(0, 3.1415927f32);
-    // D2 = 2.718281828459045
-    engine.cpu.set_d_reg(2, 2.718281828459045f64);
+    // S0 = PI
+    engine.cpu.set_s_reg(0, std::f32::consts::PI);
+    // D2 = E
+    engine.cpu.set_d_reg(2, std::f64::consts::E);
 
     // Program:
     // 0x21000: VCVT.F64.F32 d1, s0 -> 0xEEB7_1AC0
@@ -112,11 +112,11 @@ fn test_scalar_vcvt_single_double() {
     assert_eq!(exit_code, 0);
 
     let d1 = engine.cpu.d_reg(1);
-    let diff1 = (d1 - 3.1415927f64).abs();
+    let diff1 = (d1 - std::f64::consts::PI).abs();
     assert!(diff1 < 1e-6, "d1 was {d1}");
 
     let s6 = engine.cpu.s_reg(6);
-    let diff2 = (s6 - 2.7182817f32).abs();
+    let diff2 = (s6 - (std::f64::consts::E as f32)).abs();
     assert!(diff2 < 1e-5, "s6 was {s6}");
 }
 

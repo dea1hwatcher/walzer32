@@ -589,7 +589,9 @@ impl GlesBridge {
             }
             GlesFuncId::EglChooseConfig => {
                 let configs_ptr = GuestAddr::new(cpu.reg(Reg::R2));
-                let num_config_ptr = GuestAddr::new(cpu.reg(Reg::R4));
+                // ARM32 AAPCS: Arguments 1..4 in R0..R3; 5th argument (num_config) is on stack [SP, #0]
+                let sp = GuestAddr::new(cpu.sp());
+                let num_config_ptr = GuestAddr::new(mem.read_u32(sp).unwrap_or(0));
                 if configs_ptr.as_u32() != 0 {
                     mem.write_u32(configs_ptr, 0x2001)?; // Valid EGLConfig handle
                 }

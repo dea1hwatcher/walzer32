@@ -101,10 +101,6 @@ impl DefaultSyscallHandler {
             signal_state: crate::signals::SignalState::new(),
         }
     }
-
-    pub fn set_mmap_base(&mut self, base: GuestAddr) {
-        self.mmap_current = base;
-    }
 }
 
 fn write_utsname(mem: &mut dyn Memory, addr: GuestAddr) -> Result<(), transd_core::MemoryError> {

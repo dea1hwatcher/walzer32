@@ -103,8 +103,8 @@ fn test_unwind_context_registers_and_ip() {
     let ctx = scratch(0x300);
 
     // Populate mock register context (R0..R15)
-    mem.write_u32(ctx.add(0 * 4), 0x1111_1111).unwrap(); // R0
-    mem.write_u32(ctx.add(1 * 4), 0x2222_2222).unwrap(); // R1
+    mem.write_u32(ctx, 0x1111_1111).unwrap(); // R0
+    mem.write_u32(ctx.add(4), 0x2222_2222).unwrap(); // R1
     mem.write_u32(ctx.add(13 * 4), 0x001F_F000).unwrap(); // R13 (SP)
     mem.write_u32(ctx.add(15 * 4), 0x0001_2345).unwrap(); // R15 (PC with Thumb bit set)
 
@@ -125,7 +125,7 @@ fn test_unwind_context_registers_and_ip() {
     cpu.set_reg(Reg::R2, 0xCAFE_BABE);
     call_bionic(&mut bridge, BionicFuncId::UnwindSetGR, &mut cpu, &mut mem).unwrap();
     assert_eq!(cpu.reg(Reg::R0), 0);
-    assert_eq!(mem.read_u32(ctx.add(1 * 4)).unwrap(), 0xCAFE_BABE);
+    assert_eq!(mem.read_u32(ctx.add(4)).unwrap(), 0xCAFE_BABE);
 
     // Verify GetGR reads the updated value
     cpu.set_reg(Reg::R0, ctx.as_u32());

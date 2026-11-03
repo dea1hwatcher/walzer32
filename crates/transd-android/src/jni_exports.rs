@@ -17,6 +17,12 @@ pub const JNI_ERR_GENERIC: JInt = -1;
 pub const JNI_ERR_NOT_FOUND: JInt = -2;
 pub const JNI_ERR_LOAD_FAIL: JInt = -3;
 
+/// Standard JNI lifecycle entrypoint
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn JNI_OnLoad(_vm: *mut c_void, _reserved: *mut c_void) -> JInt {
+    0x0001_0006 // JNI_VERSION_1_6
+}
+
 /// JNI Export: Initialize Transd DBT Engine from Android Application
 ///
 /// Java Signature:
@@ -746,4 +752,258 @@ pub unsafe extern "C" fn Java_com_transd_loader_TransdEngine_nativeSetSystemProp
     } else {
         JNI_ERR_GENERIC
     }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Game-Specific JNI Bindings (Zombie Road Trip / Cocos2d-x / Apportable)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_noodlenews_NoodlecakeGameActivity_getPlatform(
+    _env: JNIEnv,
+    _clazz: JClass,
+) -> JInt {
+    0 // Android platform
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_noodlenews_NoodlecakeGameActivity_getVersion(
+    _env: JNIEnv,
+    _clazz: JClass,
+) -> JInt {
+    30 // Version 30
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_iapv3_PurchaseWrapperV3_handleMessage(
+    _env: JNIEnv,
+    _clazz: JClass,
+    _msg: JString,
+    _code: JInt,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_lib_font_NoodleBitmap_nativeInitBitmapDC(
+    _env: JNIEnv,
+    _clazz: JClass,
+    _width: JInt,
+    _height: JInt,
+    _pixels: JObject,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIAccelerometer_onSensorChanged(
+    _env: JNIEnv,
+    _clazz: JClass,
+    _x: JFloat,
+    _y: JFloat,
+    _z: JFloat,
+    _timestamp: JLong,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIAlertView_returnAlertView(
+    _env: JNIEnv,
+    _clazz: JClass,
+    _alert_id: JInt,
+    _button_idx: JInt,
+    _text: JString,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIApplication_appDidBecomeActive(
+    _env: JNIEnv,
+    _clazz: JClass,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIApplication_appDidEnterBackground(
+    _env: JNIEnv,
+    _clazz: JClass,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIApplication_appDidReceiveMemoryWarning(
+    _env: JNIEnv,
+    _clazz: JClass,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIApplication_appWillEnterForeground(
+    _env: JNIEnv,
+    _clazz: JClass,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIApplication_appWillResignActive(
+    _env: JNIEnv,
+    _clazz: JClass,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_lib_uikit_UIApplication_appWillTerminate(
+    _env: JNIEnv,
+    _clazz: JClass,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxBitmap_nativeInitBitmapDC(
+    _env: JNIEnv,
+    _clazz: JClass,
+    _width: JInt,
+    _height: JInt,
+    _pixels: JObject,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeDeleteBackward(
+    _env: JNIEnv,
+    _clazz: JClass,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeGetContentText(
+    _env: JNIEnv,
+    _clazz: JClass,
+) -> JString {
+    std::ptr::null_mut()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit(
+    _env: JNIEnv,
+    _clazz: JClass,
+    width: JInt,
+    height: JInt,
+) {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            session.on_surface_created(0, width as u32, height as u32);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInsertText(
+    _env: JNIEnv,
+    _clazz: JClass,
+    _text: JString,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeKeyDown(
+    _env: JNIEnv,
+    _clazz: JClass,
+    _key_code: JInt,
+) -> JInt {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender(
+    _env: JNIEnv,
+    _clazz: JClass,
+) {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let _ = session.on_draw_frame();
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeSurfaceChanged(
+    _env: JNIEnv,
+    _clazz: JClass,
+    width: JInt,
+    height: JInt,
+) {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            session.on_surface_changed(width as u32, height as u32);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesBegin(
+    _env: JNIEnv,
+    _clazz: JClass,
+    id: JInt,
+    x: JFloat,
+    y: JFloat,
+    _timestamp: JLong,
+) {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            session.on_touch_event(0, x, y, id as u32);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesEnd(
+    _env: JNIEnv,
+    _clazz: JClass,
+    id: JInt,
+    x: JFloat,
+    y: JFloat,
+    _timestamp: JLong,
+) {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            session.on_touch_event(1, x, y, id as u32);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesMove(
+    _env: JNIEnv,
+    _clazz: JClass,
+    _ids: JObject,
+    _xs: JObject,
+    _ys: JObject,
+    _timestamp: JLong,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesCancel(
+    _env: JNIEnv,
+    _clazz: JClass,
+    _ids: JObject,
+    _xs: JObject,
+    _ys: JObject,
+    _timestamp: JLong,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_ads_InterstitialController_IncentivizedAdComplete(
+    _env: JNIEnv,
+    _clazz: JClass,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_com_noodlecake_ads_PlayHaven_nativeUnlockReward(
+    _env: JNIEnv,
+    _clazz: JClass,
+    _reward: JString,
+) {
 }

@@ -724,11 +724,11 @@ impl ThumbDecoder {
         // Thumb-32 MOVT: 1111 0 i 10 1 1 0 0 imm4 | 0 imm3 Rd imm8
         if ((hw1 & 0xFBF0) == 0xF240 || (hw1 & 0xFBF0) == 0xF2C0) && (hw2 & 0x8000) == 0 {
             let is_top = (hw1 & 0x0080) != 0;
-            let i = ((hw1 >> 10) & 1) as u16;
-            let imm4 = (hw1 & 0xF) as u16;
-            let imm3 = ((hw2 >> 12) & 7) as u16;
+            let i = (hw1 >> 10) & 1;
+            let imm4 = hw1 & 0xF;
+            let imm3 = (hw2 >> 12) & 7;
             let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
-            let imm8 = (hw2 & 0xFF) as u16;
+            let imm8 = hw2 & 0xFF;
             let imm16 = (imm4 << 12) | (i << 11) | (imm3 << 8) | imm8;
             if is_top {
                 return ArmInst::new(Cond::AL, Op::Movt { rd, imm: imm16 }, raw);

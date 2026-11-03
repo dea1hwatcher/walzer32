@@ -23,7 +23,7 @@ fn align_up(n: usize, align: usize) -> usize {
 #[cfg(unix)]
 pub struct JitPage {
     ptr: *mut u8,
-    len: usize,
+    capacity: usize,
     write_cursor: usize,
     committed: bool,
 }
@@ -40,11 +40,11 @@ impl JitPage {
         use libc::{
             MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE, mmap,
         };
-        let len = align_up(min_size.max(PAGE_SIZE), PAGE_SIZE);
+        let cap = align_up(min_size.max(PAGE_SIZE), PAGE_SIZE);
         let ptr = unsafe {
             mmap(
                 ptr::null_mut(),
-                len,
+                cap,
                 PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS,
                 -1,
@@ -56,7 +56,7 @@ impl JitPage {
         }
         Ok(Self {
             ptr: ptr as *mut u8,
-            len,
+            capacity: cap,
             write_cursor: 0,
             committed: false,
         })
@@ -67,7 +67,7 @@ impl JitPage {
         assert!(!self.committed, "JitPage: write after commit");
         let offset = self.write_cursor;
         let end = offset + code.len();
-        if end > self.len {
+        if end > self.capacity {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::OutOfMemory,
                 "JIT page capacity exceeded",
@@ -89,7 +89,7 @@ impl JitPage {
             flush_icache(self.ptr, self.write_cursor);
         }
         let ret =
-            unsafe { mprotect(self.ptr as *mut libc::c_void, self.len, PROT_READ | PROT_EXEC) };
+            unsafe { mprotect(self.ptr as *mut libc::c_void, self.capacity, PROT_READ | PROT_EXEC) };
         if ret != 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -120,7 +120,7 @@ impl JitPage {
     }
 
     pub fn capacity(&self) -> usize {
-        self.len
+        self.capacity
     }
 
     /// Return raw pointer to the byte at `offset` within this page.
@@ -135,7 +135,7 @@ impl Drop for JitPage {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unsafe {
-                libc::munmap(self.ptr as *mut libc::c_void, self.len);
+                libc::munmap(self.ptr as *mut libc::c_void, self.capacity);
             }
         }
     }
@@ -147,7 +147,7 @@ impl Drop for JitPage {
 #[cfg(windows)]
 pub struct JitPage {
     ptr: *mut u8,
-    len: usize,
+    capacity: usize,
     write_cursor: usize,
     committed: bool,
 }
@@ -163,11 +163,11 @@ impl JitPage {
         use windows_sys::Win32::System::Memory::{
             MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAlloc,
         };
-        let len = align_up(min_size.max(4096), 4096);
+        let cap = align_up(min_size.max(4096), 4096);
         let ptr = unsafe {
             VirtualAlloc(
                 std::ptr::null(),
-                len,
+                cap,
                 MEM_COMMIT | MEM_RESERVE,
                 PAGE_EXECUTE_READWRITE,
             )
@@ -177,7 +177,7 @@ impl JitPage {
         }
         Ok(Self {
             ptr: ptr as *mut u8,
-            len,
+            capacity: cap,
             write_cursor: 0,
             committed: false,
         })
@@ -187,7 +187,7 @@ impl JitPage {
         assert!(!self.committed, "JitPage: write after commit");
         let offset = self.write_cursor;
         let end = offset + code.len();
-        if end > self.len {
+        if end > self.capacity {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::OutOfMemory,
                 "JIT page capacity exceeded",
@@ -227,7 +227,7 @@ impl JitPage {
     }
 
     pub fn capacity(&self) -> usize {
-        self.len
+        self.capacity
     }
 
     /// Return raw pointer to the byte at `offset` within this page.

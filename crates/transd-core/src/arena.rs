@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use byteorder::{ByteOrder, LittleEndian};
 use crate::addr::GuestAddr;
@@ -6,6 +6,8 @@ use crate::memory::{Memory, MemoryError, PROT_EXEC, PROT_READ, PROT_WRITE};
 
 pub const ARENA_4GB_SIZE: usize = 0x1_0000_0000; // 4 GB (4,294,967,296 bytes)
 pub const PAGE_SIZE: usize = 4096;
+pub const TOTAL_PAGES: usize = 0x10_0000; // 1,048,576 pages for 4GB
+pub const BITMAP_WORDS: usize = TOTAL_PAGES / 64; // 16,384 words = 128KB
 
 #[cfg(windows)]
 mod os {
@@ -63,7 +65,8 @@ mod os {
 /// with 0 instruction offset calculations, 0 wrapping checks, and 0 boundary branches in JIT hot paths.
 pub struct ArenaMemory {
     base_ptr: *mut u8,
-    committed_pages: HashSet<u32>,
+    committed_bitmap: Vec<u64>,
+    committed_count: usize,
     page_protections: HashMap<u32, u8>,
 }
 
@@ -88,7 +91,8 @@ impl ArenaMemory {
             }
             Ok(Self {
                 base_ptr: ptr as *mut u8,
-                committed_pages: HashSet::new(),
+                committed_bitmap: vec![0u64; BITMAP_WORDS],
+                committed_count: 0,
                 page_protections: HashMap::new(),
             })
         }
@@ -110,9 +114,22 @@ impl ArenaMemory {
             }
             Ok(Self {
                 base_ptr: ptr as *mut u8,
-                committed_pages: HashSet::new(),
+                committed_bitmap: vec![0u64; BITMAP_WORDS],
+                committed_count: 0,
                 page_protections: HashMap::new(),
             })
+        }
+    }
+
+    #[inline(always)]
+    fn is_committed_pfn(&self, pfn: u32) -> bool {
+        let p = pfn as usize;
+        if p < TOTAL_PAGES {
+            let word = p >> 6;
+            let mask = 1u64 << (p & 63);
+            (self.committed_bitmap[word] & mask) != 0
+        } else {
+            false
         }
     }
 
@@ -123,7 +140,7 @@ impl ArenaMemory {
         let end_pfn = end_addr >> 12;
 
         for pfn in start_pfn..=end_pfn {
-            if !self.committed_pages.contains(&pfn) {
+            if !self.is_committed_pfn(pfn) {
                 return Err(MemoryError::Unmapped(GuestAddr::new(pfn << 12)));
             }
             if !self.page_protections.is_empty() {
@@ -186,7 +203,15 @@ impl ArenaMemory {
         let start_pfn = (page_start >> 12) as u32;
         let end_pfn = (page_end >> 12) as u32;
         for pfn in start_pfn..=end_pfn {
-            self.committed_pages.insert(pfn);
+            let p = pfn as usize;
+            if p < TOTAL_PAGES {
+                let word = p >> 6;
+                let mask = 1u64 << (p & 63);
+                if (self.committed_bitmap[word] & mask) == 0 {
+                    self.committed_bitmap[word] |= mask;
+                    self.committed_count += 1;
+                }
+            }
         }
         Ok(())
     }
@@ -204,7 +229,7 @@ impl ArenaMemory {
         let end_pfn = (page_end >> 12) as u32;
 
         for pfn in start_pfn..=end_pfn {
-            if !self.committed_pages.contains(&pfn) {
+            if !self.is_committed_pfn(pfn) {
                 return Err(MemoryError::Unmapped(addr));
             }
         }
@@ -303,18 +328,26 @@ impl ArenaMemory {
         let start_pfn = (page_start >> 12) as u32;
         let end_pfn = (page_end >> 12) as u32;
         for pfn in start_pfn..=end_pfn {
-            self.committed_pages.remove(&pfn);
+            let p = pfn as usize;
+            if p < TOTAL_PAGES {
+                let word = p >> 6;
+                let mask = 1u64 << (p & 63);
+                if (self.committed_bitmap[word] & mask) != 0 {
+                    self.committed_bitmap[word] &= !mask;
+                    self.committed_count -= 1;
+                }
+            }
             self.page_protections.remove(&pfn);
         }
         Ok(())
     }
 
     pub fn is_page_committed(&self, pfn: u32) -> bool {
-        self.committed_pages.contains(&pfn)
+        self.is_committed_pfn(pfn)
     }
 
     pub fn committed_page_count(&self) -> usize {
-        self.committed_pages.len()
+        self.committed_count
     }
 }
 
