@@ -180,10 +180,11 @@ impl SyscallHandler for DefaultSyscallHandler {
                 Ok(None)
             }
             nr::OPENAT => {
+                let dirfd = args.arg0 as i32;
                 let path_addr = GuestAddr::new(args.arg1);
                 let flags = args.arg2;
                 match crate::vfs::read_cstring_from_mem(mem, path_addr, 4096) {
-                    Ok(path) => match self.vfs.open(&path, flags) {
+                    Ok(path) => match self.vfs.openat(dirfd, &path, flags) {
                         Ok(fd) => cpu.set_reg(Reg::R0, fd),
                         Err(err) => cpu.set_reg(Reg::R0, err as u32),
                     },
@@ -643,6 +644,22 @@ impl<M: Memory> DbtEngine<M> {
     /// or Ok(false) if unhandled (default crash / terminate).
     /// Delivers an asynchronous or synchronous guest signal, automatically rewinding
     /// restartable syscalls if the handler has SA_RESTART configured.
+    /// Synchronizes the engine's signal state from an external signal state (e.g. Bionic)
+    pub fn signal_state(&self) -> Option<&crate::signals::SignalState> {
+        self.syscall_handler.signal_state()
+    }
+
+    pub fn signal_state_mut(&mut self) -> Option<&mut crate::signals::SignalState> {
+        self.syscall_handler.signal_state_mut()
+    }
+
+    /// Synchronizes the engine's signal state from an external signal state (e.g. Bionic)
+    pub fn sync_signal_state(&mut self, state: &crate::signals::SignalState) {
+        if let Some(s) = self.syscall_handler.signal_state_mut() {
+            *s = state.clone();
+        }
+    }
+
     pub fn deliver_guest_signal(
         &mut self,
         sig: u32,

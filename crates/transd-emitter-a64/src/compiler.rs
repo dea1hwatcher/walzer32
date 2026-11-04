@@ -170,10 +170,24 @@ impl A64Compiler {
         // 1. Emit entry prologue
         Self::emit_prologue(&mut asm);
 
-        // 2. Loop header label
+        // 2. Pre-scan for dead flag elimination across the superblock
+        let flags_needed = matches!(sb.exit, BlockExit::BranchCond { cond, .. } | BlockExit::IndirectCond { cond, .. } if !cond.is_always())
+            || !sb.side_exits.is_empty()
+            || sb.insts.iter().any(|i| !i.cond.is_always());
+        let last_flag_idx = if flags_needed {
+            sb.insts.iter().rposition(|inst| match &inst.op {
+                Op::Alu { op, set_flags, .. } => *set_flags || op.is_test(),
+                Op::Mul { set_flags, .. } => *set_flags,
+                _ => false,
+            })
+        } else {
+            None
+        };
+
+        // 3. Loop header label
         let loop_start_cursor = asm.cursor();
 
-        // 3. Compile instructions with side exit guards
+        // 4. Compile instructions with side exit guards and dead flag elimination
         let mut side_exit_stubs = Vec::new();
         let mut se_idx = 0;
 
@@ -196,7 +210,7 @@ impl A64Compiler {
 
             let pc_val = sb.pc_read_val(idx);
             let pc_mem_val = sb.pc_mem_read_val(idx);
-            Self::compile_guarded_inst(&mut asm, inst, idx, true, None, pc_val, pc_mem_val);
+            Self::compile_guarded_inst(&mut asm, inst, idx, flags_needed, last_flag_idx, pc_val, pc_mem_val);
         }
 
         while se_idx < sb.side_exits.len() {

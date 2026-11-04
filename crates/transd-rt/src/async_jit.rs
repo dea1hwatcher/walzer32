@@ -256,7 +256,8 @@ impl CompilationQueue {
             if let Some(job) = state.queue.pop_front() {
                 return Some(job);
             }
-            state = self.cond.wait(state).unwrap();
+            let (next_state, _) = self.cond.wait_timeout(state, Duration::from_millis(50)).unwrap();
+            state = next_state;
         }
     }
 
@@ -434,7 +435,10 @@ impl AsyncJit {
     /// Shuts down all background worker threads cleanly and joins them.
     pub fn shutdown(&mut self) {
         if !self.shutdown.swap(true, Ordering::Release) {
-            self.queue.cond.notify_all();
+            {
+                let _guard = self.queue.inner.lock().unwrap();
+                self.queue.cond.notify_all();
+            }
             for handle in self.workers.drain(..) {
                 let _ = handle.join();
             }

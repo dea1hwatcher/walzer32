@@ -276,3 +276,37 @@ fn test_directory_stubs() {
     call_bionic(&mut bridge, BionicFuncId::Rename, &mut cpu, &mut mem).unwrap();
     assert_eq!(cpu.reg(Reg::R0), 0);
 }
+
+#[test]
+fn test_openat_relative_path() {
+    let (mut bridge, mut mem, mut cpu) = setup();
+    bridge.vfs.register_file("/proc/sys/kernel/osrelease", b"5.10.0-transd\n".to_vec());
+
+    // 1. Open directory "/proc/sys/kernel"
+    let dir_path_addr = scratch(0x00);
+    write_str(&mut mem, dir_path_addr, "/proc/sys/kernel");
+    cpu.set_reg(Reg::R0, dir_path_addr.as_u32());
+    cpu.set_reg(Reg::R1, 0);
+    call_bionic(&mut bridge, BionicFuncId::Open, &mut cpu, &mut mem).unwrap();
+    let dirfd = cpu.reg(Reg::R0);
+    assert!(dirfd >= 3);
+
+    // 2. openat(dirfd, "osrelease", O_RDONLY=0) -> resolves relative to /proc/sys/kernel
+    let rel_path_addr = scratch(0x40);
+    write_str(&mut mem, rel_path_addr, "osrelease");
+    cpu.set_reg(Reg::R0, dirfd);
+    cpu.set_reg(Reg::R1, rel_path_addr.as_u32());
+    cpu.set_reg(Reg::R2, 0);
+    call_bionic(&mut bridge, BionicFuncId::Openat, &mut cpu, &mut mem).unwrap();
+    let filefd = cpu.reg(Reg::R0);
+    assert!(filefd >= 3);
+    assert_ne!(dirfd, filefd);
+
+    // 3. Read content
+    let buf_addr = scratch(0x80);
+    cpu.set_reg(Reg::R0, filefd);
+    cpu.set_reg(Reg::R1, buf_addr.as_u32());
+    cpu.set_reg(Reg::R2, 14);
+    call_bionic(&mut bridge, BionicFuncId::Read, &mut cpu, &mut mem).unwrap();
+    assert_eq!(cpu.reg(Reg::R0), 14);
+}

@@ -97,12 +97,28 @@ impl FutexManager {
             let res = cond.wait_timeout(guard, dur).unwrap();
             let mut guard = res.0;
             guard.waiters_count = guard.waiters_count.saturating_sub(1);
+            if guard.waiters_count == 0 {
+                let mut map = self.queues.lock().unwrap();
+                if let Some(q) = map.get(&uaddr) {
+                    if Arc::ptr_eq(q, &queue) {
+                        map.remove(&uaddr);
+                    }
+                }
+            }
             if res.1.timed_out() {
                 return Err(FutexError::TimedOut);
             }
         } else {
             guard = cond.wait(guard).unwrap();
             guard.waiters_count = guard.waiters_count.saturating_sub(1);
+            if guard.waiters_count == 0 {
+                let mut map = self.queues.lock().unwrap();
+                if let Some(q) = map.get(&uaddr) {
+                    if Arc::ptr_eq(q, &queue) {
+                        map.remove(&uaddr);
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -110,19 +126,20 @@ impl FutexManager {
 
     /// FUTEX_WAKE: Wakes up to `val` threads waiting on uaddr.
     pub fn wake(&self, uaddr: GuestAddr, count: u32) -> u32 {
-        let queue = {
-            let map = self.queues.lock().unwrap();
-            map.get(&uaddr).cloned()
-        };
-
-        if let Some(queue) = queue {
+        let mut map = self.queues.lock().unwrap();
+        if let Some(queue) = map.get(&uaddr).cloned() {
             let (lock, cond) = &*queue;
-            let guard = lock.lock().unwrap();
+            let mut guard = lock.lock().unwrap();
             let waiters = guard.waiters_count as u32;
             let to_wake = waiters.min(count);
 
             for _ in 0..to_wake {
                 cond.notify_one();
+            }
+
+            guard.waiters_count = guard.waiters_count.saturating_sub(to_wake as usize);
+            if guard.waiters_count == 0 {
+                map.remove(&uaddr);
             }
 
             to_wake

@@ -718,12 +718,17 @@ impl SignalState {
 
 #[cfg(unix)]
 extern "C" fn host_signal_handler(sig: libc::c_int, info: *mut libc::siginfo_t, _ucontext: *mut libc::c_void) {
-    let fault_addr = if !info.is_null() {
+    let _fault_addr = if !info.is_null() {
         unsafe { (*info).si_addr() as usize }
     } else {
         0
     };
-    eprintln!("CRITICAL: host_signal_handler caught signal {} at fault_addr 0x{:x}", sig, fault_addr);
+    // Async-signal-safe write to STDERR_FILENO without heap allocation or stdio locks
+    let msg = b"CRITICAL: host_signal_handler caught fatal signal in guest DBT\n";
+    unsafe {
+        libc::write(libc::STDERR_FILENO, msg.as_ptr() as *const libc::c_void, msg.len());
+    }
+    let _ = sig;
     std::process::abort();
 }
 

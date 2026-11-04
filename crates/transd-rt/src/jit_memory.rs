@@ -29,7 +29,7 @@ pub struct JitPage {
     capacity: usize,
     write_cursor: usize,
     committed: bool,
-    fd: Option<i32>,
+    is_dual_mapped: bool,
 }
 
 #[cfg(unix)]
@@ -77,13 +77,16 @@ impl JitPage {
                         )
                     };
                     if rx_ptr != MAP_FAILED {
+                        // Immediately close memfd descriptor to prevent FD leak across pools.
+                        // Linux VM retains memory page references via VMA until munmap.
+                        unsafe { libc::close(memfd) };
                         return Ok(Self {
                             write_ptr: write_ptr as *mut u8,
                             rx_ptr: rx_ptr as *mut u8,
                             capacity: cap,
                             write_cursor: 0,
                             committed: false,
-                            fd: Some(memfd),
+                            is_dual_mapped: true,
                         });
                     }
                     unsafe { libc::munmap(write_ptr, cap) };
@@ -112,7 +115,7 @@ impl JitPage {
             capacity: cap,
             write_cursor: 0,
             committed: false,
-            fd: None,
+            is_dual_mapped: false,
         })
     }
 
@@ -154,7 +157,7 @@ impl JitPage {
         if self.write_cursor > 0 {
             flush_icache(self.rx_ptr, self.write_cursor);
         }
-        if self.fd.is_none() {
+        if !self.is_dual_mapped {
             let ret = unsafe {
                 mprotect(self.rx_ptr as *mut libc::c_void, self.capacity, PROT_READ | PROT_EXEC)
             };
@@ -216,9 +219,7 @@ impl Drop for JitPage {
             } else if !self.write_ptr.is_null() {
                 libc::munmap(self.write_ptr as *mut libc::c_void, self.capacity);
             }
-            if let Some(fd) = self.fd {
-                libc::close(fd);
-            }
+            // Dual-mapped memfd is closed immediately after mmap; munmap releases memory.
         }
     }
 }

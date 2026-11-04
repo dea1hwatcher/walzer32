@@ -272,3 +272,31 @@ fn test_clock_nanosleep_returns_zero() {
     call_bionic(&mut bridge, BionicFuncId::ClockNanosleep, &mut cpu, &mut mem).unwrap();
     assert_eq!(cpu.reg(Reg::R0), 0, "clock_nanosleep returns 0 (stub)");
 }
+
+#[test]
+fn test_segregated_free_list_recycles_chunks() {
+    let (mut bridge, mut mem, mut cpu) = setup();
+
+    // Malloc 64 bytes
+    cpu.set_reg(Reg::R0, 64);
+    call_bionic(&mut bridge, BionicFuncId::Malloc, &mut cpu, &mut mem).unwrap();
+    let ptr1 = cpu.reg(Reg::R0);
+    assert_ne!(ptr1, 0);
+
+    // Free the chunk
+    cpu.set_reg(Reg::R0, ptr1);
+    call_bionic(&mut bridge, BionicFuncId::Free, &mut cpu, &mut mem).unwrap();
+
+    // Malloc 64 bytes again: MUST recycle ptr1 from free bucket
+    cpu.set_reg(Reg::R0, 64);
+    call_bionic(&mut bridge, BionicFuncId::Malloc, &mut cpu, &mut mem).unwrap();
+    let ptr2 = cpu.reg(Reg::R0);
+    assert_eq!(ptr1, ptr2, "Free list must recycle previously freed chunk");
+
+    // Realloc growth and in-place reuse
+    cpu.set_reg(Reg::R0, ptr2);
+    cpu.set_reg(Reg::R1, 48); // smaller than 64: should reuse in-place
+    call_bionic(&mut bridge, BionicFuncId::Realloc, &mut cpu, &mut mem).unwrap();
+    let ptr3 = cpu.reg(Reg::R0);
+    assert_eq!(ptr2, ptr3, "Realloc shrink must reuse in-place without moving");
+}

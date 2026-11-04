@@ -141,9 +141,9 @@ pub fn execute_so(
                 );
             }
 
-            if !gles.draw_calls.is_empty() || gles.swap_count > 0 {
+            if gles.total_draw_calls > 0 || !gles.draw_calls.is_empty() || gles.swap_count > 0 {
                 println!("\n[Graphics (EGL/GLES) Passthrough Stats]");
-                println!("  Total draw calls: {}", gles.draw_calls.len());
+                println!("  Total draw calls: {}", gles.total_draw_calls);
                 println!("  Buffer swaps:     {}", gles.swap_count);
                 println!("  Active program:   {}", gles.active_program);
                 println!("  Viewport:         {:?}", gles.viewport);

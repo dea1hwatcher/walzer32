@@ -81,6 +81,8 @@ pub fn invoke_guest_extended<M: Memory>(
     engine.cpu.set_pc(func_addr.instruction_addr());
 
     // 5. Execution loop: handle Bionic, JNI, GLES & Audio SVC calls until returning to SENTINEL_RETURN_ADDR
+    engine.sync_signal_state(&bionic.signal_state);
+
     #[cfg(test)]
     let mut steps: u64 = 0;
 
@@ -93,6 +95,7 @@ pub fn invoke_guest_extended<M: Memory>(
             if let transd_decoder::Op::Svc { imm } = inst.op {
                 // Try Bionic SVC
                 if bionic.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+                    engine.sync_signal_state(&bionic.signal_state);
                     if engine.cpu.pc() == pc {
                         let next_pc = pc.add(4);
                         engine.cpu.set_pc(next_pc);
@@ -159,6 +162,10 @@ pub fn invoke_guest_extended<M: Memory>(
                 return Err(EngineError::Trap("Guest execution limit exceeded in test".into()));
             }
         }
+    }
+
+    if let Some(s) = engine.signal_state() {
+        bionic.signal_state = s.clone();
     }
 
     Ok(engine.cpu.reg(Reg::R0))

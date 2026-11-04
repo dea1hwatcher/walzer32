@@ -97,6 +97,7 @@ impl TransdSession {
         let mut engine = DbtEngine::new(mem);
         engine.cpu.set_sp(stack_top.as_u32() - 0x1000);
         engine.set_mmap_base(mmap_base);
+        engine.sync_signal_state(&bionic.signal_state);
 
         Ok(Self {
             engine,
@@ -124,9 +125,10 @@ impl TransdSession {
 
     /// Registers a custom in-memory file in the guest VFS
     pub fn register_vfs_file(&mut self, path: &str, content: Vec<u8>) {
-        self.bionic.vfs.register_file(path, content.clone());
+        let arc = std::sync::Arc::new(content);
+        self.bionic.vfs.register_file_arc(path, std::sync::Arc::clone(&arc));
         if let Some(vfs) = self.engine.vfs_mut() {
-            vfs.register_file(path, content);
+            vfs.register_file_arc(path, arc);
         }
     }
 
@@ -241,17 +243,19 @@ impl TransdSession {
 
     /// Mounts an Android main OBB expansion pack into the guest VFS
     pub fn mount_obb(&mut self, package_name: &str, version: u32, obb_bytes: Vec<u8>) {
-        self.bionic.vfs.mount_obb(package_name, version, obb_bytes.clone());
+        let arc = std::sync::Arc::new(obb_bytes);
+        self.bionic.vfs.mount_obb_arc(package_name, version, std::sync::Arc::clone(&arc));
         if let Some(vfs) = self.engine.vfs_mut() {
-            vfs.mount_obb(package_name, version, obb_bytes);
+            vfs.mount_obb_arc(package_name, version, arc);
         }
     }
 
     /// Mounts an Android patch OBB expansion pack into the guest VFS
     pub fn mount_patch_obb(&mut self, package_name: &str, version: u32, obb_bytes: Vec<u8>) {
-        self.bionic.vfs.mount_patch_obb(package_name, version, obb_bytes.clone());
+        let arc = std::sync::Arc::new(obb_bytes);
+        self.bionic.vfs.mount_patch_obb_arc(package_name, version, std::sync::Arc::clone(&arc));
         if let Some(vfs) = self.engine.vfs_mut() {
-            vfs.mount_patch_obb(package_name, version, obb_bytes);
+            vfs.mount_patch_obb_arc(package_name, version, arc);
         }
     }
 
@@ -456,10 +460,8 @@ impl TransdSession {
     /// Sets or overrides an Android system property and synchronizes /system/build.prop
     pub fn set_system_property(&mut self, name: &str, value: &str) {
         self.bionic.properties.set(name, value);
-        if let Some(vfs) = self.engine.syscall_handler.vfs_mut() {
-            let build_prop = self.bionic.properties.to_build_prop();
-            vfs.register_file("/system/build.prop", build_prop.into_bytes());
-        }
+        let build_prop = self.bionic.properties.to_build_prop();
+        self.register_vfs_file("/system/build.prop", build_prop.into_bytes());
     }
 
     /// Automatically detects if running inside a repackaged Android APK and loads bundled guest libraries

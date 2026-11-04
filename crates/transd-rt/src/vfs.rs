@@ -207,7 +207,53 @@ ro.product.manufacturer=Transd
 
     /// Registers or overwrites a synthetic virtual file in the VFS
     pub fn register_file(&mut self, path: &str, content: Vec<u8>) {
-        self.virtual_files.insert(path.to_string(), Arc::new(content));
+        self.register_file_arc(path, Arc::new(content));
+    }
+
+    /// Registers or overwrites a synthetic virtual file using a shared Arc buffer
+    pub fn register_file_arc(&mut self, path: &str, content: Arc<Vec<u8>>) {
+        self.virtual_files.insert(path.to_string(), content);
+    }
+
+    /// Mounts an Android OBB expansion file using a shared Arc buffer to eliminate duplication
+    pub fn mount_obb_arc(&mut self, package_name: &str, version: u32, content: Arc<Vec<u8>>) {
+        let path1 = format!("/sdcard/Android/obb/{package_name}/main.{version}.{package_name}.obb");
+        let path2 = format!("/storage/emulated/0/Android/obb/{package_name}/main.{version}.{package_name}.obb");
+        let path3 = format!("/data/media/0/Android/obb/{package_name}/main.{version}.{package_name}.obb");
+        self.virtual_files.insert(path1, Arc::clone(&content));
+        self.virtual_files.insert(path2, Arc::clone(&content));
+        self.virtual_files.insert(path3, content);
+    }
+
+    /// Mounts an Android patch OBB expansion file using a shared Arc buffer
+    pub fn mount_patch_obb_arc(&mut self, package_name: &str, version: u32, content: Arc<Vec<u8>>) {
+        let path1 = format!("/sdcard/Android/obb/{package_name}/patch.{version}.{package_name}.obb");
+        let path2 = format!("/storage/emulated/0/Android/obb/{package_name}/patch.{version}.{package_name}.obb");
+        let path3 = format!("/data/media/0/Android/obb/{package_name}/patch.{version}.{package_name}.obb");
+        self.virtual_files.insert(path1, Arc::clone(&content));
+        self.virtual_files.insert(path2, Arc::clone(&content));
+        self.virtual_files.insert(path3, content);
+    }
+
+    /// Resolves an openat relative or absolute path against dirfd
+    pub fn resolve_at_path(&self, dirfd: i32, path: &str) -> String {
+        if path.starts_with('/') {
+            return path.to_string();
+        }
+        if dirfd == -100 {
+            // AT_FDCWD
+            format!("/{}", path.trim_start_matches('/'))
+        } else if let Some(base) = self.fd_path(dirfd as u32) {
+            format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'))
+        } else {
+            path.to_string()
+        }
+    }
+
+    /// Opens a file relative to a directory file descriptor (POSIX openat)
+    pub fn openat(&mut self, dirfd: i32, path: &str, flags: u32) -> Result<u32, i32> {
+        let resolved = self.resolve_at_path(dirfd, path);
+        self.open(&resolved, flags)
     }
 
     /// Mounts an Android OBB expansion file at the standard system paths:
@@ -288,6 +334,7 @@ ro.product.manufacturer=Transd
             return Ok(fd);
         }
 
+        let is_dir = self.list_dir(&resolved).is_some();
         if let Some(content) = self.virtual_files.get(&resolved).cloned() {
             let fd = self.next_fd;
             self.next_fd += 1;
@@ -296,6 +343,19 @@ ro.product.manufacturer=Transd
                 OpenFile {
                     path: resolved,
                     content,
+                    cursor: 0,
+                    flags,
+                },
+            );
+            Ok(fd)
+        } else if is_dir {
+            let fd = self.next_fd;
+            self.next_fd += 1;
+            self.open_fds.insert(
+                fd,
+                OpenFile {
+                    path: resolved,
+                    content: Arc::new(Vec::new()),
                     cursor: 0,
                     flags,
                 },

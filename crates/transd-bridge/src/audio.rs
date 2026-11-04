@@ -258,6 +258,9 @@ impl AudioBridge {
         // Push into lock-free SPSC ring buffer for host hardware playback
         self.ring_buffer.push_slice(&resampled);
 
+        if self.buffer_queue.len() >= 64 {
+            self.buffer_queue.pop_front();
+        }
         self.buffer_queue.push_back(AudioBuffer {
             guest_addr: buffer_addr,
             size_bytes,

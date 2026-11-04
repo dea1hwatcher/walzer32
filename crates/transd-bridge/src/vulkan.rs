@@ -273,6 +273,15 @@ impl VulkanBridge {
         self.handle_map_32_to_64.get(&handle32).copied()
     }
 
+    /// Unregisters and destroys a 32-bit guest handle, preventing translation map leaks
+    pub fn unregister_guest_handle(&mut self, handle32: u32) {
+        if let Some(host_handle) = self.handle_map_32_to_64.remove(&handle32) {
+            self.handle_map_64_to_32.remove(&host_handle);
+        }
+        self.active_surfaces.remove(&handle32);
+        self.active_swapchains.remove(&handle32);
+    }
+
     /// Intercepts vkCreateInstance from guest 32-bit ARM code
     pub fn vk_create_instance(
         &mut self,

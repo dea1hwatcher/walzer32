@@ -380,6 +380,7 @@ pub struct GlesBridge {
 
     // Execution statistics & state
     pub draw_calls: Vec<DrawCallRecord>,
+    pub total_draw_calls: u64,
     pub clear_color: [f32; 4],
     pub viewport: [i32; 4],
     pub next_resource_id: u32,
@@ -412,7 +413,8 @@ impl GlesBridge {
             stub_base,
             symbol_table: HashMap::new(),
             string_heap,
-            draw_calls: Vec::new(),
+            draw_calls: Vec::with_capacity(64),
+            total_draw_calls: 0,
             clear_color: [0.0; 4],
             viewport: [0; 4],
             next_resource_id: 1,
@@ -1293,11 +1295,19 @@ impl GlesBridge {
                 let mode = cpu.reg(Reg::R0);
                 let first = cpu.reg(Reg::R1) as i32;
                 let count = cpu.reg(Reg::R2) as i32;
+                self.total_draw_calls += 1;
+                if self.draw_calls.len() >= 64 {
+                    self.draw_calls.remove(0);
+                }
                 self.draw_calls.push(DrawCallRecord { mode, first, count });
             }
             GlesFuncId::GlDrawElements => {
                 let mode = cpu.reg(Reg::R0);
                 let count = cpu.reg(Reg::R1) as i32;
+                self.total_draw_calls += 1;
+                if self.draw_calls.len() >= 64 {
+                    self.draw_calls.remove(0);
+                }
                 self.draw_calls.push(DrawCallRecord { mode, first: 0, count });
             }
 
