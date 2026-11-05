@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.transd.loader"
+    namespace = "com.walzer32.loader"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.transd.loader"
+        applicationId = "com.walzer32.loader"
         minSdk = 26
         targetSdk = 35
         versionCode = 1

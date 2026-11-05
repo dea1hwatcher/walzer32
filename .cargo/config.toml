@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Transd cross-compilation configuration
+# Walzer32 cross-compilation configuration
 # Target: aarch64-linux-android (API 35, ARMv9 — matches Cortex-X3/A715)
 # ─────────────────────────────────────────────────────────────────────────────
 

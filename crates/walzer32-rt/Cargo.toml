@@ -1,0 +1,21 @@
+[package]
+name = "walzer32-rt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+walzer32-core = { path = "../walzer32-core" }
+walzer32-decoder = { path = "../walzer32-decoder" }
+walzer32-ir = { path = "../walzer32-ir" }
+walzer32-emitter-a64 = { path = "../walzer32-emitter-a64" }
+walzer32-interp = { path = "../walzer32-interp" }
+walzer32-elf = { path = "../walzer32-elf" }
+byteorder.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Memory"] }

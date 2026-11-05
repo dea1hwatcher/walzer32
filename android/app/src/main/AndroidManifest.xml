@@ -1,15 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.transd.loader">
+    package="com.walzer32.loader">
 
     <application
-        android:name=".TransdApplication"
+        android:name=".Walzer32Application"
         android:allowBackup="true"
-        android:label="Transd Loader"
+        android:label="Walzer32 Loader"
         android:supportsRtl="true">
 
         <activity
-            android:name=".TransdActivity"
+            android:name=".Walzer32Activity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

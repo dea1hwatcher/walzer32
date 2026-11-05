@@ -1,23 +1,23 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/transd-core",
-    "crates/transd-decoder",
-    "crates/transd-ir",
-    "crates/transd-emitter-a64",
-    "crates/transd-interp",
-    "crates/transd-rt",
-    "crates/transd-elf",
-    "crates/transd-bridge",
-    "crates/transd-apk",
-    "crates/transd-cli",
-    "crates/transd-android",
+    "crates/walzer32-core",
+    "crates/walzer32-decoder",
+    "crates/walzer32-ir",
+    "crates/walzer32-emitter-a64",
+    "crates/walzer32-interp",
+    "crates/walzer32-rt",
+    "crates/walzer32-elf",
+    "crates/walzer32-bridge",
+    "crates/walzer32-apk",
+    "crates/walzer32-cli",
+    "crates/walzer32-android",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-authors = ["Transd Contributors"]
+authors = ["Walzer32 Contributors"]
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]

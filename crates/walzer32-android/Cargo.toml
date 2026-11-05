@@ -1,0 +1,23 @@
+[package]
+name = "walzer32-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+walzer32-core = { path = "../walzer32-core" }
+walzer32-decoder = { path = "../walzer32-decoder" }
+walzer32-ir = { path = "../walzer32-ir" }
+walzer32-emitter-a64 = { path = "../walzer32-emitter-a64" }
+walzer32-interp = { path = "../walzer32-interp" }
+walzer32-elf = { path = "../walzer32-elf" }
+walzer32-bridge = { path = "../walzer32-bridge" }
+walzer32-rt = { path = "../walzer32-rt" }
+walzer32-apk = { path = "../walzer32-apk" }
+thiserror.workspace = true
+
+[dev-dependencies]
+byteorder.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "walzer32-emitter-a64"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+walzer32-core = { path = "../walzer32-core" }
+walzer32-decoder = { path = "../walzer32-decoder" }
+walzer32-ir = { path = "../walzer32-ir" }
+byteorder.workspace = true
+thiserror.workspace = true

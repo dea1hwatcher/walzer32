@@ -1,0 +1,26 @@
+[package]
+name = "walzer32-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "walzer32_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "walzer32-cli"
+path = "src/main.rs"
+
+[dependencies]
+walzer32-core = { path = "../walzer32-core" }
+walzer32-decoder = { path = "../walzer32-decoder" }
+walzer32-ir = { path = "../walzer32-ir" }
+walzer32-emitter-a64 = { path = "../walzer32-emitter-a64" }
+walzer32-interp = { path = "../walzer32-interp" }
+walzer32-rt = { path = "../walzer32-rt" }
+walzer32-elf = { path = "../walzer32-elf" }
+walzer32-bridge = { path = "../walzer32-bridge" }
+walzer32-apk = { path = "../walzer32-apk" }
+byteorder.workspace = true
+thiserror.workspace = true

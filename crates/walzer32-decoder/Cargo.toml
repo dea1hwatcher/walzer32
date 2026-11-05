@@ -1,0 +1,11 @@
+[package]
+name = "walzer32-decoder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+walzer32-core = { path = "../walzer32-core" }
+bitflags.workspace = true
+thiserror.workspace = true
+byteorder.workspace = true

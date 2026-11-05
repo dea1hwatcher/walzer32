@@ -1,0 +1,12 @@
+[package]
+name = "walzer32-apk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+walzer32-core = { path = "../walzer32-core" }
+walzer32-elf = { path = "../walzer32-elf" }
+byteorder.workspace = true
+thiserror.workspace = true
+miniz_oxide = "0.9.1"
