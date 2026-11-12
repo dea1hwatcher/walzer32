@@ -173,8 +173,6 @@ impl JitPage {
     ///
     /// # Safety
     /// `byte_offset` must be within the committed code boundary.
-    /// # Safety
-    /// `byte_offset` must be within the committed code boundary.
     pub unsafe fn fn_ptr<F: Copy>(&self, byte_offset: usize) -> F {
         assert!(byte_offset < self.write_cursor);
         let raw = unsafe { self.rx_ptr.add(byte_offset) } as usize;
@@ -183,6 +181,11 @@ impl JitPage {
 
     pub fn is_committed(&self) -> bool {
         self.committed
+    }
+
+    /// True when new JIT blocks can be safely appended while existing blocks in this page remain executable.
+    pub fn supports_live_append(&self) -> bool {
+        self.is_dual_mapped
     }
 
     pub fn len(&self) -> usize {
@@ -370,6 +373,11 @@ impl JitPage {
 
     pub fn is_committed(&self) -> bool {
         self.committed
+    }
+
+    /// True when new JIT blocks can be safely appended while existing blocks in this page remain executable.
+    pub fn supports_live_append(&self) -> bool {
+        true
     }
 
     pub fn len(&self) -> usize {

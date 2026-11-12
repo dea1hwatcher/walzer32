@@ -930,14 +930,19 @@ impl<M: Memory> DbtEngine<M> {
 
                         // Auto-chain Phase 2:
                         // 1. Any existing blocks waiting to jump to this newly compiled block
+                        let mut prev_chained = false;
                         if let Some(callers) = self.cache.incoming_edges.get(&pc).cloned() {
                             for src in callers {
-                                self.chain_blocks(src, pc);
+                                if self.chain_blocks(src, pc) && self.last_direct_exit == Some((src, pc)) {
+                                    prev_chained = true;
+                                }
                             }
                         }
                         if let Some((src, dst)) = self.last_direct_exit.take() {
                             if dst == pc {
-                                self.chain_blocks(src, dst);
+                                if !prev_chained {
+                                    self.chain_blocks(src, dst);
+                                }
                             } else {
                                 self.last_direct_exit = Some((src, dst));
                             }
@@ -1312,8 +1317,9 @@ mod tests {
         let exit_code = engine.run(100).unwrap();
         assert_eq!(exit_code, 42);
 
-        // Verify that code was committed to JIT pool
+        // Verify that code was committed to JIT pool and packed into one backing page
         assert!(engine.pool.total_bytes > 0);
+        assert_eq!(engine.pool.page_count(), 1);
         assert!(engine.cache.lookup_ptr(GuestAddr::new(0x1000)).is_some());
         assert!(engine.cache.lookup_ptr(GuestAddr::new(0x1014)).is_some());
 
