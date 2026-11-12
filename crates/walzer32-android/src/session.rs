@@ -546,6 +546,19 @@ impl Walzer32Session {
         self.bionic.surface_width = width;
         self.bionic.surface_height = height;
         self.surface.on_surface_created(window_ptr, width, height);
+
+        if self.surface.draw_frame_fn.is_none() {
+            if let Some(draw_fn) = self.find_loaded_symbol("walzer32_guest_draw_frame") {
+                self.surface.register_draw_frame_fn(draw_fn);
+            }
+        }
+        if let Some(init_fn) = self.find_loaded_symbol("walzer32_guest_surface_created") {
+            let guest_win = 0x3100_0001u32;
+            match self.call_native(init_fn, &[guest_win, width, height]) {
+                Ok(ret) => log_i!("Walzer32: walzer32_guest_surface_created({}, {}, {}) -> {}", guest_win, width, height, ret as i32),
+                Err(e) => log_e!("Walzer32: walzer32_guest_surface_created failed: {:?}", e),
+            }
+        }
     }
 
     /// Handles SurfaceChanged viewport dimension update
@@ -553,10 +566,20 @@ impl Walzer32Session {
         self.bionic.surface_width = width;
         self.bionic.surface_height = height;
         self.surface.on_surface_changed(width, height);
+        if let Some(changed_fn) = self.find_loaded_symbol("walzer32_guest_surface_changed") {
+            if let Err(e) = self.call_native(changed_fn, &[width, height]) {
+                log_e!("Walzer32: walzer32_guest_surface_changed failed: {:?}", e);
+            }
+        }
     }
 
     /// Handles SurfaceDestroyed event
     pub fn on_surface_destroyed(&mut self) {
+        if let Some(destroyed_fn) = self.find_loaded_symbol("walzer32_guest_surface_destroyed") {
+            if let Err(e) = self.call_native(destroyed_fn, &[]) {
+                log_e!("Walzer32: walzer32_guest_surface_destroyed failed: {:?}", e);
+            }
+        }
         self.release_host_window();
         self.surface.on_surface_destroyed();
     }

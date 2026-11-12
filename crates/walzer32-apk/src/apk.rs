@@ -75,6 +75,31 @@ impl<'a> ApkPackage<'a> {
                 }
             }
         }
+        // Fallback: bundled 32-bit guest libraries under assets/walzer32/<abi>/<name>.so
+        // (avoids PackageManager ABI rejection when packaging arm64-v8a-only host APKs).
+        for (path, entry) in &archive.entries {
+            if let Some(rest) = path.strip_prefix("assets/walzer32/") {
+                if path.ends_with(".so") {
+                    let parts: Vec<&str> = rest.split('/').collect();
+                    if parts.len() >= 2 && (parts[0] == "armeabi-v7a" || parts[0] == "armeabi") {
+                        let abi = parts[0].to_string();
+                        let filename = parts[1].to_string();
+                        let already_present = native_libs
+                            .iter()
+                            .any(|l| l.abi == abi && l.filename == filename);
+                        if !already_present {
+                            native_libs.push(ApkNativeLib {
+                                abi,
+                                path: path.clone(),
+                                filename,
+                                compressed_size: entry.compressed_size,
+                                uncompressed_size: entry.uncompressed_size,
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(Self {
             archive,

@@ -134,10 +134,15 @@ impl HostBridge {
     #[cfg(target_os = "android")]
     fn dlsym_raw(&self, symbol: &str) -> Option<RawFnPtr> {
         let cname = CString::new(symbol).ok()?;
-        // RTLD_DEFAULT searches all already-opened libraries in load order.
-        let ptr = unsafe {
-            libc::dlsym(libc::RTLD_DEFAULT, cname.as_ptr())
-        };
+        // Search explicitly dlopen'd library handles first (later opens take precedence);
+        // on Android Bionic, RTLD_DEFAULT skips handles opened in separate namespace groups.
+        for handle in self._handles.iter().rev() {
+            let ptr = unsafe { libc::dlsym(handle.0, cname.as_ptr()) };
+            if !ptr.is_null() {
+                return Some(ptr);
+            }
+        }
+        let ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, cname.as_ptr()) };
         if ptr.is_null() { None } else { Some(ptr) }
     }
 

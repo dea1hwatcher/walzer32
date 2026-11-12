@@ -16,7 +16,8 @@ ar = "D:/Android/Sdk/ndk/21.4.7075529/toolchains/llvm/prebuilt/windows-x86_64/bi
 rustflags = [
     # Enable AArch64 crypto extensions (SHA2, AES) available on Cortex-X3
     "-C", "target-cpu=cortex-a55",
-    # Strip debug info for release deployable binary
+    # Align PT_LOAD segments to 16 KB for Android 15/16 compatibility
+    "-C", "link-arg=-Wl,-z,max-page-size=16384",
 ]
 
 # ── Android ARM64 (API 21 minimum for older device support) ───────────────────

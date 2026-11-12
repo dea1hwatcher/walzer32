@@ -7,7 +7,7 @@ use walzer32_decoder::{
     NeonCvtOp, NeonOp, NeonPermuteOp, NeonRevOp, NeonSize, NeonWriteback, Op, Operand2, PkhOp, ShiftAmount,
     ShiftType, VfpCvtOp, VfpOp, VfpReg, VfpSize,
 };
-use walzer32_ir::{BlockExit, IrBlock, Superblock};
+use walzer32_ir::{BlockExit, IrBlock, SideExit, Superblock};
 use crate::assembler::A64Assembler;
 use crate::reg::A64Reg;
 
@@ -128,24 +128,14 @@ impl A64Compiler {
         // 1. Emit 8-instruction entry prologue (saves host callee-saved X19-X26, loads pinned R0-R7)
         Self::emit_prologue(&mut asm);
 
-        // 2. Pre-scan for dead flag elimination
-        let flags_needed = matches!(block.exit, BlockExit::BranchCond { cond, .. } | BlockExit::IndirectCond { cond, .. } if !cond.is_always())
-            || block.insts.iter().any(|i| !i.cond.is_always());
-        let last_flag_idx = if flags_needed {
-            block.insts.iter().rposition(|inst| match &inst.op {
-                Op::Alu { op, set_flags, .. } => *set_flags || op.is_test(),
-                Op::Mul { set_flags, .. } => *set_flags,
-                _ => false,
-            })
-        } else {
-            None
-        };
+        // 2. Pre-scan for exact backward NZCV flag liveness (safe dead flag elimination)
+        let live_flags = Self::compute_flag_liveness(&block.insts, &block.exit, &[]);
 
         // 3. Compile instructions with zero-spill register pinning and flag elimination
         for (idx, inst) in block.insts.iter().enumerate() {
             let pc_val = block.pc_read_val(idx);
             let pc_mem_val = block.pc_mem_read_val(idx);
-            Self::compile_guarded_inst(&mut asm, inst, idx, flags_needed, last_flag_idx, pc_val, pc_mem_val);
+            Self::compile_guarded_inst(&mut asm, inst, live_flags[idx], pc_val, pc_mem_val);
         }
 
         // 4. Compile block exit (handles fallbacks, chaining sites, and epilogue restore)
@@ -170,19 +160,8 @@ impl A64Compiler {
         // 1. Emit entry prologue
         Self::emit_prologue(&mut asm);
 
-        // 2. Pre-scan for dead flag elimination across the superblock
-        let flags_needed = matches!(sb.exit, BlockExit::BranchCond { cond, .. } | BlockExit::IndirectCond { cond, .. } if !cond.is_always())
-            || !sb.side_exits.is_empty()
-            || sb.insts.iter().any(|i| !i.cond.is_always());
-        let last_flag_idx = if flags_needed {
-            sb.insts.iter().rposition(|inst| match &inst.op {
-                Op::Alu { op, set_flags, .. } => *set_flags || op.is_test(),
-                Op::Mul { set_flags, .. } => *set_flags,
-                _ => false,
-            })
-        } else {
-            None
-        };
+        // 2. Pre-scan for exact backward NZCV flag liveness across the superblock
+        let live_flags = Self::compute_flag_liveness(&sb.insts, &sb.exit, &sb.side_exits);
 
         // 3. Loop header label
         let loop_start_cursor = asm.cursor();
@@ -210,7 +189,7 @@ impl A64Compiler {
 
             let pc_val = sb.pc_read_val(idx);
             let pc_mem_val = sb.pc_mem_read_val(idx);
-            Self::compile_guarded_inst(&mut asm, inst, idx, flags_needed, last_flag_idx, pc_val, pc_mem_val);
+            Self::compile_guarded_inst(&mut asm, inst, live_flags[idx], pc_val, pc_mem_val);
         }
 
         while se_idx < sb.side_exits.len() {
@@ -332,12 +311,83 @@ impl A64Compiler {
         }
     }
 
+    /// Backward liveness pass for NZCV flags across `insts`.
+    /// Returns `live[i] == true` whenever flags set by `insts[i]` can be observed by a
+    /// subsequent conditional instruction, superblock side-exit, or conditional block exit.
+    fn compute_flag_liveness(
+        insts: &[ArmInst],
+        exit: &BlockExit,
+        side_exits: &[SideExit],
+    ) -> Vec<bool> {
+        let mut live = vec![false; insts.len()];
+        let mut flags_live = matches!(
+            exit,
+            BlockExit::BranchCond { cond, .. } | BlockExit::IndirectCond { cond, .. } if !cond.is_always()
+        );
+        if side_exits
+            .iter()
+            .any(|se| se.inst_index >= insts.len() && !se.cond.is_always())
+        {
+            flags_live = true;
+        }
+
+        for idx in (0..insts.len()).rev() {
+            live[idx] = flags_live;
+
+            let inst = &insts[idx];
+            let reads_flags = !inst.cond.is_always()
+                || matches!(
+                    &inst.op,
+                    Op::Alu {
+                        op: AluOp::Adc | AluOp::Sbc | AluOp::Rsc,
+                        ..
+                    }
+                )
+                || matches!(
+                    &inst.op,
+                    Op::Alu {
+                        op2: Operand2::Reg { shift, .. },
+                        ..
+                    } if shift.shift_type == ShiftType::Rrx
+                );
+            let overwrites_all_nzcv_unconditionally = inst.cond.is_always()
+                && !reads_flags
+                && matches!(
+                    &inst.op,
+                    Op::Alu { op, set_flags, .. }
+                        if (*set_flags || op.is_test())
+                            && matches!(
+                                op,
+                                AluOp::Add
+                                    | AluOp::Sub
+                                    | AluOp::Rsb
+                                    | AluOp::Cmp
+                                    | AluOp::Cmn
+                                    | AluOp::Tst
+                            )
+                );
+
+            if reads_flags {
+                flags_live = true;
+            } else if overwrites_all_nzcv_unconditionally {
+                flags_live = false;
+            }
+
+            if side_exits
+                .iter()
+                .any(|se| se.inst_index == idx && !se.cond.is_always())
+            {
+                flags_live = true;
+            }
+        }
+
+        live
+    }
+
     fn compile_guarded_inst(
         asm: &mut A64Assembler,
         inst: &ArmInst,
-        idx: usize,
         flags_needed: bool,
-        last_flag_idx: Option<usize>,
         pc_val: u32,
         pc_mem_val: u32,
     ) {
@@ -353,7 +403,7 @@ impl A64Compiler {
             None
         };
 
-        Self::compile_inst(asm, inst, idx, flags_needed, last_flag_idx, pc_val, pc_mem_val);
+        Self::compile_inst(asm, inst, flags_needed, pc_val, pc_mem_val);
 
         if let Some((skip_idx, inv_cond)) = skip_site {
             let end_idx = asm.cursor();
@@ -372,9 +422,7 @@ impl A64Compiler {
     fn compile_inst(
         asm: &mut A64Assembler,
         inst: &ArmInst,
-        idx: usize,
         flags_needed: bool,
-        last_flag_idx: Option<usize>,
         pc_val: u32,
         pc_mem_val: u32,
     ) {
@@ -389,9 +437,7 @@ impl A64Compiler {
                 rn,
                 op2,
             } => {
-                let effective_set_flags = flags_needed
-                    && (*set_flags || op.is_test())
-                    && (last_flag_idx.is_none() || Some(idx) == last_flag_idx);
+                let effective_set_flags = flags_needed && (*set_flags || op.is_test());
                 if op.is_test() && !effective_set_flags {
                     // Dead test instruction eliminated!
                     return;
@@ -3099,5 +3145,115 @@ mod tests {
             }
         }
         assert!(found_b_ne, "Compiled guarded instruction must contain B.NE skip branch!");
+    }
+
+    #[test]
+    fn test_conditional_test_preserves_prior_cmp_flags() {
+        let mut block = IrBlock::new(GuestAddr::new(0x7100), false);
+        // CMP r2, #0 (must NOT be eliminated even though CMPNE r0, #60 appears later!)
+        block.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::Alu {
+                op: AluOp::Cmp,
+                set_flags: true,
+                rd: Reg::R0,
+                rn: Reg::R2,
+                op2: Operand2::Imm(0),
+            },
+            0,
+        ));
+        // CMPNE r0, #60
+        block.insts.push(ArmInst::new(
+            Cond::NE,
+            Op::Alu {
+                op: AluOp::Cmp,
+                set_flags: true,
+                rd: Reg::R0,
+                rn: Reg::R0,
+                op2: Operand2::Imm(60),
+            },
+            0,
+        ));
+        // STR r0, [r1] (flag-preserving store before branch)
+        block.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::LoadStore {
+                is_load: false,
+                size: MemSize::Word,
+                signed: false,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                addr_mode: AddrMode::Offset {
+                    offset: AddrOffset::Imm(0),
+                    add: true,
+                },
+            },
+            0,
+        ));
+        block.exit = BlockExit::BranchCond {
+            cond: Cond::NE,
+            target: GuestAddr::new(0x7000),
+            fallthrough: GuestAddr::new(0x7110),
+        };
+
+        let compiled = A64Compiler::compile(&block);
+        // Count A64 CMP W*, # imm instructions: SUBS WZR, Wn, #imm (0x7100_001F mask 0x7F80_001F)
+        let cmp_count = compiled
+            .code_bytes
+            .chunks_exact(4)
+            .filter(|c| {
+                let w = u32::from_le_bytes((*c).try_into().unwrap());
+                (w & 0x7F80_001F) == 0x7100_001F
+            })
+            .count();
+        assert_eq!(cmp_count, 2, "Both CMP r2, #0 and CMPNE r0, #60 must be emitted!");
+    }
+
+    #[test]
+    fn test_superblock_side_exit_preserves_prior_cmp_flags() {
+        let mut sb = Superblock::new(GuestAddr::new(0x7200), false);
+        sb.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::Alu {
+                op: AluOp::Cmp,
+                set_flags: true,
+                rd: Reg::R0,
+                rn: Reg::R0,
+                op2: Operand2::Imm(0),
+            },
+            0,
+        ));
+        sb.side_exits.push(SideExit {
+            inst_index: 1,
+            cond: Cond::EQ,
+            target: GuestAddr::new(0x7300),
+        });
+        sb.insts.push(ArmInst::new(
+            Cond::AL,
+            Op::Alu {
+                op: AluOp::Cmp,
+                set_flags: true,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                op2: Operand2::Imm(1),
+            },
+            0,
+        ));
+        sb.exit = BlockExit::BranchCond {
+            cond: Cond::NE,
+            target: GuestAddr::new(0x7400),
+            fallthrough: GuestAddr::new(0x7210),
+        };
+
+        let compiled = A64Compiler::compile_superblock(&sb);
+        let cmp_count = compiled
+            .code_bytes
+            .chunks_exact(4)
+            .filter(|c| {
+                let w = u32::from_le_bytes((*c).try_into().unwrap());
+                (w & 0x7F80_001F) == 0x7100_001F
+            })
+            .count();
+        assert_eq!(cmp_count, 2, "CMP before superblock side-exit must be preserved!");
     }
 }

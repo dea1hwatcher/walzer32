@@ -197,6 +197,64 @@ impl JitPage {
         self.capacity
     }
 
+    /// Patches `len` machine code bytes starting at `rx_code_ptr + byte_offset`.
+    /// Temporarily restores `PROT_WRITE` on single-mapped `R+X` pages before patching,
+    /// then restores `PROT_READ | PROT_EXEC` and flushes the instruction cache.
+    ///
+    /// # Safety
+    /// Caller must ensure `rx_code_ptr` is within this page and no other thread executes
+    /// the patched page concurrently when single-mapped W^X toggling is required.
+    pub unsafe fn patch_bytes(
+        &self,
+        rx_code_ptr: *const u8,
+        byte_offset: usize,
+        len: usize,
+        patch_fn: impl FnOnce(&mut [u8]),
+    ) -> bool {
+        if !self.contains_rx_ptr(rx_code_ptr) {
+            return false;
+        }
+        let offset = (rx_code_ptr as usize - self.rx_ptr as usize) + byte_offset;
+        if offset.saturating_add(len) > self.capacity {
+            return false;
+        }
+        let rx_target = unsafe { self.rx_ptr.add(offset) };
+
+        if self.committed && !self.is_dual_mapped {
+            let target_addr = rx_target as usize;
+            let page_start = target_addr & !(PAGE_SIZE - 1);
+            let page_end = align_up(target_addr + len, PAGE_SIZE);
+            let page_len = page_end - page_start;
+            let rw_ok = unsafe {
+                libc::mprotect(
+                    page_start as *mut libc::c_void,
+                    page_len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                )
+            };
+            if rw_ok != 0 {
+                return false;
+            }
+            unsafe {
+                let slice = std::slice::from_raw_parts_mut(rx_target as *mut u8, len);
+                patch_fn(slice);
+                libc::mprotect(
+                    page_start as *mut libc::c_void,
+                    page_len,
+                    libc::PROT_READ | libc::PROT_EXEC,
+                );
+            }
+        } else {
+            let write_dest = unsafe { self.write_ptr.add(offset) };
+            unsafe {
+                let slice = std::slice::from_raw_parts_mut(write_dest, len);
+                patch_fn(slice);
+            }
+        }
+        flush_icache(rx_target as *mut u8, len);
+        true
+    }
+
     /// Return raw pointer to the executable byte at `offset` within this page.
     /// # Safety
     /// `offset` must be within the committed code boundary.
@@ -324,6 +382,30 @@ impl JitPage {
 
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// # Safety
+    /// Caller must ensure `rx_code_ptr + byte_offset .. + len` lies within this page.
+    pub unsafe fn patch_bytes(
+        &self,
+        rx_code_ptr: *const u8,
+        byte_offset: usize,
+        len: usize,
+        patch_fn: impl FnOnce(&mut [u8]),
+    ) -> bool {
+        if !self.contains_rx_ptr(rx_code_ptr) {
+            return false;
+        }
+        let offset = (rx_code_ptr as usize - self.rx_ptr as usize) + byte_offset;
+        if offset.saturating_add(len) > self.capacity {
+            return false;
+        }
+        let write_dest = unsafe { self.write_ptr.add(offset) };
+        unsafe {
+            let slice = std::slice::from_raw_parts_mut(write_dest, len);
+            patch_fn(slice);
+        }
+        true
     }
 
     /// # Safety

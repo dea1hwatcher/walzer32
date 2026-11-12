@@ -10,6 +10,7 @@
 /// used; the actual `flush_icache` is a no-op there.
 
 use crate::jit_memory::{JitPage, PAGE_SIZE};
+#[cfg(unix)]
 use crate::jit_memory::flush_icache;
 
 /// Address of a compiled block in the host process address space.
@@ -139,7 +140,7 @@ impl JitPool {
         Ok(())
     }
 
-    /// Patches machine code at the given executable host address using dual mapping write aliasing
+    /// Patches machine code at the given executable host address using dual mapping or W^X toggling
     /// # Safety
     /// host_rx_ptr must point to an executable JIT block allocated by this pool.
     pub unsafe fn patch_code(
@@ -148,26 +149,9 @@ impl JitPool {
         byte_offset: usize,
         patch_fn: impl FnOnce(&mut [u8]),
     ) -> bool {
-        if let Some(page) = self.current.as_mut() {
+        for page in self.current.iter().chain(self.committed_pages.iter()) {
             if page.contains_rx_ptr(host_rx_ptr) {
-                let write_dest = page.write_ptr_for(host_rx_ptr, byte_offset);
-                unsafe {
-                    let slice = std::slice::from_raw_parts_mut(write_dest, 4);
-                    patch_fn(slice);
-                    flush_icache(host_rx_ptr.add(byte_offset) as *mut u8, 4);
-                }
-                return true;
-            }
-        }
-        for page in &mut self.committed_pages {
-            if page.contains_rx_ptr(host_rx_ptr) {
-                let write_dest = page.write_ptr_for(host_rx_ptr, byte_offset);
-                unsafe {
-                    let slice = std::slice::from_raw_parts_mut(write_dest, 4);
-                    patch_fn(slice);
-                    flush_icache(host_rx_ptr.add(byte_offset) as *mut u8, 4);
-                }
-                return true;
+                return unsafe { page.patch_bytes(host_rx_ptr, byte_offset, 4, patch_fn) };
             }
         }
         false

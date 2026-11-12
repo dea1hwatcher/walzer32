@@ -1143,6 +1143,23 @@ impl<M: Memory> DbtEngine<M> {
         }
     }
 
+    /// Computes the signed word offset from `src_code` to `dst_code` if it fits in the
+    /// AArch64 immediate encoding required by `target` (`+/-128 MB` for `B`, `+/-1 MB` for `B.cond`).
+    fn branch_offset_words_in_range(target: &PatchTarget, src_code: usize, dst_code: usize) -> Option<i32> {
+        let offset_bytes = (dst_code as i128) - (src_code as i128);
+        if offset_bytes % 4 != 0 {
+            return None;
+        }
+        let offset_words = i32::try_from(offset_bytes / 4).ok()?;
+        let in_range = match target {
+            PatchTarget::Direct(_) | PatchTarget::BranchFallthrough(_) => {
+                (-0x0200_0000..=0x01FF_FFFF).contains(&offset_words)
+            }
+            PatchTarget::BranchTaken { .. } => (-0x0004_0000..=0x0003_FFFF).contains(&offset_words),
+        };
+        in_range.then_some(offset_words)
+    }
+
     /// Links and chains direct branches between two compiled blocks in executable memory
     pub fn chain_blocks(&mut self, src_addr: GuestAddr, dst_addr: GuestAddr) -> bool {
         if let (Some(src_ptr), Some(dst_ptr)) = (self.cache.lookup_ptr(src_addr), self.cache.lookup_ptr(dst_addr)) {
@@ -1157,12 +1174,9 @@ impl<M: Memory> DbtEngine<M> {
                     if target == dst_addr {
                         let src_code = src_ptr.0 as usize + site.byte_offset;
                         let dst_code = dst_ptr.0 as usize + walzer32_emitter_a64::PROLOGUE_BYTE_SIZE;
-                        let offset_bytes = (dst_code as isize) - (src_code as isize);
-                        if offset_bytes % 4 == 0 {
-                            let offset_words = (offset_bytes / 4) as i32;
-                            if (-0x0200_0000..=0x01FF_FFFF).contains(&offset_words) {
-                                let success = unsafe {
-                                    self.pool.patch_code(src_ptr.0, site.byte_offset, |slice| {
+                        if let Some(offset_words) = Self::branch_offset_words_in_range(&site.target, src_code, dst_code) {
+                            let success = unsafe {
+                                self.pool.patch_code(src_ptr.0, site.byte_offset, |slice| {
                                     match site.target {
                                         PatchTarget::Direct(_) | PatchTarget::BranchFallthrough(_) => {
                                             A64Compiler::patch_direct_branch(slice, 0, offset_words);
@@ -1171,11 +1185,11 @@ impl<M: Memory> DbtEngine<M> {
                                             A64Compiler::patch_cond_branch(slice, 0, cond, offset_words);
                                         }
                                     }
-                                }) };
-                                if success {
-                                    self.telemetry.record_chained_jump();
-                                    patched = true;
-                                }
+                                })
+                            };
+                            if success {
+                                self.telemetry.record_chained_jump();
+                                patched = true;
                             }
                         }
                     }
@@ -1310,5 +1324,71 @@ mod tests {
         // Test idempotency of dynamic block chaining
         let chained = engine.chain_blocks(GuestAddr::new(0x1000), GuestAddr::new(0x1014));
         assert!(chained);
+    }
+
+    #[test]
+    fn test_branch_offset_words_in_range_enforces_cond_1mb_limit_and_no_wrap() {
+        use walzer32_core::{Cond, FlatMemory};
+        let dst_guest = GuestAddr::new(0x147c);
+        let cond_target = PatchTarget::BranchTaken {
+            cond: Cond::NE,
+            target: dst_guest,
+        };
+        let direct_target = PatchTarget::Direct(dst_guest);
+        let fallthrough_target = PatchTarget::BranchFallthrough(dst_guest);
+
+        // Exact B.cond imm19 bounds (+/- 1 MB: -0x40000..=0x3FFFF words)
+        let base: usize = 0x1000_0000;
+        assert_eq!(
+            DbtEngine::<FlatMemory>::branch_offset_words_in_range(&cond_target, base, base + 0x0003_FFFF * 4),
+            Some(0x0003_FFFF)
+        );
+        assert_eq!(
+            DbtEngine::<FlatMemory>::branch_offset_words_in_range(&cond_target, base + 0x0004_0000 * 4, base),
+            Some(-0x0004_0000)
+        );
+        assert_eq!(
+            DbtEngine::<FlatMemory>::branch_offset_words_in_range(&cond_target, base, base + 0x0004_0000 * 4),
+            None
+        );
+        assert_eq!(
+            DbtEngine::<FlatMemory>::branch_offset_words_in_range(&cond_target, base + 0x0004_0001 * 4, base),
+            None
+        );
+
+        // Real-world failure case (~ -12.3 MB between JIT pages): allowed for B, rejected for B.cond
+        assert_eq!(
+            DbtEngine::<FlatMemory>::branch_offset_words_in_range(&cond_target, base + 0x00C0_0000, base),
+            None
+        );
+        assert_eq!(
+            DbtEngine::<FlatMemory>::branch_offset_words_in_range(&direct_target, base + 0x00C0_0000, base),
+            Some(-0x0030_0000)
+        );
+        assert_eq!(
+            DbtEngine::<FlatMemory>::branch_offset_words_in_range(&fallthrough_target, base + 0x00C0_0000, base),
+            Some(-0x0030_0000)
+        );
+
+        // Unaligned branch target rejected
+        assert_eq!(
+            DbtEngine::<FlatMemory>::branch_offset_words_in_range(&direct_target, base, base + 2),
+            None
+        );
+
+        // > 8 GB pointer separation must NOT wrap modulo 2^32 when narrowing to i32
+        #[cfg(target_pointer_width = "64")]
+        {
+            let high = 0x75_0000_0000usize;
+            let low = 0x71_0000_0000usize; // 16 GB diff -> (diff/4) as i32 would have been 0!
+            assert_eq!(
+                DbtEngine::<FlatMemory>::branch_offset_words_in_range(&direct_target, low, high),
+                None
+            );
+            assert_eq!(
+                DbtEngine::<FlatMemory>::branch_offset_words_in_range(&cond_target, low, high),
+                None
+            );
+        }
     }
 }

@@ -196,3 +196,29 @@ fn test_draw_frame_invokes_guest() {
         assert_eq!(count, 2);
     }
 }
+
+#[test]
+fn test_real_gles2_demo_so_surface_and_frames() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_session();
+
+    let so_bytes = include_bytes!(
+        "../../../android/app/src/main/assets/walzer32/armeabi-v7a/libgles2demo.so"
+    );
+
+    let mut guard = get_or_init_session().unwrap();
+    let session = guard.as_mut().unwrap();
+    session.load_library_bytes("libgles2demo.so", so_bytes).unwrap();
+    session.on_surface_created(0xCAFE_BABE, 1080, 2520);
+    session.on_surface_changed(1080, 2520);
+    session.on_draw_frame().unwrap();
+    session.on_draw_frame().unwrap();
+    session.on_draw_frame().unwrap();
+
+    for msg in &session.bionic.logs {
+        eprintln!("[LOG] {}: {}", msg.tag, msg.text);
+    }
+    assert_eq!(session.gles.total_draw_calls, 3);
+    assert_eq!(session.gles.swap_count, 3);
+    assert!(session.bionic.logs.iter().any(|l| l.text.contains("rendered frame milestone")));
+}
