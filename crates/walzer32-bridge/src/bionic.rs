@@ -4531,18 +4531,24 @@ impl BionicBridge {
             BionicFuncId::Raise => {
                 let sig = cpu.reg(Reg::R0);
                 let old_pc = cpu.pc();
-                cpu.set_pc(old_pc.add(4)); // Advance past SVC so sigreturn resumes at BX lr
+                let raise_svc = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (BionicFuncId::Raise as u32));
+                let resume_pc = if mem.read_u32(old_pc) == Ok(raise_svc) {
+                    old_pc.add(4)
+                } else {
+                    old_pc
+                };
+                cpu.set_pc(resume_pc);
                 let rt_sigreturn_stub = self.stub_base.add((BionicFuncId::RtSigreturn as u32) * 8);
                 match self.signal_state.deliver_signal(sig, None, cpu, mem, Some(rt_sigreturn_stub), None) {
                     Ok(true) => {
                         // Signal delivered: CPU state (PC, SP, LR, R0-R2) adjusted to run handler
                     }
                     Ok(false) => {
-                        cpu.set_pc(old_pc);
+                        cpu.set_pc(resume_pc);
                         cpu.set_reg(Reg::R0, 0);
                     }
                     Err(_) => {
-                        cpu.set_pc(old_pc);
+                        cpu.set_pc(resume_pc);
                         cpu.set_reg(Reg::R0, (-14i32) as u32);
                     }
                 }

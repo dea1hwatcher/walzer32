@@ -1,5 +1,5 @@
 use walzer32_core::{GuestAddr, Memory, Reg};
-use walzer32_rt::{DbtEngine, EngineError};
+use walzer32_rt::{DbtEngine, EngineError, EngineStepResult};
 #[cfg(unix)]
 use libc;
 use crate::asset::AssetBridge;
@@ -32,6 +32,46 @@ pub fn invoke_guest_full<M: Memory>(
     args: &[u32],
 ) -> Result<u32, EngineError> {
     invoke_guest_extended(engine, bionic, jni, gles, None, None, None, func_addr, args)
+}
+
+fn dispatch_bridge_svc<M: Memory>(
+    imm: u32,
+    engine: &mut DbtEngine<M>,
+    bionic: &mut BionicBridge,
+    jni: &mut JniBridge,
+    gles: &mut Option<&mut GlesBridge>,
+    audio: &mut Option<&mut AudioBridge>,
+    asset: &mut Option<&mut AssetBridge>,
+    hw_buffer: &mut Option<&mut HardwareBufferBridge>,
+) -> Result<(), EngineError> {
+    if bionic.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+        engine.sync_signal_state(&bionic.signal_state);
+        return Ok(());
+    }
+    if jni.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+        return Ok(());
+    }
+    if let Some(g) = gles.as_deref_mut() {
+        if g.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+            return Ok(());
+        }
+    }
+    if let Some(a) = audio.as_deref_mut() {
+        if a.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+            return Ok(());
+        }
+    }
+    if let Some(ast) = asset.as_deref_mut() {
+        if ast.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+            return Ok(());
+        }
+    }
+    if let Some(hb) = hw_buffer.as_deref_mut() {
+        if hb.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 /// Invokes a 32-bit guest function with optional GLES, Audio, Asset, and HardwareBuffer passthrough support
@@ -89,97 +129,52 @@ pub fn invoke_guest_extended<M: Memory>(
     let mut steps: u64 = 0;
 
     while (engine.cpu.pc().as_u32() & !1) != (SENTINEL_RETURN_ADDR & !1) {
-        let pc = engine.cpu.pc();
-        let thumb = engine.cpu.is_thumb();
-
-        // Check if current instruction is an SVC (Bionic, JNI, GLES, or Audio stub)
-        if let Ok((inst, _)) = walzer32_decoder::decode_next(&engine.mem, pc, thumb) {
-            if let walzer32_decoder::Op::Svc { imm } = inst.op {
-                // Try Bionic SVC
-                if bionic.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                    engine.sync_signal_state(&bionic.signal_state);
-                    if engine.cpu.pc() == pc {
-                        let next_pc = pc.add(4);
-                        engine.cpu.set_pc(next_pc);
-                    }
-                    continue;
-                }
-                // Try JNI SVC
-                if jni.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                    if engine.cpu.pc() == pc {
-                        let next_pc = pc.add(4);
-                        engine.cpu.set_pc(next_pc);
-                    }
-                    continue;
-                }
-                // Try GLES SVC
-                if let Some(ref mut g) = gles {
-                    if g.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                        if engine.cpu.pc() == pc {
-                            let next_pc = pc.add(4);
-                            engine.cpu.set_pc(next_pc);
-                        }
-                        continue;
-                    }
-                }
-                // Try Audio SVC
-                if let Some(ref mut a) = audio {
-                    if a.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                        if engine.cpu.pc() == pc {
-                            let next_pc = pc.add(4);
-                            engine.cpu.set_pc(next_pc);
-                        }
-                        continue;
-                    }
-                }
-                // Try Asset SVC
-                if let Some(ref mut ast) = asset {
-                    if ast.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                        if engine.cpu.pc() == pc {
-                            let next_pc = pc.add(4);
-                            engine.cpu.set_pc(next_pc);
-                        }
-                        continue;
-                    }
-                }
-                // Try HardwareBuffer SVC
-                if let Some(ref mut hb) = hw_buffer {
-                    if hb.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
-                        if engine.cpu.pc() == pc {
-                            let next_pc = pc.add(4);
-                            engine.cpu.set_pc(next_pc);
-                        }
-                        continue;
-                    }
-                }
-            }
-        }
-
         // Check for pending Fastmem faults from hardware signal handler
         #[cfg(unix)]
         if let Some((sig, fault_addr)) = walzer32_rt::take_fastmem_fault() {
             let sig_nr = match sig as libc::c_int {
                 libc::SIGSEGV => walzer32_rt::signals::signal_nr::SIGSEGV,
-                libc::SIGBUS  => walzer32_rt::signals::signal_nr::SIGBUS,
-                libc::SIGILL  => walzer32_rt::signals::signal_nr::SIGILL,
+                libc::SIGBUS => walzer32_rt::signals::signal_nr::SIGBUS,
+                libc::SIGILL => walzer32_rt::signals::signal_nr::SIGILL,
                 _ => walzer32_rt::signals::signal_nr::SIGSEGV,
             };
             // Try SMC first (write to code page)
             if engine.handle_write_fault(walzer32_core::GuestAddr::new(fault_addr as u32)) {
-                continue; // SMC handled, retry
+                continue;
             }
             // Try guest signal delivery
             match engine.handle_guest_fault(sig_nr, Some(fault_addr as u32)) {
                 Ok(true) => continue,
                 _ => {
-                    return Err(EngineError::Trap(
-                        format!("Unhandled guest signal {} at 0x{:08x}", sig_nr, fault_addr)
-                    ));
+                    return Err(EngineError::Trap(format!(
+                        "Unhandled guest signal {} at 0x{:08x}",
+                        sig_nr, fault_addr
+                    )));
                 }
             }
         }
 
-        engine.step()?;
+        match engine.step()? {
+            EngineStepResult::Syscall(_) => {
+                if let Some(imm) = engine.last_svc_imm() {
+                    dispatch_bridge_svc(
+                        imm,
+                        engine,
+                        bionic,
+                        jni,
+                        &mut gles,
+                        &mut audio,
+                        &mut asset,
+                        &mut hw_buffer,
+                    )?;
+                }
+            }
+            EngineStepResult::Halted { exit_code } => {
+                engine.cpu.set_reg(Reg::R0, exit_code as u32);
+                break;
+            }
+            EngineStepResult::Continue | EngineStepResult::Breakpoint { .. } => {}
+        }
 
         #[cfg(test)]
         {

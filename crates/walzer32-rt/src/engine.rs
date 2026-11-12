@@ -628,6 +628,7 @@ pub struct DbtEngine<M: Memory> {
     pub async_jit: Option<crate::async_jit::AsyncJit>,
     pub smc_guard_pages: bool,
     pub last_direct_exit: Option<(GuestAddr, GuestAddr)>,
+    pub last_svc_imm: Option<u32>,
 }
 
 impl<M: Memory> DbtEngine<M> {
@@ -643,7 +644,33 @@ impl<M: Memory> DbtEngine<M> {
             async_jit: None,
             smc_guard_pages: false,
             last_direct_exit: None,
+            last_svc_imm: None,
         }
+    }
+
+    fn handle_svc_exit(&mut self, imm: u32) -> Result<EngineStepResult, EngineError> {
+        self.last_svc_imm = Some(imm);
+        let args = SyscallArgs::from_cpu(&self.cpu);
+        if imm != 0 {
+            return Ok(EngineStepResult::Syscall(args));
+        }
+        if args.nr == nr::ARM_CACHE_FLUSH {
+            let start = GuestAddr::new(args.arg0);
+            let len = (args.arg1.saturating_sub(args.arg0)) as usize;
+            self.cache.invalidate_range(start, len);
+        }
+        if let Some(exit_code) = self
+            .syscall_handler
+            .handle_syscall(args, &mut self.cpu, &mut self.mem)?
+        {
+            Ok(EngineStepResult::Halted { exit_code })
+        } else {
+            Ok(EngineStepResult::Syscall(args))
+        }
+    }
+
+    pub fn last_svc_imm(&self) -> Option<u32> {
+        self.last_svc_imm
     }
 
     /// Delivers a guest signal or exception (SIGSEGV, SIGBUS, SIGILL, etc.)
@@ -881,6 +908,7 @@ impl<M: Memory> DbtEngine<M> {
     /// On AArch64 devices, dispatches natively to compiled machine code.
     /// On dev-host x86_64, uses the verified interpreter execution engine.
     pub fn step(&mut self) -> Result<EngineStepResult, EngineError> {
+        self.last_svc_imm = None;
         let pc = self.cpu.pc();
         let is_thumb = self.cpu.is_thumb();
 
@@ -1022,20 +1050,7 @@ impl<M: Memory> DbtEngine<M> {
                         self.last_direct_exit = None;
                         let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
                         self.total_insts_executed += inst_count;
-                        let args = SyscallArgs::from_cpu(&self.cpu);
-                        if args.nr == nr::ARM_CACHE_FLUSH {
-                            let start = GuestAddr::new(args.arg0);
-                            let len = (args.arg1.saturating_sub(args.arg0)) as usize;
-                            self.cache.invalidate_range(start, len);
-                        }
-                        if let Some(exit_code) = self
-                            .syscall_handler
-                            .handle_syscall(args, &mut self.cpu, &mut self.mem)?
-                        {
-                            return Ok(EngineStepResult::Halted { exit_code });
-                        } else {
-                            return Ok(EngineStepResult::Syscall(args));
-                        }
+                        return self.handle_svc_exit(exit_payload);
                     }
                     walzer32_emitter_a64::EXIT_REASON_BKPT => {
                         self.last_direct_exit = None;
@@ -1069,22 +1084,7 @@ impl<M: Memory> DbtEngine<M> {
         match step_res {
             StepResult::Continue | StepResult::Branch { .. } => Ok(EngineStepResult::Continue),
             StepResult::Bkpt { imm } => Ok(EngineStepResult::Breakpoint { imm }),
-            StepResult::Svc { .. } => {
-                let args = SyscallArgs::from_cpu(&self.cpu);
-                if args.nr == nr::ARM_CACHE_FLUSH {
-                    let start = GuestAddr::new(args.arg0);
-                    let len = (args.arg1.saturating_sub(args.arg0)) as usize;
-                    self.cache.invalidate_range(start, len);
-                }
-                if let Some(exit_code) = self
-                    .syscall_handler
-                    .handle_syscall(args, &mut self.cpu, &mut self.mem)?
-                {
-                    Ok(EngineStepResult::Halted { exit_code })
-                } else {
-                    Ok(EngineStepResult::Syscall(args))
-                }
-            }
+            StepResult::Svc { imm } => self.handle_svc_exit(imm),
         }
     }
 
