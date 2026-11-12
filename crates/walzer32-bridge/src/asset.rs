@@ -3,7 +3,7 @@ use std::sync::Arc;
 use walzer32_core::{GuestAddr, Memory, MemoryError, Reg};
 use walzer32_elf::SymbolResolver;
 
-pub const ASSET_SVC_MAGIC: u32 = 0xAA0000;
+pub const ASSET_SVC_MAGIC: u32 = 0xA50000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -23,6 +23,7 @@ pub enum AssetFuncId {
     AAssetDirGetNextFileName = 13,
     AAssetDirRewind = 14,
     AAssetDirClose = 15,
+    AAssetIsAllocated = 16,
 }
 
 impl AssetFuncId {
@@ -43,6 +44,7 @@ impl AssetFuncId {
             13 => Some(Self::AAssetDirGetNextFileName),
             14 => Some(Self::AAssetDirRewind),
             15 => Some(Self::AAssetDirClose),
+            16 => Some(Self::AAssetIsAllocated),
             _ => None,
         }
     }
@@ -124,6 +126,7 @@ impl AssetBridge {
             ("AAssetDir_getNextFileName", AssetFuncId::AAssetDirGetNextFileName),
             ("AAssetDir_rewind", AssetFuncId::AAssetDirRewind),
             ("AAssetDir_close", AssetFuncId::AAssetDirClose),
+            ("AAsset_isAllocated", AssetFuncId::AAssetIsAllocated),
         ];
 
         for (name, id) in funcs {
@@ -150,6 +153,7 @@ impl AssetBridge {
             AssetFuncId::AAssetDirGetNextFileName,
             AssetFuncId::AAssetDirRewind,
             AssetFuncId::AAssetDirClose,
+            AssetFuncId::AAssetIsAllocated,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (ASSET_SVC_MAGIC | (id as u32));
@@ -213,8 +217,16 @@ impl AssetBridge {
             AssetFuncId::AAssetManagerOpen => {
                 let filename_ptr = GuestAddr::new(cpu.reg(Reg::R1));
                 let mode = cpu.reg(Reg::R2);
+                if filename_ptr.as_u32() == 0 {
+                    cpu.set_reg(Reg::R0, 0);
+                    return Ok(true);
+                }
                 let filename = Self::read_c_string(mem, filename_ptr)?;
-                let normalized = filename.trim_start_matches('/').trim_start_matches("assets/").to_string();
+                let normalized = filename
+                    .trim_start_matches("./")
+                    .trim_start_matches('/')
+                    .trim_start_matches("assets/")
+                    .to_string();
 
                 let entry = self
                     .assets_map
@@ -366,6 +378,10 @@ impl AssetBridge {
                 self.next_dir_handle = self.next_dir_handle.wrapping_add(1);
 
                 // Allocate 256 bytes in heap for returned C filename strings
+                if self.heap_current.add(256) > self.heap_limit {
+                    cpu.set_reg(Reg::R0, 0);
+                    return Ok(true);
+                }
                 let name_buf = self.heap_current;
                 self.heap_current = self.heap_current.add(256);
 
@@ -410,6 +426,15 @@ impl AssetBridge {
                 let handle = cpu.reg(Reg::R0);
                 self.open_dirs.remove(&handle);
                 cpu.set_reg(Reg::R0, 0);
+            }
+            AssetFuncId::AAssetIsAllocated => {
+                let handle = cpu.reg(Reg::R0);
+                let allocated = self
+                    .open_assets
+                    .get(&handle)
+                    .map(|a| u32::from(a.guest_buffer.is_some()))
+                    .unwrap_or(0);
+                cpu.set_reg(Reg::R0, allocated);
             }
         }
 

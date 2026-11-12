@@ -32,6 +32,9 @@ pub const SL_PLAYSTATE_PAUSED: u32 = 2;
 pub const SL_PLAYSTATE_PLAYING: u32 = 3;
 
 pub const AUDIO_SVC_MAGIC: u32 = 0xAA0000;
+pub const AAUDIO_FORMAT_PCM_I16: i32 = 1;
+pub const AAUDIO_FORMAT_PCM_FLOAT: i32 = 2;
+pub const SL_DATAFORMAT_PCM: u32 = 2;
 
 /// Audio function identifiers for OpenSL ES and AAudio SVC stubs
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +197,7 @@ pub struct AudioBridge {
     pub total_bytes_played: u64,
     pub total_buffers_enqueued: u64,
     pub format: AudioFormat,
+    pub aaudio_format: i32,
     pub volume_millibels: i32,
     pub ring_buffer: Arc<AudioRingBuffer<i16>>,
     pub resampler: AudioResampler,
@@ -218,6 +222,7 @@ impl AudioBridge {
             total_bytes_played: 0,
             total_buffers_enqueued: 0,
             format: AudioFormat::default(),
+            aaudio_format: AAUDIO_FORMAT_PCM_I16,
             volume_millibels: 0,
             ring_buffer: Arc::new(AudioRingBuffer::new(65536)),
             resampler: AudioResampler::new(44100, 48000),
@@ -409,14 +414,38 @@ impl AudioBridge {
         let mut data = vec![0u8; size_bytes];
         mem.read_bytes(buffer_addr, &mut data)?;
 
-        // Parse 16-bit PCM samples
-        let sample_count = size_bytes / 2;
-        let mut pcm_samples = Vec::with_capacity(sample_count);
-        for i in 0..sample_count {
-            let offset = i * 2;
-            let sample = i16::from_le_bytes([data[offset], data[offset + 1]]);
-            pcm_samples.push(sample);
-        }
+        // Decode PCM samples according to configured stream format
+        let pcm_samples = if self.aaudio_format == AAUDIO_FORMAT_PCM_FLOAT
+            && self.format.bits_per_sample == 32
+        {
+            let sample_count = size_bytes / 4;
+            let mut out = Vec::with_capacity(sample_count);
+            for chunk in data.chunks_exact(4) {
+                let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let s = (f.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+                out.push(s);
+            }
+            out
+        } else if self.format.bits_per_sample == 8 {
+            data.iter()
+                .map(|&b| ((b as i16) - 128) * 256)
+                .collect()
+        } else if self.format.bits_per_sample == 32 {
+            let sample_count = size_bytes / 4;
+            let mut out = Vec::with_capacity(sample_count);
+            for chunk in data.chunks_exact(4) {
+                let s32 = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                out.push((s32 >> 16) as i16);
+            }
+            out
+        } else {
+            let sample_count = size_bytes / 2;
+            let mut out = Vec::with_capacity(sample_count);
+            for chunk in data.chunks_exact(2) {
+                out.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+            }
+            out
+        };
 
         // If format channels > 2 (e.g. Quad, 5.1, 7.1), downmix to stereo first
         let stereo_samples = if self.format.channels > 2 {
@@ -748,6 +777,41 @@ impl AudioBridge {
             }
             Some(AudioFuncId::SlEngineCreateAudioPlayer) => {
                 let p_player = GuestAddr::new(cpu.reg(Reg::R1));
+                let p_audio_src = GuestAddr::new(cpu.reg(Reg::R2));
+                if p_audio_src.as_u32() != 0 {
+                    // SLDataSource: { void* pLocator (+0), void* pFormat (+4) }
+                    if let Ok(p_fmt_u32) = mem.read_u32(p_audio_src.add(4)) {
+                        let p_fmt = GuestAddr::new(p_fmt_u32);
+                        if p_fmt.as_u32() != 0 {
+                            if let Ok(fmt_type) = mem.read_u32(p_fmt) {
+                                if fmt_type == SL_DATAFORMAT_PCM {
+                                    if let (Ok(ch), Ok(rate_raw), Ok(bps)) = (
+                                        mem.read_u32(p_fmt.add(4)),
+                                        mem.read_u32(p_fmt.add(8)),
+                                        mem.read_u32(p_fmt.add(12)),
+                                    ) {
+                                        let hz = if rate_raw >= 100_000 {
+                                            rate_raw / 1000
+                                        } else {
+                                            rate_raw
+                                        };
+                                        if (1..=8).contains(&ch) && (8000..=192000).contains(&hz) {
+                                            self.format.channels = ch as u16;
+                                            self.format.sample_rate_hz = hz;
+                                            self.format.bits_per_sample = if bps == 8 || bps == 16 || bps == 32 {
+                                                bps as u16
+                                            } else {
+                                                16
+                                            };
+                                            self.aaudio_format = AAUDIO_FORMAT_PCM_I16;
+                                            self.resampler.set_rates(hz, 48000);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if p_player.as_u32() != 0 {
                     mem.write_u32(p_player, self.stub_base.add(0x1100).as_u32())?;
                 }
@@ -823,6 +887,12 @@ impl AudioBridge {
                 cpu.set_reg(Reg::R0, 0);
             }
             Some(AudioFuncId::AAudioStreamBuilderSetFormat) => {
+                let fmt = cpu.reg(Reg::R1) as i32;
+                self.aaudio_format = fmt;
+                self.format.bits_per_sample = match fmt {
+                    AAUDIO_FORMAT_PCM_FLOAT => 32,
+                    _ => 16,
+                };
                 cpu.set_reg(Reg::R0, 0);
             }
             Some(AudioFuncId::AAudioStreamBuilderOpenStream) => {
@@ -1018,5 +1088,56 @@ mod tests {
         audio.handle_svc(AUDIO_SVC_MAGIC | (AudioFuncId::SlPlaySetPlayState as u32), &mut cpu, &mut mem).unwrap();
         assert_eq!(cpu.reg(Reg::R0), SL_RESULT_SUCCESS);
         assert_eq!(audio.play_state, SL_PLAYSTATE_PLAYING);
+    }
+
+    #[test]
+    fn test_audio_aaudio_float_pcm_and_opensles_format() {
+        let mut mem = FlatMemory::new(GuestAddr::new(0x1000), 0x8000);
+        let mut audio = AudioBridge::with_stub_base(GuestAddr::new(0x2000));
+        let mut cpu = CpuState::new();
+
+        // Configure AAudio at 48 kHz stereo float32 (format = 2)
+        cpu.set_reg(Reg::R1, 48000);
+        audio.handle_svc(AUDIO_SVC_MAGIC | (AudioFuncId::AAudioStreamBuilderSetSampleRate as u32), &mut cpu, &mut mem).unwrap();
+        cpu.set_reg(Reg::R1, 2);
+        audio.handle_svc(AUDIO_SVC_MAGIC | (AudioFuncId::AAudioStreamBuilderSetChannelCount as u32), &mut cpu, &mut mem).unwrap();
+        cpu.set_reg(Reg::R1, AAUDIO_FORMAT_PCM_FLOAT as u32);
+        audio.handle_svc(AUDIO_SVC_MAGIC | (AudioFuncId::AAudioStreamBuilderSetFormat as u32), &mut cpu, &mut mem).unwrap();
+
+        let float_buf = GuestAddr::new(0x3000);
+        let samples = [0.5f32, -0.5f32, 1.0f32, -1.0f32];
+        for (i, s) in samples.iter().enumerate() {
+            mem.write_bytes(float_buf.add((i * 4) as u32), &s.to_le_bytes()).unwrap();
+        }
+        cpu.set_reg(Reg::R1, float_buf.as_u32());
+        cpu.set_reg(Reg::R2, 2); // 2 stereo frames
+        audio.handle_svc(AUDIO_SVC_MAGIC | (AudioFuncId::AAudioStreamWrite as u32), &mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.reg(Reg::R0), 2);
+        assert_eq!(audio.available_frames(), 2);
+
+        let mut out = [0i16; 4];
+        audio.read_host_frames(&mut out);
+        assert!((out[0] - 16384).abs() <= 2);
+        assert!((out[1] + 16384).abs() <= 2);
+        assert_eq!(out[2], 32767);
+        assert_eq!(out[3], -32767);
+
+        // Configure via OpenSL SLDataSource -> SLDataFormat_PCM (22050000 mHz mono 16-bit)
+        let pcm_fmt = GuestAddr::new(0x4000);
+        mem.write_u32(pcm_fmt, SL_DATAFORMAT_PCM).unwrap();
+        mem.write_u32(pcm_fmt.add(4), 1).unwrap();
+        mem.write_u32(pcm_fmt.add(8), 22_050_000).unwrap();
+        mem.write_u32(pcm_fmt.add(12), 16).unwrap();
+
+        let audio_src = GuestAddr::new(0x4100);
+        mem.write_u32(audio_src, 0).unwrap();
+        mem.write_u32(audio_src.add(4), pcm_fmt.as_u32()).unwrap();
+
+        cpu.set_reg(Reg::R1, 0x4200);
+        cpu.set_reg(Reg::R2, audio_src.as_u32());
+        audio.handle_svc(AUDIO_SVC_MAGIC | (AudioFuncId::SlEngineCreateAudioPlayer as u32), &mut cpu, &mut mem).unwrap();
+        assert_eq!(audio.format.channels, 1);
+        assert_eq!(audio.format.sample_rate_hz, 22050);
+        assert_eq!(audio.format.bits_per_sample, 16);
     }
 }

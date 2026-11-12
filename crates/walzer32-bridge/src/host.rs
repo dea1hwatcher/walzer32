@@ -93,6 +93,7 @@ impl HostBridge {
                 "libEGL.so\0",
                 "libGLESv2.so\0",
                 "libGLESv3.so\0",
+                "libvulkan.so\0",
                 "libandroid.so\0",
                 "libaaudio.so\0",
                 "liblog.so\0",

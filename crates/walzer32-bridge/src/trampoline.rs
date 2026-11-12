@@ -8,6 +8,7 @@ use crate::bionic::BionicBridge;
 use crate::gles::GlesBridge;
 use crate::hardware_buffer::HardwareBufferBridge;
 use crate::jni::JniBridge;
+use crate::vulkan::VulkanBridge;
 
 pub const SENTINEL_RETURN_ADDR: u32 = 0xDEAD_BEE0;
 
@@ -43,6 +44,7 @@ fn dispatch_bridge_svc<M: Memory>(
     audio: &mut Option<&mut AudioBridge>,
     asset: &mut Option<&mut AssetBridge>,
     hw_buffer: &mut Option<&mut HardwareBufferBridge>,
+    vulkan: &mut Option<&mut VulkanBridge>,
 ) -> Result<(), EngineError> {
     if bionic.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
         engine.sync_signal_state(&bionic.signal_state);
@@ -71,6 +73,11 @@ fn dispatch_bridge_svc<M: Memory>(
             return Ok(());
         }
     }
+    if let Some(vk) = vulkan.as_deref_mut() {
+        if vk.handle_svc(imm, &mut engine.cpu, &mut engine.mem)? {
+            return Ok(());
+        }
+    }
     Ok(())
 }
 
@@ -79,10 +86,28 @@ pub fn invoke_guest_extended<M: Memory>(
     engine: &mut DbtEngine<M>,
     bionic: &mut BionicBridge,
     jni: &mut JniBridge,
+    gles: Option<&mut GlesBridge>,
+    audio: Option<&mut AudioBridge>,
+    asset: Option<&mut AssetBridge>,
+    hw_buffer: Option<&mut HardwareBufferBridge>,
+    func_addr: GuestAddr,
+    args: &[u32],
+) -> Result<u32, EngineError> {
+    invoke_guest_all(
+        engine, bionic, jni, gles, audio, asset, hw_buffer, None, func_addr, args,
+    )
+}
+
+/// Invokes a 32-bit guest function with all bridges including Vulkan passthrough support
+pub fn invoke_guest_all<M: Memory>(
+    engine: &mut DbtEngine<M>,
+    bionic: &mut BionicBridge,
+    jni: &mut JniBridge,
     mut gles: Option<&mut GlesBridge>,
     mut audio: Option<&mut AudioBridge>,
     mut asset: Option<&mut AssetBridge>,
     mut hw_buffer: Option<&mut HardwareBufferBridge>,
+    mut vulkan: Option<&mut VulkanBridge>,
     func_addr: GuestAddr,
     args: &[u32],
 ) -> Result<u32, EngineError> {
@@ -166,6 +191,7 @@ pub fn invoke_guest_extended<M: Memory>(
                         &mut audio,
                         &mut asset,
                         &mut hw_buffer,
+                        &mut vulkan,
                     )?;
                 }
             }

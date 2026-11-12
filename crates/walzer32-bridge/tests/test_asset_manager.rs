@@ -326,3 +326,111 @@ fn test_asset_load_from_apk() {
     assert!(bridge.assets_map.contains_key("game/sprites.png"));
     assert!(!bridge.assets_map.contains_key("res/layout/main.xml"));
 }
+
+#[test]
+fn test_asset_and_audio_no_svc_collision_with_trampoline() {
+    use walzer32_bridge::{invoke_guest_all, AudioBridge, VulkanBridge, ASSET_SVC_MAGIC, AUDIO_SVC_MAGIC};
+    assert_ne!(ASSET_SVC_MAGIC, AUDIO_SVC_MAGIC);
+
+    let base = GuestAddr::new(0x7000_0000);
+    let mut mem = FlatMemory::new(base, 0x600_000);
+
+    let bionic = BionicBridge::new(base, base.add(0x10_0000), 0x10_0000);
+    bionic.install_stubs(&mut mem).unwrap();
+
+    let jni = JniBridge::new(base.add(0x20_0000));
+    jni.install(&mut mem).unwrap();
+
+    let audio = AudioBridge::with_stub_base(base.add(0x25_0000));
+    audio.install_stubs(&mut mem).unwrap();
+
+    let mut asset = AssetBridge::new(base.add(0x30_0000), base.add(0x31_0000), 0x1_0000);
+    asset.install_stubs(&mut mem).unwrap();
+    asset.register_asset("hello.txt", b"walzer32-asset-ok".to_vec());
+
+    let vulkan = VulkanBridge::with_stub_base(base.add(0x35_0000));
+    vulkan.install_stubs(&mut mem).unwrap();
+
+    let fname_addr = base.add(0x40_0000);
+    mem.write_bytes(fname_addr, b"hello.txt\0").unwrap();
+
+    let mut engine = DbtEngine::new(mem);
+    engine.cpu.set_sp(base.add(0x50_0000).as_u32());
+
+    let open_fn = asset.resolve("AAssetManager_open").unwrap();
+    let get_len_fn = asset.resolve("AAsset_getLength").unwrap();
+    let is_alloc_fn = asset.resolve("AAsset_isAllocated").unwrap();
+    let proc_addr_fn = vulkan.resolve("vkGetInstanceProcAddr").unwrap();
+
+    let mut bionic = bionic;
+    let mut jni = jni;
+    let mut audio = audio;
+    let mut vulkan = vulkan;
+
+    // Even with AudioBridge checked before AssetBridge in trampoline, AssetBridge must handle it!
+    let asset_handle = invoke_guest_all(
+        &mut engine,
+        &mut bionic,
+        &mut jni,
+        None,
+        Some(&mut audio),
+        Some(&mut asset),
+        None,
+        Some(&mut vulkan),
+        open_fn,
+        &[0xA55E_0001, fname_addr.as_u32(), 0],
+    )
+    .unwrap();
+    assert_ne!(asset_handle, 0);
+
+    let len = invoke_guest_all(
+        &mut engine,
+        &mut bionic,
+        &mut jni,
+        None,
+        Some(&mut audio),
+        Some(&mut asset),
+        None,
+        Some(&mut vulkan),
+        get_len_fn,
+        &[asset_handle],
+    )
+    .unwrap();
+    assert_eq!(len as usize, b"walzer32-asset-ok".len());
+
+    let allocated = invoke_guest_all(
+        &mut engine,
+        &mut bionic,
+        &mut jni,
+        None,
+        Some(&mut audio),
+        Some(&mut asset),
+        None,
+        Some(&mut vulkan),
+        is_alloc_fn,
+        &[asset_handle],
+    )
+    .unwrap();
+    assert_eq!(allocated, 0);
+
+    // Also verify vkGetInstanceProcAddr resolves a guest Vulkan stub address
+    let vk_name_addr = base.add(0x40_0100);
+    engine
+        .mem
+        .write_bytes(vk_name_addr, b"vkCreateSwapchainKHR\0")
+        .unwrap();
+    let resolved_sc = invoke_guest_all(
+        &mut engine,
+        &mut bionic,
+        &mut jni,
+        None,
+        Some(&mut audio),
+        Some(&mut asset),
+        None,
+        Some(&mut vulkan),
+        proc_addr_fn,
+        &[0, vk_name_addr.as_u32()],
+    )
+    .unwrap();
+    assert_eq!(resolved_sc, vulkan.resolve("vkCreateSwapchainKHR").unwrap().as_u32());
+}

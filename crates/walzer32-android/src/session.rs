@@ -3,8 +3,9 @@ use std::sync::Mutex;
 use thiserror::Error;
 use walzer32_apk::{ApkError, ApkPackage};
 use walzer32_bridge::{
-    invoke_guest_extended, invoke_jni_onload, AssetBridge, AudioBridge, BionicBridge, GlesBridge,
+    invoke_guest_all, invoke_jni_onload, AssetBridge, AudioBridge, BionicBridge, GlesBridge,
     HardwareBufferBridge, JniBridge, KeyEvent, RegisteredNativeMethod, SurfaceBridge, TouchEvent,
+    VulkanBridge, SL_PLAYSTATE_PLAYING,
 };
 use walzer32_core::{GuestAddr, Memory};
 #[cfg(not(target_os = "android"))]
@@ -49,6 +50,7 @@ pub struct Walzer32Session {
     pub audio: AudioBridge,
     pub asset: AssetBridge,
     pub hardware_buffer: HardwareBufferBridge,
+    pub vulkan: VulkanBridge,
     pub aot_cache_dir: Option<std::path::PathBuf>,
     pub apk_bytes: Option<Vec<u8>>,
     pub loaded_libraries: HashMap<String, LoadedLibrary>,
@@ -132,8 +134,16 @@ impl Walzer32Session {
         let asset = AssetBridge::new(asset_stubs, asset_stubs.add(0x1000), 0xF_F000);
         asset.install_stubs(&mut mem)?;
 
-        let hardware_buffer = HardwareBufferBridge::with_stub_base(hw_buffer_stubs);
+        let hardware_buffer = HardwareBufferBridge::new(
+            hw_buffer_stubs,
+            hw_buffer_stubs.add(0x1000),
+            0x7_F000,
+        );
         hardware_buffer.install_stubs(&mut mem)?;
+
+        let vulkan_stubs = arena_base.add(0x980_000);
+        let vulkan = VulkanBridge::with_stub_base(vulkan_stubs);
+        vulkan.install_stubs(&mut mem)?;
 
         let surface = SurfaceBridge::new();
 
@@ -162,6 +172,7 @@ impl Walzer32Session {
             audio,
             asset,
             hardware_buffer,
+            vulkan,
             aot_cache_dir: None,
             apk_bytes: None,
             loaded_libraries: HashMap::new(),
@@ -209,13 +220,15 @@ impl Walzer32Session {
     pub fn load_library_bytes(&mut self, name: &str, elf_bytes: &[u8]) -> Result<LoadedLibrary, SessionError> {
         let load_addr = self.next_load_addr;
 
-        // Create composite resolver combining Bionic, GLES, Audio, AssetManager, HardwareBuffer, and previously loaded libraries
+        // Specialized NDK bridges precede BionicBridge so dedicated handlers
+        // (e.g., AssetBridge for AAssetManager_*) win over fallback stubs.
         let mut composite = CompositeResolver::new();
-        composite.add(&self.bionic);
         composite.add(&self.gles);
         composite.add(&self.audio);
         composite.add(&self.asset);
         composite.add(&self.hardware_buffer);
+        composite.add(&self.vulkan);
+        composite.add(&self.bionic);
 
         struct LoadedMapResolver<'a>(&'a HashMap<String, LoadedLibrary>);
         impl<'a> SymbolResolver for LoadedMapResolver<'a> {
@@ -284,7 +297,7 @@ impl Walzer32Session {
 
     /// Call a 32-bit native function by guest address
     pub fn call_native(&mut self, fn_addr: GuestAddr, args: &[u32]) -> Result<u32, SessionError> {
-        let res = invoke_guest_extended(
+        let res = invoke_guest_all(
             &mut self.engine,
             &mut self.bionic,
             &mut self.jni,
@@ -292,10 +305,32 @@ impl Walzer32Session {
             Some(&mut self.audio),
             Some(&mut self.asset),
             Some(&mut self.hardware_buffer),
+            Some(&mut self.vulkan),
             fn_addr,
             args,
         )?;
         Ok(res)
+    }
+
+    /// Pumps queued OpenSL ES buffer callbacks while host hardware playback drains the ring buffer.
+    pub fn pump_audio_callbacks(&mut self) {
+        if self.audio.play_state != SL_PLAYSTATE_PLAYING || !self.audio.has_callback() {
+            return;
+        }
+        let mut fired = 0;
+        while fired < 4 && self.audio.queued_count() > 0 && self.audio.available_frames() < 2048 {
+            if self.audio.consume_next_buffer().is_some() {
+                let cb = self.audio.callback_fn;
+                let bq_itf = self.audio.stub_base.add(0x1200).as_u32();
+                let ctx = self.audio.callback_context.as_u32();
+                if self.call_native(cb, &[bq_itf, ctx]).is_err() {
+                    break;
+                }
+                fired += 1;
+            } else {
+                break;
+            }
+        }
     }
 
     /// Mounts an Android main OBB expansion pack into the guest VFS
@@ -535,6 +570,7 @@ impl Walzer32Session {
         }
         self.owns_host_window = false;
         self.gles.host_window_ptr = 0;
+        self.vulkan.host_window_ptr = 0;
     }
 
     /// Handles SurfaceCreated lifecycle event from Android UI thread
@@ -543,6 +579,7 @@ impl Walzer32Session {
             self.release_host_window();
         }
         self.gles.host_window_ptr = window_ptr;
+        self.vulkan.host_window_ptr = window_ptr;
         self.bionic.surface_width = width;
         self.bionic.surface_height = height;
         self.surface.on_surface_created(window_ptr, width, height);
@@ -590,6 +627,7 @@ impl Walzer32Session {
         if let Some(render_fn) = self.surface.draw_frame_fn {
             let _ = self.call_native(render_fn, &[])?;
         }
+        self.pump_audio_callbacks();
         Ok(())
     }
 

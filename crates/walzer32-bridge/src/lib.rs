@@ -57,10 +57,10 @@ pub use jni::{
 pub use jni_thunk::{JniThunk, JniThunkGenerator};
 pub use surface::{KeyEvent, SurfaceBridge, TouchEvent, GUEST_SURFACE_HANDLE};
 pub use trampoline::{
-    invoke_guest, invoke_guest_extended, invoke_guest_full, invoke_jni_method, invoke_jni_onload,
-    SENTINEL_RETURN_ADDR,
+    invoke_guest, invoke_guest_all, invoke_guest_extended, invoke_guest_full, invoke_jni_method,
+    invoke_jni_onload, SENTINEL_RETURN_ADDR,
 };
 pub use vulkan::{
     VkApplicationInfo32, VkDeviceCreateInfo32, VkInstanceCreateInfo32, VkSubmitInfo32, VulkanBridge,
-    VK_ERROR_INITIALIZATION_FAILED, VK_SUCCESS,
+    VulkanFuncId, VK_ERROR_INITIALIZATION_FAILED, VK_SUCCESS, VULKAN_SVC_MAGIC,
 };
