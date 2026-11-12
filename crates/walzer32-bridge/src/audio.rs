@@ -11,11 +11,18 @@
 ///   5. Buffer completion tracking and guest callback dispatching.
 
 use std::collections::{HashMap, VecDeque};
+#[cfg(target_os = "android")]
+use std::ffi::c_void;
+use std::sync::Arc;
+#[cfg(target_os = "android")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use walzer32_core::{CpuState, GuestAddr, Memory, MemoryError, Reg};
 use walzer32_elf::SymbolResolver;
 
 use crate::audio_resample::{downmix_to_stereo, AudioResampler};
 use crate::audio_ring::AudioRingBuffer;
+#[cfg(target_os = "android")]
+use crate::host::{HostBridge, RawFnPtr};
 
 pub const SL_RESULT_SUCCESS: u32 = 0;
 pub const SL_RESULT_PARAMETER_INVALID: u32 = 2;
@@ -116,6 +123,68 @@ pub struct AudioBuffer {
     pub pcm_data: Vec<u8>,
 }
 
+#[cfg(target_os = "android")]
+struct HostAudioCallbackState {
+    ring: Arc<AudioRingBuffer<i16>>,
+    paused: Arc<AtomicBool>,
+}
+
+#[cfg(target_os = "android")]
+struct HostAudioStream {
+    host: HostBridge,
+    stream: *mut c_void,
+    user_data: *mut HostAudioCallbackState,
+    paused: Arc<AtomicBool>,
+}
+
+#[cfg(target_os = "android")]
+unsafe impl Send for HostAudioStream {}
+#[cfg(target_os = "android")]
+unsafe impl Sync for HostAudioStream {}
+
+#[cfg(target_os = "android")]
+unsafe extern "C" fn host_aaudio_data_callback(
+    _stream: *mut c_void,
+    user_data: *mut c_void,
+    audio_data: *mut c_void,
+    num_frames: i32,
+) -> i32 {
+    if user_data.is_null() || audio_data.is_null() || num_frames <= 0 {
+        return 0; // AAUDIO_CALLBACK_RESULT_CONTINUE
+    }
+    let state = unsafe { &*(user_data as *const HostAudioCallbackState) };
+    let total_samples = (num_frames as usize) * 2;
+    let out = unsafe { std::slice::from_raw_parts_mut(audio_data as *mut i16, total_samples) };
+    if state.paused.load(Ordering::Acquire) {
+        out.fill(0);
+    } else {
+        state.ring.pop_slice_with_concealment(out);
+    }
+    0 // AAUDIO_CALLBACK_RESULT_CONTINUE
+}
+
+#[cfg(target_os = "android")]
+impl Drop for HostAudioStream {
+    fn drop(&mut self) {
+        self.paused.store(true, Ordering::Release);
+        if !self.stream.is_null() {
+            if let Some(fp) = self.host.resolve("AAudioStream_requestStop") {
+                let stop_fn: unsafe extern "C" fn(*mut c_void) -> i32 = unsafe { std::mem::transmute(fp) };
+                unsafe { stop_fn(self.stream) };
+            }
+            if let Some(fp) = self.host.resolve("AAudioStream_close") {
+                let close_fn: unsafe extern "C" fn(*mut c_void) -> i32 = unsafe { std::mem::transmute(fp) };
+                unsafe { close_fn(self.stream) };
+            }
+            self.stream = std::ptr::null_mut();
+        }
+        if !self.user_data.is_null() {
+            unsafe { drop(Box::from_raw(self.user_data)) };
+            self.user_data = std::ptr::null_mut();
+        }
+    }
+}
+
 /// OpenSL ES / AAudio passthrough bridge
 pub struct AudioBridge {
     pub play_state: u32,
@@ -126,11 +195,13 @@ pub struct AudioBridge {
     pub total_buffers_enqueued: u64,
     pub format: AudioFormat,
     pub volume_millibels: i32,
-    pub ring_buffer: AudioRingBuffer<i16>,
+    pub ring_buffer: Arc<AudioRingBuffer<i16>>,
     pub resampler: AudioResampler,
     pub target_latency_ms: f32,
     pub stub_base: GuestAddr,
     pub symbol_table: HashMap<String, GuestAddr>,
+    #[cfg(target_os = "android")]
+    host_stream: Option<HostAudioStream>,
 }
 
 impl AudioBridge {
@@ -148,20 +219,138 @@ impl AudioBridge {
             total_buffers_enqueued: 0,
             format: AudioFormat::default(),
             volume_millibels: 0,
-            ring_buffer: AudioRingBuffer::new(65536),
+            ring_buffer: Arc::new(AudioRingBuffer::new(65536)),
             resampler: AudioResampler::new(44100, 48000),
             target_latency_ms: 10.0,
             stub_base,
             symbol_table: HashMap::new(),
+            #[cfg(target_os = "android")]
+            host_stream: None,
         };
 
         bridge.register_known_symbols();
         bridge
     }
 
+    #[cfg(target_os = "android")]
+    pub fn start_host_output_stream(&mut self) {
+        if let Some(hs) = &mut self.host_stream {
+            hs.paused.store(false, Ordering::Release);
+            if !hs.stream.is_null() {
+                if let Some(fp) = hs.host.resolve("AAudioStream_requestStart") {
+                    let start_fn: unsafe extern "C" fn(*mut c_void) -> i32 = unsafe { std::mem::transmute(fp) };
+                    unsafe { start_fn(hs.stream) };
+                }
+            }
+            return;
+        }
+
+        let mut host = HostBridge::new();
+        macro_rules! resolve_aa {
+            ($sym:literal, $ty:ty) => {{
+                let Some(fp) = host.resolve($sym) else {
+                    return;
+                };
+                unsafe { std::mem::transmute::<RawFnPtr, $ty>(fp) }
+            }};
+        }
+
+        let create_builder = resolve_aa!("AAudio_createStreamBuilder", unsafe extern "C" fn(*mut *mut c_void) -> i32);
+        let set_direction = resolve_aa!("AAudioStreamBuilder_setDirection", unsafe extern "C" fn(*mut c_void, i32));
+        let set_rate = resolve_aa!("AAudioStreamBuilder_setSampleRate", unsafe extern "C" fn(*mut c_void, i32));
+        let set_ch = resolve_aa!("AAudioStreamBuilder_setChannelCount", unsafe extern "C" fn(*mut c_void, i32));
+        let set_fmt = resolve_aa!("AAudioStreamBuilder_setFormat", unsafe extern "C" fn(*mut c_void, i32));
+        let set_perf = resolve_aa!("AAudioStreamBuilder_setPerformanceMode", unsafe extern "C" fn(*mut c_void, i32));
+        let set_cb = resolve_aa!(
+            "AAudioStreamBuilder_setDataCallback",
+            unsafe extern "C" fn(
+                *mut c_void,
+                unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, i32) -> i32,
+                *mut c_void,
+            )
+        );
+        let open_stream = resolve_aa!(
+            "AAudioStreamBuilder_openStream",
+            unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> i32
+        );
+        let delete_builder = resolve_aa!("AAudioStreamBuilder_delete", unsafe extern "C" fn(*mut c_void) -> i32);
+        let request_start = resolve_aa!("AAudioStream_requestStart", unsafe extern "C" fn(*mut c_void) -> i32);
+
+        let mut builder: *mut c_void = std::ptr::null_mut();
+        if unsafe { create_builder(&mut builder) } != 0 || builder.is_null() {
+            return;
+        }
+
+        let paused = Arc::new(AtomicBool::new(false));
+        let state = Box::new(HostAudioCallbackState {
+            ring: Arc::clone(&self.ring_buffer),
+            paused: Arc::clone(&paused),
+        });
+        let user_data = Box::into_raw(state);
+
+        unsafe {
+            set_direction(builder, 0); // AAUDIO_DIRECTION_OUTPUT
+            set_rate(builder, 48000);
+            set_ch(builder, 2);
+            set_fmt(builder, 1); // AAUDIO_FORMAT_PCM_I16
+            set_perf(builder, 12); // AAUDIO_PERFORMANCE_MODE_LOW_LATENCY
+            set_cb(builder, host_aaudio_data_callback, user_data as *mut c_void);
+        }
+
+        let mut stream: *mut c_void = std::ptr::null_mut();
+        let open_res = unsafe { open_stream(builder, &mut stream) };
+        unsafe { delete_builder(builder) };
+
+        if open_res != 0 || stream.is_null() {
+            unsafe { drop(Box::from_raw(user_data)) };
+            return;
+        }
+
+        let start_res = unsafe { request_start(stream) };
+        if start_res != 0 {
+            let tmp = HostAudioStream {
+                host,
+                stream,
+                user_data,
+                paused,
+            };
+            drop(tmp);
+            return;
+        }
+
+        self.host_stream = Some(HostAudioStream {
+            host,
+            stream,
+            user_data,
+            paused,
+        });
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn stop_host_output_stream(&mut self) {
+        self.host_stream = None;
+    }
+
     /// Sets player state (STOPPED, PAUSED, PLAYING)
     pub fn set_play_state(&mut self, state: u32) -> u32 {
         self.play_state = state;
+        #[cfg(target_os = "android")]
+        match state {
+            SL_PLAYSTATE_PLAYING => self.start_host_output_stream(),
+            SL_PLAYSTATE_PAUSED => {
+                if let Some(hs) = &mut self.host_stream {
+                    hs.paused.store(true, Ordering::Release);
+                    if !hs.stream.is_null() {
+                        if let Some(fp) = hs.host.resolve("AAudioStream_requestPause") {
+                            let pause_fn: unsafe extern "C" fn(*mut c_void) -> i32 =
+                                unsafe { std::mem::transmute(fp) };
+                            unsafe { pause_fn(hs.stream) };
+                        }
+                    }
+                }
+            }
+            _ => self.stop_host_output_stream(),
+        }
         SL_RESULT_SUCCESS
     }
 
@@ -665,6 +854,8 @@ impl AudioBridge {
                 cpu.set_reg(Reg::R0, num_frames);
             }
             Some(AudioFuncId::AAudioStreamClose) => {
+                #[cfg(target_os = "android")]
+                self.stop_host_output_stream();
                 cpu.set_reg(Reg::R0, 0);
             }
             Some(AudioFuncId::AAudioStreamBuilderDelete) => {
