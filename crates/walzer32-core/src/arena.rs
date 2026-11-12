@@ -349,6 +349,28 @@ impl ArenaMemory {
     pub fn committed_page_count(&self) -> usize {
         self.committed_count
     }
+
+    pub fn cas_u32(
+        &self,
+        addr: GuestAddr,
+        expected: u32,
+        new: u32,
+    ) -> Result<u32, MemoryError> {
+        self.check_committed(addr, 4)?;
+        unsafe {
+            let atomic_ptr = self.base_ptr.add(addr.as_u32() as usize) as *const std::sync::atomic::AtomicU32;
+            let res = (*atomic_ptr).compare_exchange(
+                expected,
+                new,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            match res {
+                Ok(prev) => Ok(prev),
+                Err(actual) => Ok(actual),
+            }
+        }
+    }
 }
 
 impl Drop for ArenaMemory {
@@ -492,20 +514,7 @@ impl Memory for ArenaMemory {
         expected: u32,
         new: u32,
     ) -> Result<u32, MemoryError> {
-        self.check_committed(addr, 4)?;
-        unsafe {
-            let atomic_ptr = self.base_ptr.add(addr.as_u32() as usize) as *const std::sync::atomic::AtomicU32;
-            let res = (*atomic_ptr).compare_exchange(
-                expected,
-                new,
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-            );
-            match res {
-                Ok(prev) => Ok(prev),
-                Err(actual) => Ok(actual),
-            }
-        }
+        self.cas_u32(addr, expected, new)
     }
 }
 
@@ -532,6 +541,10 @@ impl SharedArenaMemory {
 
     pub fn is_page_committed(&self, pfn: u32) -> bool {
         self.inner.read().unwrap().is_page_committed(pfn)
+    }
+
+    pub fn base_ptr(&self) -> *mut u8 {
+        self.inner.read().unwrap().base_ptr
     }
 }
 
@@ -577,11 +590,11 @@ impl Memory for SharedArenaMemory {
     }
 
     fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.inner.write().unwrap().as_mut_ptr()
+        self.inner.read().unwrap().base_ptr
     }
 
     fn atomic_cmpxchg_u32(&mut self, addr: GuestAddr, expected: u32, new: u32) -> Result<u32, MemoryError> {
-        self.inner.write().unwrap().atomic_cmpxchg_u32(addr, expected, new)
+        self.inner.read().unwrap().cas_u32(addr, expected, new)
     }
 
     fn commit_range(&mut self, addr: GuestAddr, len: usize) -> Result<(), MemoryError> {

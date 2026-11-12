@@ -1,6 +1,21 @@
 use std::ffi::c_void;
+use walzer32_bridge::{KeyEvent, TouchEvent};
 use walzer32_core::GuestAddr;
-use crate::session::{get_or_init_session, reset_session};
+use crate::session::{
+    fast_channels, get_or_init_session, reset_session, try_get_or_init_session,
+};
+
+unsafe fn write_utf8_out(text: &str, out_buf: *mut u8, max_len: usize) -> JInt {
+    let bytes = text.as_bytes();
+    if out_buf.is_null() || max_len == 0 {
+        return bytes.len() as JInt;
+    }
+    let copy_len = bytes.len().min(max_len);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, copy_len);
+    }
+    copy_len as JInt
+}
 
 // Standard JNI 64-bit primitive types matching Android NDK
 pub type JNIEnv = *mut c_void;
@@ -234,15 +249,20 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeSurfaceCh
     width: JInt,
     height: JInt,
 ) -> JInt {
-    let mut guard = match get_or_init_session() {
-        Ok(g) => g,
-        Err(_) => return JNI_ERR_GENERIC,
-    };
-    if let Some(session) = guard.as_mut() {
-        session.on_surface_changed(width as u32, height as u32);
-        JNI_OK
-    } else {
-        JNI_ERR_GENERIC
+    match try_get_or_init_session() {
+        Some(Ok(mut guard)) => {
+            if let Some(session) = guard.as_mut() {
+                session.on_surface_changed(width as u32, height as u32);
+                JNI_OK
+            } else {
+                JNI_ERR_GENERIC
+            }
+        }
+        Some(Err(_)) => JNI_ERR_GENERIC,
+        None => {
+            fast_channels().set_pending_resize(width as u32, height as u32);
+            JNI_OK
+        }
     }
 }
 
@@ -294,15 +314,25 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeTouchEven
     y: JFloat,
     pointer_id: JInt,
 ) -> JInt {
-    let mut guard = match get_or_init_session() {
-        Ok(g) => g,
-        Err(_) => return JNI_ERR_GENERIC,
-    };
-    if let Some(session) = guard.as_mut() {
-        session.on_touch_event(action as u32, x, y, pointer_id as u32);
-        JNI_OK
-    } else {
-        JNI_ERR_GENERIC
+    match try_get_or_init_session() {
+        Some(Ok(mut guard)) => {
+            if let Some(session) = guard.as_mut() {
+                session.on_touch_event(action as u32, x, y, pointer_id as u32);
+                JNI_OK
+            } else {
+                JNI_ERR_GENERIC
+            }
+        }
+        Some(Err(_)) => JNI_ERR_GENERIC,
+        None => {
+            fast_channels().push_touch(TouchEvent {
+                action: action as u32,
+                x,
+                y,
+                pointer_id: pointer_id as u32,
+            });
+            JNI_OK
+        }
     }
 }
 
@@ -314,15 +344,23 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeKeyEvent(
     action: JInt,
     key_code: JInt,
 ) -> JInt {
-    let mut guard = match get_or_init_session() {
-        Ok(g) => g,
-        Err(_) => return JNI_ERR_GENERIC,
-    };
-    if let Some(session) = guard.as_mut() {
-        session.on_key_event(action as u32, key_code as u32);
-        JNI_OK
-    } else {
-        JNI_ERR_GENERIC
+    match try_get_or_init_session() {
+        Some(Ok(mut guard)) => {
+            if let Some(session) = guard.as_mut() {
+                session.on_key_event(action as u32, key_code as u32);
+                JNI_OK
+            } else {
+                JNI_ERR_GENERIC
+            }
+        }
+        Some(Err(_)) => JNI_ERR_GENERIC,
+        None => {
+            fast_channels().push_key(KeyEvent {
+                action: action as u32,
+                key_code: key_code as u32,
+            });
+            JNI_OK
+        }
     }
 }
 
@@ -335,24 +373,15 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeGetTeleme
     out_buf: *mut u8,
     max_len: usize,
 ) -> JInt {
-    let guard = match get_or_init_session() {
-        Ok(g) => g,
-        Err(_) => return JNI_ERR_GENERIC,
+    let text = match try_get_or_init_session() {
+        Some(Ok(guard)) => match guard.as_ref() {
+            Some(session) => session.get_telemetry_hud(),
+            None => return JNI_ERR_GENERIC,
+        },
+        Some(Err(_)) => return JNI_ERR_GENERIC,
+        None => fast_channels().telemetry_hud_snapshot(),
     };
-    if let Some(session) = guard.as_ref() {
-        let text = session.get_telemetry_hud();
-        let bytes = text.as_bytes();
-        if out_buf.is_null() || max_len == 0 {
-            return bytes.len() as JInt;
-        }
-        let copy_len = bytes.len().min(max_len);
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, copy_len);
-        }
-        copy_len as JInt
-    } else {
-        JNI_ERR_GENERIC
-    }
+    unsafe { write_utf8_out(&text, out_buf, max_len) }
 }
 
 /// JNI Export: Query JSON Telemetry metrics
@@ -363,24 +392,15 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeGetTeleme
     out_buf: *mut u8,
     max_len: usize,
 ) -> JInt {
-    let guard = match get_or_init_session() {
-        Ok(g) => g,
-        Err(_) => return JNI_ERR_GENERIC,
+    let text = match try_get_or_init_session() {
+        Some(Ok(guard)) => match guard.as_ref() {
+            Some(session) => session.get_telemetry_json(),
+            None => return JNI_ERR_GENERIC,
+        },
+        Some(Err(_)) => return JNI_ERR_GENERIC,
+        None => fast_channels().telemetry_json_snapshot(),
     };
-    if let Some(session) = guard.as_ref() {
-        let text = session.get_telemetry_json();
-        let bytes = text.as_bytes();
-        if out_buf.is_null() || max_len == 0 {
-            return bytes.len() as JInt;
-        }
-        let copy_len = bytes.len().min(max_len);
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, copy_len);
-        }
-        copy_len as JInt
-    } else {
-        JNI_ERR_GENERIC
-    }
+    unsafe { write_utf8_out(&text, out_buf, max_len) }
 }
 
 /// JNI Export: Captures Android Tombstone crash report
@@ -432,16 +452,17 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeRenderAud
         return 0;
     }
 
-    let mut guard = match get_or_init_session() {
-        Ok(g) => g,
-        Err(_) => return JNI_ERR_GENERIC,
-    };
-
-    if let Some(session) = guard.as_mut() {
-        let slice = unsafe { std::slice::from_raw_parts_mut(out_buf, max_samples) };
-        session.read_audio_frames(slice) as JInt
-    } else {
-        JNI_ERR_GENERIC
+    let slice = unsafe { std::slice::from_raw_parts_mut(out_buf, max_samples) };
+    match try_get_or_init_session() {
+        Some(Ok(mut guard)) => {
+            if let Some(session) = guard.as_mut() {
+                session.read_audio_frames(slice) as JInt
+            } else {
+                JNI_ERR_GENERIC
+            }
+        }
+        Some(Err(_)) => JNI_ERR_GENERIC,
+        None => fast_channels().read_audio_frames(slice) as JInt,
     }
 }
 
@@ -452,16 +473,20 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeSetAudioV
     _clazz: JClass,
     millibels: JInt,
 ) -> JInt {
-    let mut guard = match get_or_init_session() {
-        Ok(g) => g,
-        Err(_) => return JNI_ERR_GENERIC,
-    };
-
-    if let Some(session) = guard.as_mut() {
-        session.set_audio_volume(millibels);
-        JNI_OK
-    } else {
-        JNI_ERR_GENERIC
+    match try_get_or_init_session() {
+        Some(Ok(mut guard)) => {
+            if let Some(session) = guard.as_mut() {
+                session.set_audio_volume(millibels);
+                JNI_OK
+            } else {
+                JNI_ERR_GENERIC
+            }
+        }
+        Some(Err(_)) => JNI_ERR_GENERIC,
+        None => {
+            fast_channels().set_volume_millibels(millibels);
+            JNI_OK
+        }
     }
 }
 
@@ -471,15 +496,13 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeGetAudioU
     _env: JNIEnv,
     _clazz: JClass,
 ) -> JLong {
-    let guard = match get_or_init_session() {
-        Ok(g) => g,
-        Err(_) => return 0,
-    };
-
-    if let Some(session) = guard.as_ref() {
-        session.get_audio_underruns() as JLong
-    } else {
-        0
+    match try_get_or_init_session() {
+        Some(Ok(guard)) => guard
+            .as_ref()
+            .map(|s| s.get_audio_underruns() as JLong)
+            .unwrap_or(0),
+        Some(Err(_)) => 0,
+        None => fast_channels().audio_underruns() as JLong,
     }
 }
 
@@ -489,15 +512,13 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeGetAudioO
     _env: JNIEnv,
     _clazz: JClass,
 ) -> JLong {
-    let guard = match get_or_init_session() {
-        Ok(g) => g,
-        Err(_) => return 0,
-    };
-
-    if let Some(session) = guard.as_ref() {
-        session.get_audio_overruns() as JLong
-    } else {
-        0
+    match try_get_or_init_session() {
+        Some(Ok(guard)) => guard
+            .as_ref()
+            .map(|s| s.get_audio_overruns() as JLong)
+            .unwrap_or(0),
+        Some(Err(_)) => 0,
+        None => fast_channels().audio_overruns() as JLong,
     }
 }
 
@@ -507,15 +528,13 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeGetAudioL
     _env: JNIEnv,
     _clazz: JClass,
 ) -> f32 {
-    let guard = match get_or_init_session() {
-        Ok(g) => g,
-        Err(_) => return 0.0,
-    };
-
-    if let Some(session) = guard.as_ref() {
-        session.get_audio_latency_ms()
-    } else {
-        0.0
+    match try_get_or_init_session() {
+        Some(Ok(guard)) => guard
+            .as_ref()
+            .map(|s| s.get_audio_latency_ms())
+            .unwrap_or(0.0),
+        Some(Err(_)) => 0.0,
+        None => fast_channels().audio_latency_ms(),
     }
 }
 
@@ -526,16 +545,20 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeSetTarget
     _clazz: JClass,
     latency_ms: f32,
 ) -> JInt {
-    let mut guard = match get_or_init_session() {
-        Ok(g) => g,
-        Err(_) => return JNI_ERR_GENERIC,
-    };
-
-    if let Some(session) = guard.as_mut() {
-        session.set_target_audio_latency_ms(latency_ms);
-        JNI_OK
-    } else {
-        JNI_ERR_GENERIC
+    match try_get_or_init_session() {
+        Some(Ok(mut guard)) => {
+            if let Some(session) = guard.as_mut() {
+                session.set_target_audio_latency_ms(latency_ms);
+                JNI_OK
+            } else {
+                JNI_ERR_GENERIC
+            }
+        }
+        Some(Err(_)) => JNI_ERR_GENERIC,
+        None => {
+            fast_channels().set_target_latency_ms(latency_ms);
+            JNI_OK
+        }
     }
 }
 
@@ -545,15 +568,13 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeGetAudioW
     _env: JNIEnv,
     _clazz: JClass,
 ) -> f32 {
-    let guard = match get_or_init_session() {
-        Ok(g) => g,
-        Err(_) => return 0.0,
-    };
-
-    if let Some(session) = guard.as_ref() {
-        session.get_audio_watermark_ratio()
-    } else {
-        0.0
+    match try_get_or_init_session() {
+        Some(Ok(guard)) => guard
+            .as_ref()
+            .map(|s| s.get_audio_watermark_ratio())
+            .unwrap_or(0.0),
+        Some(Err(_)) => 0.0,
+        None => fast_channels().audio_watermark_ratio(),
     }
 }
 

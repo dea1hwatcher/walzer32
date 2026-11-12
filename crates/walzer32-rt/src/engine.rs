@@ -1,5 +1,7 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
-use walzer32_core::{CpuState, GuestAddr, Memory, MemoryError, Reg};
+use walzer32_core::{CpuState, Cpsr, GuestAddr, Memory, MemoryError, Reg};
 use walzer32_emitter_a64::{A64Compiler, PatchTarget};
 use walzer32_interp::{InterpError, Interpreter, StepResult};
 use walzer32_ir::{Lifter, SuperblockOptimizer, TraceBuilder};
@@ -7,6 +9,34 @@ use crate::cache::JitCache;
 use crate::futex::{FutexError, FutexManager};
 use crate::jit_pool::JitPool;
 use crate::syscall::{futex_op, nr, SyscallArgs};
+
+/// Captured child thread parameters from ARM32 `SYS_clone`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingClone {
+    pub child_tid: u32,
+    pub flags: u32,
+    pub child_stack: u32,
+    pub parent_tid_ptr: u32,
+    pub tls_ptr: u32,
+    pub child_tid_ptr: u32,
+    pub child_pc: u32,
+    pub child_cpsr: Cpsr,
+}
+
+/// Shared JIT translation cache and executable memory pool across guest threads.
+pub struct SharedJit {
+    pub cache: RwLock<JitCache>,
+    pub pool: Mutex<JitPool>,
+}
+
+impl SharedJit {
+    pub fn new(cache: JitCache, pool: JitPool) -> Self {
+        Self {
+            cache: RwLock::new(cache),
+            pool: Mutex::new(pool),
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum EngineError {
@@ -51,12 +81,42 @@ pub trait SyscallHandler: Send {
     fn signal_state_mut(&mut self) -> Option<&mut crate::signals::SignalState> {
         None
     }
+
+    fn futex_manager(&self) -> Option<FutexManager> {
+        None
+    }
+
+    fn set_futex_manager(&mut self, _futex: FutexManager) {}
+
+    fn next_tid_counter(&self) -> Option<Arc<AtomicU32>> {
+        None
+    }
+
+    fn shared_mmap_cursor(&self) -> Option<Arc<AtomicU32>> {
+        None
+    }
+
+    fn enable_shared_mmap(&mut self) -> Option<Arc<AtomicU32>> {
+        None
+    }
+
+    fn take_pending_clone(&mut self) -> Option<PendingClone> {
+        None
+    }
+
+    fn has_pending_clone(&self) -> bool {
+        false
+    }
 }
 
 pub struct DefaultSyscallHandler {
     pub stdout_capture: Vec<u8>,
     pub futex: FutexManager,
     pub tid: u32,
+    pub next_tid: Arc<AtomicU32>,
+    pub clear_child_tid: Option<GuestAddr>,
+    pub pending_clone: Option<PendingClone>,
+    pub shared_mmap: Option<Arc<AtomicU32>>,
     pub vfs: crate::vfs::VirtualFileSystem,
     pub brk: u32,
     pub mmap_current: GuestAddr,
@@ -69,6 +129,10 @@ impl Default for DefaultSyscallHandler {
             stdout_capture: Vec::new(),
             futex: FutexManager::new(),
             tid: 1000,
+            next_tid: Arc::new(AtomicU32::new(1001)),
+            clear_child_tid: None,
+            pending_clone: None,
+            shared_mmap: None,
             vfs: crate::vfs::VirtualFileSystem::new(),
             brk: 0x4000_0000,
             mmap_current: GuestAddr::new(0x7100_0000),
@@ -83,6 +147,10 @@ impl DefaultSyscallHandler {
             stdout_capture: Vec::new(),
             futex,
             tid,
+            next_tid: Arc::new(AtomicU32::new(tid.saturating_add(1).max(1001))),
+            clear_child_tid: None,
+            pending_clone: None,
+            shared_mmap: None,
             vfs: crate::vfs::VirtualFileSystem::new(),
             brk: 0x4000_0000,
             mmap_current: GuestAddr::new(0x7100_0000),
@@ -95,9 +163,39 @@ impl DefaultSyscallHandler {
             stdout_capture: Vec::new(),
             futex: FutexManager::new(),
             tid: 1000,
+            next_tid: Arc::new(AtomicU32::new(1001)),
+            clear_child_tid: None,
+            pending_clone: None,
+            shared_mmap: None,
             vfs,
             brk: 0x4000_0000,
             mmap_current: GuestAddr::new(0x7100_0000),
+            signal_state: crate::signals::SignalState::new(),
+        }
+    }
+
+    pub fn for_child_thread(
+        futex: FutexManager,
+        tid: u32,
+        next_tid: Arc<AtomicU32>,
+        shared_mmap: Option<Arc<AtomicU32>>,
+        clear_child_tid: Option<GuestAddr>,
+    ) -> Self {
+        let mmap_val = shared_mmap
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0x7100_0000);
+        Self {
+            stdout_capture: Vec::new(),
+            futex,
+            tid,
+            next_tid,
+            clear_child_tid,
+            pending_clone: None,
+            shared_mmap,
+            vfs: crate::vfs::VirtualFileSystem::new(),
+            brk: 0x4000_0000,
+            mmap_current: GuestAddr::new(mmap_val),
             signal_state: crate::signals::SignalState::new(),
         }
     }
@@ -128,9 +226,47 @@ impl SyscallHandler for DefaultSyscallHandler {
         mem: &mut dyn Memory,
     ) -> Result<Option<u32>, EngineError> {
         match args.nr {
-            nr::EXIT => {
+            nr::EXIT | nr::EXIT_GROUP => {
+                if let Some(ctid) = self.clear_child_tid.take() {
+                    let _ = mem.write_u32(ctid, 0);
+                    self.futex.wake(ctid, 1);
+                }
                 // Exit with code in arg0
                 Ok(Some(args.arg0))
+            }
+            nr::SET_TID_ADDRESS => {
+                let ctid = GuestAddr::new(args.arg0);
+                self.clear_child_tid = if ctid.as_u32() != 0 { Some(ctid) } else { None };
+                cpu.set_reg(Reg::R0, self.tid);
+                Ok(None)
+            }
+            nr::CLONE => {
+                const CLONE_PARENT_SETTID: u32 = 0x0010_0000;
+                const CLONE_CHILD_SETTID: u32 = 0x0100_0000;
+                let flags = args.arg0;
+                let child_stack = args.arg1;
+                let parent_tid_ptr = args.arg2;
+                let tls_ptr = args.arg3;
+                let child_tid_ptr = args.arg4;
+                let child_tid = self.next_tid.fetch_add(1, Ordering::Relaxed);
+                if (flags & CLONE_PARENT_SETTID) != 0 && parent_tid_ptr != 0 {
+                    let _ = mem.write_u32(GuestAddr::new(parent_tid_ptr), child_tid);
+                }
+                if (flags & CLONE_CHILD_SETTID) != 0 && child_tid_ptr != 0 {
+                    let _ = mem.write_u32(GuestAddr::new(child_tid_ptr), child_tid);
+                }
+                self.pending_clone = Some(PendingClone {
+                    child_tid,
+                    flags,
+                    child_stack,
+                    parent_tid_ptr,
+                    tls_ptr,
+                    child_tid_ptr,
+                    child_pc: cpu.pc().as_u32(),
+                    child_cpsr: cpu.cpsr,
+                });
+                cpu.set_reg(Reg::R0, child_tid);
+                Ok(None)
             }
             nr::WRITE => {
                 // write(fd, buf, count)
@@ -338,22 +474,51 @@ impl SyscallHandler for DefaultSyscallHandler {
             }
             nr::FUTEX => {
                 let uaddr = GuestAddr::new(args.arg0);
-                let op = args.arg1 & !futex_op::PRIVATE_FLAG;
+                let raw_op = args.arg1;
+                let op = raw_op & !(futex_op::PRIVATE_FLAG | futex_op::CLOCK_REALTIME_FLAG);
                 let val = args.arg2;
                 match op {
-                    futex_op::WAIT => {
-                        match self.futex.wait(mem, uaddr, val, None) {
+                    futex_op::WAIT | futex_op::WAIT_BITSET => {
+                        let timeout = if args.arg3 != 0 {
+                            let ts_addr = GuestAddr::new(args.arg3);
+                            let tv_sec = mem.read_u32(ts_addr).ok().map(|v| v as i32);
+                            let tv_nsec = mem.read_u32(ts_addr.add(4)).ok().map(|v| v as i32);
+                            match (tv_sec, tv_nsec) {
+                                (Some(s), Some(ns)) if s >= 0 && (0..1_000_000_000).contains(&ns) => {
+                                    let dur = std::time::Duration::new(s as u64, ns as u32);
+                                    if op == futex_op::WAIT_BITSET && (raw_op & futex_op::CLOCK_REALTIME_FLAG) != 0 {
+                                        let now = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default();
+                                        Some(dur.saturating_sub(now))
+                                    } else {
+                                        Some(dur)
+                                    }
+                                }
+                                (Some(_), Some(_)) => {
+                                    cpu.set_reg(Reg::R0, (-22i32) as u32); // -EINVAL
+                                    return Ok(None);
+                                }
+                                _ => {
+                                    cpu.set_reg(Reg::R0, (-14i32) as u32); // -EFAULT
+                                    return Ok(None);
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        match self.futex.wait(mem, uaddr, val, timeout) {
                             Ok(()) => cpu.set_reg(Reg::R0, 0),
                             Err(FutexError::WouldBlock) => cpu.set_reg(Reg::R0, (-11i32) as u32),
                             Err(FutexError::TimedOut) => cpu.set_reg(Reg::R0, (-110i32) as u32),
                             Err(_) => cpu.set_reg(Reg::R0, (-14i32) as u32),
                         }
                     }
-                    futex_op::WAKE => {
+                    futex_op::WAKE | futex_op::WAKE_BITSET => {
                         let woken = self.futex.wake(uaddr, val);
                         cpu.set_reg(Reg::R0, woken);
                     }
-                    futex_op::REQUEUE => {
+                    futex_op::REQUEUE | futex_op::CMP_REQUEUE => {
                         let uaddr2 = GuestAddr::new(args.arg4);
                         let requeue_count = args.arg3;
                         let woken = self.futex.requeue(uaddr, val, requeue_count, uaddr2);
@@ -410,6 +575,10 @@ impl SyscallHandler for DefaultSyscallHandler {
                 let aligned_len = (len + 0xFFF) & !0xFFF;
                 let map_addr = if req_addr != 0 {
                     GuestAddr::new(req_addr)
+                } else if let Some(cursor) = &self.shared_mmap {
+                    let prev = cursor.fetch_add(aligned_len as u32, Ordering::SeqCst);
+                    self.mmap_current = GuestAddr::new(prev.wrapping_add(aligned_len as u32));
+                    GuestAddr::new(prev)
                 } else {
                     let addr = self.mmap_current;
                     self.mmap_current = self.mmap_current.add(aligned_len as u32);
@@ -606,6 +775,9 @@ impl SyscallHandler for DefaultSyscallHandler {
 
     fn set_mmap_base(&mut self, base: GuestAddr) {
         self.mmap_current = base;
+        if let Some(cursor) = &self.shared_mmap {
+            cursor.store(base.as_u32(), Ordering::SeqCst);
+        }
     }
 
     fn signal_state(&self) -> Option<&crate::signals::SignalState> {
@@ -615,6 +787,39 @@ impl SyscallHandler for DefaultSyscallHandler {
     fn signal_state_mut(&mut self) -> Option<&mut crate::signals::SignalState> {
         Some(&mut self.signal_state)
     }
+
+    fn futex_manager(&self) -> Option<FutexManager> {
+        Some(self.futex.clone())
+    }
+
+    fn set_futex_manager(&mut self, futex: FutexManager) {
+        self.futex = futex;
+    }
+
+    fn next_tid_counter(&self) -> Option<Arc<AtomicU32>> {
+        Some(Arc::clone(&self.next_tid))
+    }
+
+    fn shared_mmap_cursor(&self) -> Option<Arc<AtomicU32>> {
+        self.shared_mmap.clone()
+    }
+
+    fn enable_shared_mmap(&mut self) -> Option<Arc<AtomicU32>> {
+        if let Some(cursor) = &self.shared_mmap {
+            return Some(Arc::clone(cursor));
+        }
+        let cursor = Arc::new(AtomicU32::new(self.mmap_current.as_u32()));
+        self.shared_mmap = Some(Arc::clone(&cursor));
+        Some(cursor)
+    }
+
+    fn take_pending_clone(&mut self) -> Option<PendingClone> {
+        self.pending_clone.take()
+    }
+
+    fn has_pending_clone(&self) -> bool {
+        self.pending_clone.is_some()
+    }
 }
 
 pub struct DbtEngine<M: Memory> {
@@ -622,6 +827,8 @@ pub struct DbtEngine<M: Memory> {
     pub mem: M,
     pub cache: JitCache,
     pub pool: JitPool,
+    pub shared_jit: Option<Arc<SharedJit>>,
+    local_hot_counts: std::collections::HashMap<GuestAddr, u32>,
     pub syscall_handler: Box<dyn SyscallHandler>,
     pub total_insts_executed: u64,
     pub telemetry: crate::telemetry::TelemetryManager,
@@ -638,6 +845,8 @@ impl<M: Memory> DbtEngine<M> {
             mem,
             cache: JitCache::new(),
             pool: JitPool::new(),
+            shared_jit: None,
+            local_hot_counts: std::collections::HashMap::new(),
             syscall_handler: Box::new(DefaultSyscallHandler::default()),
             total_insts_executed: 0,
             telemetry: crate::telemetry::TelemetryManager::new(),
@@ -646,6 +855,120 @@ impl<M: Memory> DbtEngine<M> {
             last_direct_exit: None,
             last_svc_imm: None,
         }
+    }
+
+    /// Promotes the engine's private JIT cache and code pool into a thread-safe shared instance.
+    pub fn enable_shared_jit(&mut self) -> Arc<SharedJit> {
+        if let Some(sj) = &self.shared_jit {
+            return Arc::clone(sj);
+        }
+        let cache = std::mem::take(&mut self.cache);
+        let mut pool = std::mem::take(&mut self.pool);
+        let _ = pool.flush_current();
+        let sj = Arc::new(SharedJit::new(cache, pool));
+        self.shared_jit = Some(Arc::clone(&sj));
+        sj
+    }
+
+    /// Attaches an existing `SharedJit` instance to this engine (for worker threads).
+    pub fn set_shared_jit(&mut self, jit: Arc<SharedJit>) {
+        self.shared_jit = Some(jit);
+    }
+
+    /// Returns the number of cached basic blocks (private or shared).
+    pub fn cache_count(&self) -> usize {
+        if let Some(sj) = &self.shared_jit {
+            sj.cache.read().unwrap().count()
+        } else {
+            self.cache.count()
+        }
+    }
+
+    pub fn futex_manager(&self) -> Option<FutexManager> {
+        self.syscall_handler.futex_manager()
+    }
+
+    pub fn set_futex_manager(&mut self, futex: FutexManager) {
+        self.syscall_handler.set_futex_manager(futex);
+    }
+
+    pub fn take_pending_clone(&mut self) -> Option<PendingClone> {
+        self.syscall_handler.take_pending_clone()
+    }
+
+    pub fn has_pending_clone(&self) -> bool {
+        self.syscall_handler.has_pending_clone()
+    }
+
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+    fn with_cache_read<R>(&self, f: impl FnOnce(&JitCache) -> R) -> R {
+        if let Some(sj) = &self.shared_jit {
+            let cache = sj.cache.read().unwrap();
+            f(&cache)
+        } else {
+            f(&self.cache)
+        }
+    }
+
+    fn with_cache_mut<R>(&mut self, f: impl FnOnce(&mut JitCache) -> R) -> R {
+        if let Some(sj) = self.shared_jit.clone() {
+            let mut cache = sj.cache.write().unwrap();
+            f(&mut cache)
+        } else {
+            f(&mut self.cache)
+        }
+    }
+
+    fn chain_blocks_unlocked(
+        cache: &mut JitCache,
+        pool: &mut JitPool,
+        telemetry: &mut crate::telemetry::TelemetryManager,
+        src_addr: GuestAddr,
+        dst_addr: GuestAddr,
+    ) -> bool {
+        if let (Some(src_ptr), Some(dst_ptr)) = (cache.peek_ptr(src_addr), cache.peek_ptr(dst_addr)) {
+            if let Some(src_block) = cache.peek(src_addr) {
+                let mut patched = false;
+                for site in &src_block.patch_sites {
+                    let target = match site.target {
+                        PatchTarget::Direct(t) => t,
+                        PatchTarget::BranchTaken { target, .. } => target,
+                        PatchTarget::BranchFallthrough(t) => t,
+                    };
+                    if target == dst_addr {
+                        let src_code = src_ptr.0 as usize + site.byte_offset;
+                        let dst_code = dst_ptr.0 as usize + walzer32_emitter_a64::PROLOGUE_BYTE_SIZE;
+                        if let Some(offset_words) = Self::branch_offset_words_in_range(&site.target, src_code, dst_code) {
+                            let success = unsafe {
+                                pool.patch_code(src_ptr.0, site.byte_offset, |slice| {
+                                    match site.target {
+                                        PatchTarget::Direct(_) | PatchTarget::BranchFallthrough(_) => {
+                                            A64Compiler::patch_direct_branch(slice, 0, offset_words);
+                                        }
+                                        PatchTarget::BranchTaken { cond, .. } => {
+                                            A64Compiler::patch_cond_branch(slice, 0, cond, offset_words);
+                                        }
+                                    }
+                                })
+                            };
+                            if success {
+                                telemetry.record_chained_jump();
+                                patched = true;
+                            }
+                        }
+                    }
+                }
+                if patched {
+                    cache.incoming_edges.entry(dst_addr).or_default().insert(src_addr);
+                    let out = cache.outgoing_edges.entry(src_addr).or_default();
+                    if !out.contains(&dst_addr) {
+                        out.push(dst_addr);
+                    }
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn handle_svc_exit(&mut self, imm: u32) -> Result<EngineStepResult, EngineError> {
@@ -657,7 +980,9 @@ impl<M: Memory> DbtEngine<M> {
         if args.nr == nr::ARM_CACHE_FLUSH {
             let start = GuestAddr::new(args.arg0);
             let len = (args.arg1.saturating_sub(args.arg0)) as usize;
-            self.cache.invalidate_range(start, len);
+            self.with_cache_mut(|cache| {
+                cache.invalidate_range(start, len);
+            });
         }
         if let Some(exit_code) = self
             .syscall_handler
@@ -749,8 +1074,14 @@ impl<M: Memory> DbtEngine<M> {
     /// Returns true if the fault was an SMC trap successfully handled; false otherwise.
     pub fn handle_write_fault(&mut self, fault_addr: GuestAddr) -> bool {
         let pfn = fault_addr.as_u32() >> 12;
-        if self.cache.is_code_page(pfn) {
-            let invalidated = self.cache.invalidate_page(pfn);
+        let invalidated = self.with_cache_mut(|cache| {
+            if cache.is_code_page(pfn) {
+                Some(cache.invalidate_page(pfn))
+            } else {
+                None
+            }
+        });
+        if let Some(count) = invalidated {
             let page_start = GuestAddr::new(pfn << 12);
             let _ = self.mem.mprotect(
                 page_start,
@@ -758,7 +1089,7 @@ impl<M: Memory> DbtEngine<M> {
                 walzer32_core::PROT_READ | walzer32_core::PROT_WRITE | walzer32_core::PROT_EXEC,
             );
             self.telemetry.record_smc_trap();
-            return invalidated > 0;
+            return count > 0;
         }
         false
     }
@@ -785,21 +1116,41 @@ impl<M: Memory> DbtEngine<M> {
     /// Polls and promotes any completed background JIT superblocks into executable pool and cache.
     /// Returns the number of superblocks promoted.
     pub fn poll_background_jit(&mut self) -> usize {
-        if let Some(jit) = &mut self.async_jit {
-            let results = jit.drain_results();
+        let results = match &mut self.async_jit {
+            Some(jit) => jit.drain_results(),
+            None => return 0,
+        };
+        if results.is_empty() {
+            return 0;
+        }
+        let telemetry = &mut self.telemetry;
+        if let Some(sj) = self.shared_jit.clone() {
+            let mut cache = sj.cache.write().unwrap();
+            let mut pool = sj.pool.lock().unwrap();
             let mut count = 0;
             for res in results {
-                if self.cache.lookup(res.entry).is_some() && !self.cache.has_superblock(res.entry) {
-                    if let Ok(committed) = self.pool.commit_block(&res.compiled.code_bytes) {
-                        self.cache.insert_superblock(res.entry, res.compiled, committed.code_ptr);
-                        self.telemetry.record_tier2_compilation();
+                if cache.peek(res.entry).is_some() && !cache.has_superblock(res.entry) {
+                    if let Ok(committed) = pool.commit_block(&res.compiled.code_bytes) {
+                        let _ = pool.flush_current();
+                        cache.insert_superblock(res.entry, res.compiled, committed.code_ptr);
+                        telemetry.record_tier2_compilation();
                         count += 1;
                     }
                 }
             }
             count
         } else {
-            0
+            let mut count = 0;
+            for res in results {
+                if self.cache.lookup(res.entry).is_some() && !self.cache.has_superblock(res.entry) {
+                    if let Ok(committed) = self.pool.commit_block(&res.compiled.code_bytes) {
+                        self.cache.insert_superblock(res.entry, res.compiled, committed.code_ptr);
+                        telemetry.record_tier2_compilation();
+                        count += 1;
+                    }
+                }
+            }
+            count
         }
     }
 
@@ -916,7 +1267,14 @@ impl<M: Memory> DbtEngine<M> {
         self.poll_background_jit();
 
         // 1. JIT Compilation Check (lift, compile, and commit basic block)
-        if self.cache.lookup(pc).is_none() {
+        let (is_cached, mut has_superblock) = if let Some(sj) = &self.shared_jit {
+            let cache = sj.cache.read().unwrap();
+            (cache.peek(pc).is_some(), cache.has_superblock(pc))
+        } else {
+            (self.cache.lookup(pc).is_some(), self.cache.has_superblock(pc))
+        };
+
+        if !is_cached {
             self.telemetry.record_cache_miss();
             let start_t = std::time::Instant::now();
             if let Ok(block) = Lifter::lift_block(&self.mem, pc, is_thumb) {
@@ -925,44 +1283,47 @@ impl<M: Memory> DbtEngine<M> {
                     let compile_us = start_t.elapsed().as_micros() as u64;
                     self.telemetry.record_compilation(compile_us.max(1));
                     let guest_size = compiled.guest_byte_size;
-                    if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
-                        self.cache.insert_committed(pc, compiled, committed.code_ptr);
-
-                        // Auto-chain Phase 2:
-                        // 1. Any existing blocks waiting to jump to this newly compiled block
-                        let mut prev_chained = false;
-                        if let Some(callers) = self.cache.incoming_edges.get(&pc).cloned() {
-                            for src in callers {
-                                if self.chain_blocks(src, pc) && self.last_direct_exit == Some((src, pc)) {
-                                    prev_chained = true;
-                                }
-                            }
-                        }
-                        if let Some((src, dst)) = self.last_direct_exit.take() {
-                            if dst == pc {
-                                if !prev_chained {
-                                    self.chain_blocks(src, dst);
-                                }
-                            } else {
-                                self.last_direct_exit = Some((src, dst));
-                            }
-                        }
-                        // 2. Any blocks that this block jumps to that are already compiled
-                        if let Some(targets) = self.cache.outgoing_edges.get(&pc).cloned() {
-                            for dst in targets {
-                                self.chain_blocks(pc, dst);
-                            }
-                        }
+                    let last_exit = self.last_direct_exit.take();
+                    let telemetry = &mut self.telemetry;
+                    let shared_mode = self.shared_jit.is_some();
+                    let new_last_exit = if let Some(sj) = self.shared_jit.clone() {
+                        let mut cache = sj.cache.write().unwrap();
+                        let mut pool = sj.pool.lock().unwrap();
+                        Self::commit_and_chain_block(
+                            &mut cache,
+                            &mut pool,
+                            telemetry,
+                            pc,
+                            compiled,
+                            shared_mode,
+                            last_exit,
+                        )
                     } else {
-                        self.cache.insert(pc, compiled);
-                    }
+                        Self::commit_and_chain_block(
+                            &mut self.cache,
+                            &mut self.pool,
+                            telemetry,
+                            pc,
+                            compiled,
+                            shared_mode,
+                            last_exit,
+                        )
+                    };
+                    self.last_direct_exit = new_last_exit;
                     self.protect_code_pages_for(pc, guest_size);
                 }
             }
         } else {
             self.telemetry.record_cache_hit();
             // 1b. Tier-2 JIT Superblock Promotion for hot loops and traces
-            if self.cache.record_exec(pc) && !self.cache.has_superblock(pc) {
+            let became_hot = if self.shared_jit.is_some() {
+                let c = self.local_hot_counts.entry(pc).or_insert(0);
+                *c = c.saturating_add(1);
+                *c == JitCache::HOT_THRESHOLD
+            } else {
+                self.cache.record_exec(pc)
+            };
+            if became_hot && !has_superblock {
                 if let Some(jit) = &self.async_jit {
                     // Offload trace building and optimization to background thread pool
                     if let Some(code) = crate::async_jit::CodeSnapshot::capture(&self.mem, pc, jit.config().code_window_size) {
@@ -976,25 +1337,48 @@ impl<M: Memory> DbtEngine<M> {
                             if !sb.insts.is_empty() {
                                 let compiled = A64Compiler::compile_superblock(&sb);
                                 self.telemetry.record_tier2_compilation();
-                                if let Ok(committed) = self.pool.commit_block(&compiled.code_bytes) {
-                                    self.cache.insert_superblock(pc, compiled, committed.code_ptr);
-                                    if let Some(callers) = self.cache.incoming_edges.get(&pc).cloned() {
-                                        for src in callers {
-                                            self.chain_blocks(src, pc);
+                                let telemetry = &mut self.telemetry;
+                                let shared_mode = self.shared_jit.is_some();
+                                let insert_superblock_fn = |cache: &mut JitCache, pool: &mut JitPool| {
+                                    if !cache.has_superblock(pc) {
+                                        if let Ok(committed) = pool.commit_block(&compiled.code_bytes) {
+                                            if shared_mode {
+                                                let _ = pool.flush_current();
+                                            }
+                                            cache.insert_superblock(pc, compiled, committed.code_ptr);
+                                            if let Some(callers) = cache.incoming_edges.get(&pc).cloned() {
+                                                for src in callers {
+                                                    Self::chain_blocks_unlocked(cache, pool, telemetry, src, pc);
+                                                }
+                                            }
                                         }
                                     }
+                                };
+                                if let Some(sj) = self.shared_jit.clone() {
+                                    let mut cache = sj.cache.write().unwrap();
+                                    let mut pool = sj.pool.lock().unwrap();
+                                    insert_superblock_fn(&mut cache, &mut pool);
+                                } else {
+                                    insert_superblock_fn(&mut self.cache, &mut self.pool);
                                 }
+                                has_superblock = true;
                             }
                         }
                     }
                 }
             }
         }
+        let _ = has_superblock;
 
         // 2. Direct AArch64 execution dispatch if running on ARM64 silicon
         #[cfg(target_arch = "aarch64")]
         {
-            if let Some(host_ptr) = self.cache.lookup_ptr(pc) {
+            let host_dispatch = self.with_cache_read(|cache| {
+                cache
+                    .peek_ptr(pc)
+                    .map(|ptr| (ptr, cache.peek(pc).map(|b| b.inst_count as u64).unwrap_or(1)))
+            });
+            if let Some((host_ptr, inst_count)) = host_dispatch {
                 // Hardware FPCR sync (FZ: Flush-to-Zero, DN: Default NaN, RMode: Rounding Mode)
                 unsafe {
                     let mut fpcr: u64;
@@ -1004,7 +1388,13 @@ impl<M: Memory> DbtEngine<M> {
                         std::arch::asm!("msr fpcr, {0}", in(reg) desired, options(nostack, preserves_flags));
                     }
                 }
-                let _ = self.pool.flush_current();
+                if let Some(sj) = &self.shared_jit {
+                    if let Ok(mut pool) = sj.pool.lock() {
+                        let _ = pool.flush_current();
+                    }
+                } else {
+                    let _ = self.pool.flush_current();
+                }
                 type JitFn = unsafe extern "C" fn(cpu: *mut CpuState, mem_base: *mut u8) -> u64;
                 let jit_fn: JitFn = unsafe { std::mem::transmute(host_ptr.0) };
                 let mem_base = self.mem.as_mut_ptr();
@@ -1035,7 +1425,6 @@ impl<M: Memory> DbtEngine<M> {
                     walzer32_emitter_a64::EXIT_REASON_DIRECT => {
                         let next_pc = GuestAddr::new(exit_payload);
                         self.cpu.set_pc(next_pc);
-                        let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
                         self.total_insts_executed += inst_count;
                         if !self.chain_blocks(pc, next_pc) {
                             self.last_direct_exit = Some((pc, next_pc));
@@ -1047,19 +1436,16 @@ impl<M: Memory> DbtEngine<M> {
                     walzer32_emitter_a64::EXIT_REASON_INDIRECT => {
                         self.last_direct_exit = None;
                         self.cpu.set_pc(GuestAddr::new(exit_payload));
-                        let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
                         self.total_insts_executed += inst_count;
                         return Ok(EngineStepResult::Continue);
                     }
                     walzer32_emitter_a64::EXIT_REASON_SVC => {
                         self.last_direct_exit = None;
-                        let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
                         self.total_insts_executed += inst_count;
                         return self.handle_svc_exit(exit_payload);
                     }
                     walzer32_emitter_a64::EXIT_REASON_BKPT => {
                         self.last_direct_exit = None;
-                        let inst_count = self.cache.lookup(pc).map(|b| b.inst_count as u64).unwrap_or(1);
                         self.total_insts_executed += inst_count;
                         return Ok(EngineStepResult::Breakpoint { imm: exit_payload as u16 });
                     }
@@ -1093,10 +1479,58 @@ impl<M: Memory> DbtEngine<M> {
         }
     }
 
+    fn commit_and_chain_block(
+        cache: &mut JitCache,
+        pool: &mut JitPool,
+        telemetry: &mut crate::telemetry::TelemetryManager,
+        pc: GuestAddr,
+        compiled: walzer32_emitter_a64::CompiledBlock,
+        shared_mode: bool,
+        mut last_direct_exit: Option<(GuestAddr, GuestAddr)>,
+    ) -> Option<(GuestAddr, GuestAddr)> {
+        if cache.peek(pc).is_some() {
+            return last_direct_exit;
+        }
+        if let Ok(committed) = pool.commit_block(&compiled.code_bytes) {
+            if shared_mode {
+                let _ = pool.flush_current();
+            }
+            cache.insert_committed(pc, compiled, committed.code_ptr);
+
+            let mut prev_chained = false;
+            if let Some(callers) = cache.incoming_edges.get(&pc).cloned() {
+                for src in callers {
+                    if Self::chain_blocks_unlocked(cache, pool, telemetry, src, pc)
+                        && last_direct_exit == Some((src, pc))
+                    {
+                        prev_chained = true;
+                    }
+                }
+            }
+            if let Some((src, dst)) = last_direct_exit.take() {
+                if dst == pc {
+                    if !prev_chained {
+                        Self::chain_blocks_unlocked(cache, pool, telemetry, src, dst);
+                    }
+                } else {
+                    last_direct_exit = Some((src, dst));
+                }
+            }
+            if let Some(targets) = cache.outgoing_edges.get(&pc).cloned() {
+                for dst in targets {
+                    Self::chain_blocks_unlocked(cache, pool, telemetry, pc, dst);
+                }
+            }
+        } else {
+            cache.insert(pc, compiled);
+        }
+        last_direct_exit
+    }
+
     /// Invalidates all JIT compiled blocks overlapping the given guest virtual address range
     pub fn invalidate_range(&mut self, start: GuestAddr, len: usize) -> usize {
         self.last_direct_exit = None;
-        self.cache.invalidate_range(start, len)
+        self.with_cache_mut(|cache| cache.invalidate_range(start, len))
     }
 
     /// Flushes and resets the entire JIT code cache
@@ -1105,20 +1539,20 @@ impl<M: Memory> DbtEngine<M> {
         if let Some(jit) = &self.async_jit {
             jit.clear();
         }
-        self.cache.clear();
+        self.with_cache_mut(|cache| cache.clear());
     }
 
     /// Writes u32 to guest memory with automatic Self-Modifying Code (SMC) cache invalidation
     pub fn write_guest_u32(&mut self, addr: GuestAddr, val: u32) -> Result<(), walzer32_core::MemoryError> {
         match self.mem.write_u32(addr, val) {
             Ok(()) => {
-                self.cache.invalidate_range(addr, 4);
+                self.invalidate_range(addr, 4);
                 Ok(())
             }
             Err(MemoryError::PermissionDenied { addr: fault_addr, write: true }) => {
                 if self.handle_write_fault(fault_addr) {
                     self.mem.write_u32(addr, val)?;
-                    self.cache.invalidate_range(addr, 4);
+                    self.invalidate_range(addr, 4);
                     Ok(())
                 } else {
                     Err(MemoryError::PermissionDenied { addr: fault_addr, write: true })
@@ -1132,13 +1566,13 @@ impl<M: Memory> DbtEngine<M> {
     pub fn write_guest_bytes(&mut self, addr: GuestAddr, buf: &[u8]) -> Result<(), walzer32_core::MemoryError> {
         match self.mem.write_bytes(addr, buf) {
             Ok(()) => {
-                self.cache.invalidate_range(addr, buf.len());
+                self.invalidate_range(addr, buf.len());
                 Ok(())
             }
             Err(MemoryError::PermissionDenied { addr: fault_addr, write: true }) => {
                 if self.handle_write_fault(fault_addr) {
                     self.mem.write_bytes(addr, buf)?;
-                    self.cache.invalidate_range(addr, buf.len());
+                    self.invalidate_range(addr, buf.len());
                     Ok(())
                 } else {
                     Err(MemoryError::PermissionDenied { addr: fault_addr, write: true })
@@ -1167,49 +1601,14 @@ impl<M: Memory> DbtEngine<M> {
 
     /// Links and chains direct branches between two compiled blocks in executable memory
     pub fn chain_blocks(&mut self, src_addr: GuestAddr, dst_addr: GuestAddr) -> bool {
-        if let (Some(src_ptr), Some(dst_ptr)) = (self.cache.lookup_ptr(src_addr), self.cache.lookup_ptr(dst_addr)) {
-            if let Some(src_block) = self.cache.lookup(src_addr) {
-                let mut patched = false;
-                for site in &src_block.patch_sites {
-                    let target = match site.target {
-                        PatchTarget::Direct(t) => t,
-                        PatchTarget::BranchTaken { target, .. } => target,
-                        PatchTarget::BranchFallthrough(t) => t,
-                    };
-                    if target == dst_addr {
-                        let src_code = src_ptr.0 as usize + site.byte_offset;
-                        let dst_code = dst_ptr.0 as usize + walzer32_emitter_a64::PROLOGUE_BYTE_SIZE;
-                        if let Some(offset_words) = Self::branch_offset_words_in_range(&site.target, src_code, dst_code) {
-                            let success = unsafe {
-                                self.pool.patch_code(src_ptr.0, site.byte_offset, |slice| {
-                                    match site.target {
-                                        PatchTarget::Direct(_) | PatchTarget::BranchFallthrough(_) => {
-                                            A64Compiler::patch_direct_branch(slice, 0, offset_words);
-                                        }
-                                        PatchTarget::BranchTaken { cond, .. } => {
-                                            A64Compiler::patch_cond_branch(slice, 0, cond, offset_words);
-                                        }
-                                    }
-                                })
-                            };
-                            if success {
-                                self.telemetry.record_chained_jump();
-                                patched = true;
-                            }
-                        }
-                    }
-                }
-                if patched {
-                    self.cache.incoming_edges.entry(dst_addr).or_default().insert(src_addr);
-                    let out = self.cache.outgoing_edges.entry(src_addr).or_default();
-                    if !out.contains(&dst_addr) {
-                        out.push(dst_addr);
-                    }
-                    return true;
-                }
-            }
+        let telemetry = &mut self.telemetry;
+        if let Some(sj) = self.shared_jit.clone() {
+            let mut cache = sj.cache.write().unwrap();
+            let mut pool = sj.pool.lock().unwrap();
+            Self::chain_blocks_unlocked(&mut cache, &mut pool, telemetry, src_addr, dst_addr)
+        } else {
+            Self::chain_blocks_unlocked(&mut self.cache, &mut self.pool, telemetry, src_addr, dst_addr)
         }
-        false
     }
 
     /// Runs until the guest application exits or max_steps is reached
@@ -1232,6 +1631,116 @@ impl<M: Memory> DbtEngine<M> {
 
         self.poll_background_jit();
         Err(EngineError::Trap("Max execution steps reached".into()))
+    }
+}
+
+impl<M: Memory + Clone> DbtEngine<M> {
+    /// Forks a worker `DbtEngine` for a guest thread spawned via `SYS_clone`.
+    /// Shares guest memory (`M`), JIT cache/pool (`SharedJit`), futex wait queues,
+    /// TID allocator, and mmap cursor with the parent thread.
+    pub fn fork_for_thread(&mut self, clone: &PendingClone) -> Self {
+        const CLONE_SETTLS: u32 = 0x0008_0000;
+        const CLONE_CHILD_CLEARTID: u32 = 0x0020_0000;
+        let shared_jit = self.enable_shared_jit();
+        let futex = self
+            .syscall_handler
+            .futex_manager()
+            .unwrap_or_else(FutexManager::new);
+        let next_tid = self
+            .syscall_handler
+            .next_tid_counter()
+            .unwrap_or_else(|| Arc::new(AtomicU32::new(clone.child_tid.saturating_add(1))));
+        let shared_mmap = self.syscall_handler.enable_shared_mmap();
+        let clear_child_tid = if (clone.flags & CLONE_CHILD_CLEARTID) != 0 && clone.child_tid_ptr != 0 {
+            Some(GuestAddr::new(clone.child_tid_ptr))
+        } else {
+            None
+        };
+
+        let mut child = Self {
+            cpu: self.cpu.clone(),
+            mem: self.mem.clone(),
+            cache: JitCache::new(),
+            pool: JitPool::new(),
+            shared_jit: Some(shared_jit),
+            local_hot_counts: std::collections::HashMap::new(),
+            syscall_handler: Box::new(DefaultSyscallHandler::for_child_thread(
+                futex,
+                clone.child_tid,
+                next_tid,
+                shared_mmap,
+                clear_child_tid,
+            )),
+            total_insts_executed: 0,
+            telemetry: crate::telemetry::TelemetryManager::new(),
+            async_jit: None,
+            smc_guard_pages: self.smc_guard_pages,
+            last_direct_exit: None,
+            last_svc_imm: None,
+        };
+        child.cpu.set_reg(Reg::R0, 0);
+        if clone.child_stack != 0 {
+            child.cpu.set_reg(Reg::SP, clone.child_stack);
+        }
+        child.cpu.cpsr = clone.child_cpsr;
+        child.cpu.set_pc(GuestAddr::new(clone.child_pc));
+        if (clone.flags & CLONE_SETTLS) != 0 {
+            child.cpu.tls_ptr = clone.tls_ptr;
+        }
+        child
+    }
+
+    /// Forks a worker `DbtEngine` starting at an explicit ARM/Thumb entry point (used by `pthread_create`).
+    pub fn fork_thread_at(
+        &mut self,
+        tid: u32,
+        entry_pc: u32,
+        stack_ptr: u32,
+        arg0: u32,
+        return_lr: u32,
+        tls_ptr: u32,
+    ) -> Self {
+        let shared_jit = self.enable_shared_jit();
+        let futex = self
+            .syscall_handler
+            .futex_manager()
+            .unwrap_or_else(FutexManager::new);
+        let next_tid = self
+            .syscall_handler
+            .next_tid_counter()
+            .unwrap_or_else(|| Arc::new(AtomicU32::new(tid.saturating_add(1))));
+        let shared_mmap = self.syscall_handler.enable_shared_mmap();
+
+        let mut cpu = CpuState::new();
+        cpu.fpscr = self.cpu.fpscr;
+        cpu.tls_ptr = tls_ptr;
+        cpu.set_reg(Reg::R0, arg0);
+        cpu.set_reg(Reg::SP, stack_ptr);
+        cpu.set_reg(Reg::LR, return_lr);
+        cpu.set_thumb((entry_pc & 1) != 0);
+        cpu.set_pc(GuestAddr::new(entry_pc & !1));
+
+        Self {
+            cpu,
+            mem: self.mem.clone(),
+            cache: JitCache::new(),
+            pool: JitPool::new(),
+            shared_jit: Some(shared_jit),
+            local_hot_counts: std::collections::HashMap::new(),
+            syscall_handler: Box::new(DefaultSyscallHandler::for_child_thread(
+                futex,
+                tid,
+                next_tid,
+                shared_mmap,
+                None,
+            )),
+            total_insts_executed: 0,
+            telemetry: crate::telemetry::TelemetryManager::new(),
+            async_jit: None,
+            smc_guard_pages: self.smc_guard_pages,
+            last_direct_exit: None,
+            last_svc_imm: None,
+        }
     }
 }
 
@@ -1396,5 +1905,64 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn test_clone_fork_and_futex_timeout_shared_jit() {
+        use walzer32_core::SharedMemory;
+
+        let mem = SharedMemory::new(GuestAddr::new(0x1000), 0x4000);
+        // Parent executes SYS_clone (120) then exits; child loops briefly and exits.
+        // 0x1000: MOV r7, #120 (0xE3A07078)
+        // 0x1004: SVC 0        (0xEF000000)
+        // 0x1008: CMP r0, #0   (0xE3500000)
+        // 0x100C: BNE 0x1018   (0x1A000001)
+        // Child path (r0 == 0):
+        // 0x1010: MOV r0, #77  (0xE3A0004D)
+        // 0x1014: MOV r7, #1   (0xE3A07001)
+        // 0x1018: SVC 0        (0xEF000000) -> parent lands here with r0 = child_tid!
+        // Wait: give child and parent distinct exits:
+        // 0x100C: BNE 0x1020   (0x1A000003)
+        // 0x1010: MOV r0, #77  (0xE3A0004D)
+        // 0x1014: MOV r7, #1   (0xE3A07001)
+        // 0x1018: SVC 0        (0xEF000000)
+        // 0x101C: NOP          (0xE1A00000)
+        // 0x1020: MOV r0, #11  (0xE3A0000B)
+        // 0x1024: MOV r7, #1   (0xE3A07001)
+        // 0x1028: SVC 0        (0xEF000000)
+        mem.clone().write_u32(GuestAddr::new(0x1000), 0xE3A0_7078).unwrap();
+        mem.clone().write_u32(GuestAddr::new(0x1004), 0xEF00_0000).unwrap();
+        mem.clone().write_u32(GuestAddr::new(0x1008), 0xE350_0000).unwrap();
+        mem.clone().write_u32(GuestAddr::new(0x100C), 0x1A00_0003).unwrap();
+        mem.clone().write_u32(GuestAddr::new(0x1010), 0xE3A0_004D).unwrap();
+        mem.clone().write_u32(GuestAddr::new(0x1014), 0xE3A0_7001).unwrap();
+        mem.clone().write_u32(GuestAddr::new(0x1018), 0xEF00_0000).unwrap();
+        mem.clone().write_u32(GuestAddr::new(0x1020), 0xE3A0_000B).unwrap();
+        mem.clone().write_u32(GuestAddr::new(0x1024), 0xE3A0_7001).unwrap();
+        mem.clone().write_u32(GuestAddr::new(0x1028), 0xEF00_0000).unwrap();
+
+        let mut parent = DbtEngine::new(mem);
+        parent.cpu.set_reg(Reg::R0, 0x0008_0000); // CLONE_SETTLS
+        parent.cpu.set_reg(Reg::R1, 0x3000);      // child_stack
+        parent.cpu.set_reg(Reg::R3, 0x3800);      // tls_ptr
+        parent.cpu.set_pc(GuestAddr::new(0x1000));
+
+        // Step until CLONE syscall produces PendingClone
+        let mut child_handle = None;
+        for _ in 0..10 {
+            if let EngineStepResult::Halted { exit_code } = parent.step().unwrap() {
+                assert_eq!(exit_code, 11);
+                break;
+            }
+            if let Some(pending) = parent.take_pending_clone() {
+                let mut child = parent.fork_for_thread(&pending);
+                assert_eq!(child.cpu.tls_ptr, 0x3800);
+                assert_eq!(child.cpu.reg(Reg::SP), 0x3000);
+                child_handle = Some(std::thread::spawn(move || child.run(100).unwrap()));
+            }
+        }
+        assert_eq!(child_handle.expect("child must spawn").join().unwrap(), 77);
+        assert!(parent.shared_jit.is_some());
+        assert!(parent.cache_count() > 0);
     }
 }

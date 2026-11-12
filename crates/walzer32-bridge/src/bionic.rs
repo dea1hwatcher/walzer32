@@ -3,10 +3,155 @@ unsafe extern "C" {
     fn __android_log_print(prio: std::os::raw::c_int, tag: *const std::os::raw::c_char, fmt: *const std::os::raw::c_char, ...) -> std::os::raw::c_int;
 }
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Condvar, Mutex};
 use walzer32_core::{GuestAddr, Memory, MemoryError, Reg};
 use walzer32_elf::{DsoRegistry, SymbolResolver};
+use walzer32_rt::FutexManager;
 use crate::bionic_regex::{count_capture_groups, fnmatch_internal, regex_match_internal, CompiledRegex};
 pub use walzer32_elf::{RTLD_DEFAULT, RTLD_NEXT};
+
+/// Spawn request recorded by `pthread_create` when multi-threaded runtime execution is enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingThreadSpawn {
+    pub tid: u32,
+    pub start_routine: GuestAddr,
+    pub arg: u32,
+    pub stack_top: GuestAddr,
+    pub tls_ptr: GuestAddr,
+}
+
+/// Blocking Bionic synchronization operation executed AFTER dropping bridge mutexes.
+#[derive(Debug, Clone)]
+pub enum BlockingBionicOp {
+    MutexLock {
+        mutex_ptr: GuestAddr,
+    },
+    CondWait {
+        cond_ptr: GuestAddr,
+        mutex_ptr: GuestAddr,
+        expected_seq: u32,
+        timeout: Option<std::time::Duration>,
+        is_timedwait: bool,
+    },
+    ThreadJoin {
+        tid: u32,
+        retval_ptr: GuestAddr,
+    },
+    ExitThread {
+        retval: u32,
+    },
+}
+
+/// Thread-safe join/exit coordinator shared across all guest worker threads.
+#[derive(Clone, Default)]
+pub struct ThreadExitCoordinator {
+    state: Arc<(Mutex<HashMap<u32, Option<u32>>>, Condvar)>,
+}
+
+impl ThreadExitCoordinator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&self, tid: u32) {
+        let (lock, _) = &*self.state;
+        let mut map = lock.lock().unwrap();
+        map.entry(tid).or_insert(None);
+    }
+
+    pub fn is_tracked(&self, tid: u32) -> bool {
+        let (lock, _) = &*self.state;
+        lock.lock().unwrap().contains_key(&tid)
+    }
+
+    pub fn try_get_finished(&self, tid: u32) -> Option<u32> {
+        let (lock, _) = &*self.state;
+        lock.lock().unwrap().get(&tid).copied().flatten()
+    }
+
+    pub fn mark_finished(&self, tid: u32, retval: u32) {
+        let (lock, cvar) = &*self.state;
+        let mut map = lock.lock().unwrap();
+        map.insert(tid, Some(retval));
+        cvar.notify_all();
+    }
+
+    pub fn wait_for(&self, tid: u32) -> Option<u32> {
+        let (lock, cvar) = &*self.state;
+        let mut map = lock.lock().unwrap();
+        loop {
+            match map.get(&tid).copied() {
+                None => return None,
+                Some(Some(retval)) => return Some(retval),
+                Some(None) => {
+                    map = cvar.wait(map).unwrap();
+                }
+            }
+        }
+    }
+}
+
+/// Performs an atomic 32-bit read-modify-write via compare-and-swap on guest memory.
+pub fn atomic_rmw_u32(
+    mem: &mut dyn Memory,
+    addr: GuestAddr,
+    mut op: impl FnMut(u32) -> u32,
+) -> Result<u32, MemoryError> {
+    loop {
+        let old = mem.read_u32(addr)?;
+        let next = op(old);
+        if mem.atomic_cmpxchg_u32(addr, old, next)? == old {
+            return Ok(old);
+        }
+    }
+}
+
+/// Acquires a Bionic 3-state futex mutex (`0=unlocked, 1=locked, 2=locked+waiters`) without holding bridge locks.
+pub fn futex_mutex_lock(
+    mem: &mut dyn Memory,
+    futex: &FutexManager,
+    mutex_ptr: GuestAddr,
+) -> Result<(), MemoryError> {
+    if mem.atomic_cmpxchg_u32(mutex_ptr, 0, 1)? == 0 {
+        return Ok(());
+    }
+    loop {
+        let prev = mem.atomic_cmpxchg_u32(mutex_ptr, 0, 2)?;
+        if prev == 0 {
+            return Ok(());
+        }
+        if prev != 2 {
+            let _ = mem.atomic_cmpxchg_u32(mutex_ptr, prev, 2)?;
+        }
+        let _ = futex.wait(mem, mutex_ptr, 2, None);
+    }
+}
+
+/// Releases a Bionic 3-state futex mutex and wakes one waiter if contended.
+pub fn futex_mutex_unlock(
+    mem: &mut dyn Memory,
+    futex: &FutexManager,
+    mutex_ptr: GuestAddr,
+) -> Result<(), MemoryError> {
+    let prev = mem.atomic_cmpxchg_u32(mutex_ptr, 1, 0)?;
+    if prev != 1 && prev != 0 {
+        let _ = atomic_rmw_u32(mem, mutex_ptr, |_| 0)?;
+        futex.wake(mutex_ptr, 1);
+    }
+    Ok(())
+}
+
+/// Advances condition variable sequence counter atomically and wakes `count` waiting threads.
+pub fn futex_cond_signal(
+    mem: &mut dyn Memory,
+    futex: &FutexManager,
+    cond_ptr: GuestAddr,
+    count: u32,
+) -> Result<(), MemoryError> {
+    let _ = atomic_rmw_u32(mem, cond_ptr, |seq| seq.wrapping_add(1))?;
+    futex.wake(cond_ptr, count);
+    Ok(())
+}
 
 pub const BIONIC_SVC_MAGIC: u32 = 0xB10000;
 
@@ -850,9 +995,11 @@ pub enum BionicFuncId {
     PthreadMutexDestroy = 26,
     PthreadOnce = 27,
     AeabiReadTp = 28,
+    PthreadExit = 29,
 
     // Memory protection
     Mprotect = 30,
+    PthreadMutexTrylock = 31,
 
     // libm math intrinsics (Single-precision f32)
     Sinf = 40,
@@ -930,7 +1077,9 @@ impl BionicFuncId {
             26 => Some(Self::PthreadMutexDestroy),
             27 => Some(Self::PthreadOnce),
             28 => Some(Self::AeabiReadTp),
+            29 => Some(Self::PthreadExit),
             30 => Some(Self::Mprotect),
+            31 => Some(Self::PthreadMutexTrylock),
             40 => Some(Self::Sinf),
             41 => Some(Self::Cosf),
             42 => Some(Self::Tanf),
@@ -1972,6 +2121,11 @@ pub struct BionicBridge {
     pub free_buckets: std::collections::BTreeMap<u32, Vec<u32>>,
     pub vfs: walzer32_rt::vfs::VirtualFileSystem,
     pub cwd: String,
+    pub futex: FutexManager,
+    pub runtime_mt_enabled: bool,
+    pub pending_spawns: Vec<PendingThreadSpawn>,
+    pub pending_blocking_op: Option<BlockingBionicOp>,
+    pub thread_coordinator: ThreadExitCoordinator,
 }
 
 impl BionicBridge {
@@ -2144,10 +2298,28 @@ impl BionicBridge {
             free_buckets: std::collections::BTreeMap::new(),
             vfs: walzer32_rt::vfs::VirtualFileSystem::new(),
             cwd: "/data/data/com.walzer32.app".to_string(),
+            futex: FutexManager::new(),
+            runtime_mt_enabled: false,
+            pending_spawns: Vec::new(),
+            pending_blocking_op: None,
+            thread_coordinator: ThreadExitCoordinator::new(),
         };
 
         bridge.register_known_symbols();
         bridge
+    }
+
+    pub fn enable_multithreading(&mut self, futex: FutexManager) {
+        self.futex = futex;
+        self.runtime_mt_enabled = true;
+    }
+
+    pub fn drain_pending_spawns(&mut self) -> Vec<PendingThreadSpawn> {
+        std::mem::take(&mut self.pending_spawns)
+    }
+
+    pub fn take_blocking_op(&mut self) -> Option<BlockingBionicOp> {
+        self.pending_blocking_op.take()
     }
 
     /// Allocates an aligned buffer from segregated free lists or guest heap/mmap arena
@@ -2244,8 +2416,10 @@ impl BionicBridge {
             ("pthread_create", BionicFuncId::PthreadCreate),
             ("pthread_join", BionicFuncId::PthreadJoin),
             ("pthread_self", BionicFuncId::PthreadSelf),
+            ("pthread_exit", BionicFuncId::PthreadExit),
             ("pthread_mutex_init", BionicFuncId::PthreadMutexInit),
             ("pthread_mutex_lock", BionicFuncId::PthreadMutexLock),
+            ("pthread_mutex_trylock", BionicFuncId::PthreadMutexTrylock),
             ("pthread_mutex_unlock", BionicFuncId::PthreadMutexUnlock),
             ("pthread_mutex_destroy", BionicFuncId::PthreadMutexDestroy),
             ("pthread_once", BionicFuncId::PthreadOnce),
@@ -3039,8 +3213,10 @@ impl BionicBridge {
             BionicFuncId::PthreadCreate,
             BionicFuncId::PthreadJoin,
             BionicFuncId::PthreadSelf,
+            BionicFuncId::PthreadExit,
             BionicFuncId::PthreadMutexInit,
             BionicFuncId::PthreadMutexLock,
+            BionicFuncId::PthreadMutexTrylock,
             BionicFuncId::PthreadMutexUnlock,
             BionicFuncId::PthreadMutexDestroy,
             BionicFuncId::PthreadOnce,
@@ -4046,6 +4222,7 @@ impl BionicBridge {
                 let stack_base = if self.heap_current.add(stack_size) <= self.heap_limit {
                     let p = self.heap_current;
                     self.heap_current = self.heap_current.add(stack_size);
+                    let _ = mem.commit_range(p, stack_size as usize);
                     p
                 } else {
                     let p = self.mmap_current;
@@ -4059,6 +4236,7 @@ impl BionicBridge {
                 let tls_ptr = if self.heap_current.add(1024) <= self.heap_limit {
                     let p = self.heap_current;
                     self.heap_current = self.heap_current.add(1024);
+                    let _ = mem.commit_range(p, 1024);
                     p
                 } else {
                     let p = self.mmap_current;
@@ -4082,13 +4260,39 @@ impl BionicBridge {
                     mem.write_u32(thread_ptr, tid)?;
                 }
 
+                if self.runtime_mt_enabled {
+                    self.thread_coordinator.register(tid);
+                    self.pending_spawns.push(PendingThreadSpawn {
+                        tid,
+                        start_routine,
+                        arg,
+                        stack_top,
+                        tls_ptr,
+                    });
+                }
+
                 cpu.set_reg(Reg::R0, 0); // 0 = Success
             }
             BionicFuncId::PthreadJoin => {
                 let tid = cpu.reg(Reg::R0);
                 let retval_ptr = GuestAddr::new(cpu.reg(Reg::R1));
 
-                if let Some(desc) = self.threads.get_mut(&tid) {
+                if self.runtime_mt_enabled && self.thread_coordinator.is_tracked(tid) {
+                    if let Some(retval) = self.thread_coordinator.try_get_finished(tid) {
+                        if let Some(desc) = self.threads.get_mut(&tid) {
+                            desc.joined = true;
+                            desc.retval = Some(retval);
+                        }
+                        if retval_ptr.as_u32() != 0 {
+                            mem.write_u32(retval_ptr, retval)?;
+                        }
+                        self.pthread_specific.retain(|&(t, _), _| t != tid);
+                        cpu.set_reg(Reg::R0, 0);
+                    } else {
+                        self.pending_blocking_op = Some(BlockingBionicOp::ThreadJoin { tid, retval_ptr });
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                } else if let Some(desc) = self.threads.get_mut(&tid) {
                     desc.joined = true;
                     if retval_ptr.as_u32() != 0 {
                         mem.write_u32(retval_ptr, desc.retval.unwrap_or(0))?;
@@ -4102,6 +4306,10 @@ impl BionicBridge {
             BionicFuncId::PthreadSelf => {
                 cpu.set_reg(Reg::R0, self.current_thread_id);
             }
+            BionicFuncId::PthreadExit => {
+                let retval = cpu.reg(Reg::R0);
+                self.pending_blocking_op = Some(BlockingBionicOp::ExitThread { retval });
+            }
             BionicFuncId::PthreadMutexInit => {
                 let mutex_ptr = GuestAddr::new(cpu.reg(Reg::R0));
                 if mutex_ptr.as_u32() != 0 {
@@ -4112,14 +4320,32 @@ impl BionicBridge {
             BionicFuncId::PthreadMutexLock => {
                 let mutex_ptr = GuestAddr::new(cpu.reg(Reg::R0));
                 if mutex_ptr.as_u32() != 0 {
-                    mem.write_u32(mutex_ptr, 1)?; // 1 = Locked
+                    if self.runtime_mt_enabled {
+                        if mem.atomic_cmpxchg_u32(mutex_ptr, 0, 1)? != 0 {
+                            self.pending_blocking_op = Some(BlockingBionicOp::MutexLock { mutex_ptr });
+                        }
+                    } else {
+                        mem.write_u32(mutex_ptr, 1)?; // 1 = Locked
+                    }
                 }
                 cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadMutexTrylock => {
+                let mutex_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if mutex_ptr.as_u32() != 0 {
+                    if mem.atomic_cmpxchg_u32(mutex_ptr, 0, 1)? == 0 {
+                        cpu.set_reg(Reg::R0, 0);
+                    } else {
+                        cpu.set_reg(Reg::R0, 16); // EBUSY
+                    }
+                } else {
+                    cpu.set_reg(Reg::R0, 22); // EINVAL
+                }
             }
             BionicFuncId::PthreadMutexUnlock => {
                 let mutex_ptr = GuestAddr::new(cpu.reg(Reg::R0));
                 if mutex_ptr.as_u32() != 0 {
-                    mem.write_u32(mutex_ptr, 0)?; // 0 = Unlocked
+                    futex_mutex_unlock(mem, &self.futex, mutex_ptr)?;
                 }
                 cpu.set_reg(Reg::R0, 0);
             }
@@ -10049,9 +10275,58 @@ impl BionicBridge {
                 cpu.set_reg(Reg::R0, 0);
             }
             BionicFuncId::PthreadCondWait | BionicFuncId::PthreadCondTimedwait => {
+                if self.runtime_mt_enabled {
+                    let cond_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                    let mutex_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                    let is_timedwait = matches!(func_id, BionicFuncId::PthreadCondTimedwait);
+                    let timeout = if is_timedwait {
+                        let ts_addr = GuestAddr::new(cpu.reg(Reg::R2));
+                        if ts_addr.as_u32() != 0 {
+                            let tv_sec = mem.read_u32(ts_addr)? as i32;
+                            let tv_nsec = mem.read_u32(ts_addr.add(4))? as i32;
+                            if tv_sec >= 0 && (0..1_000_000_000).contains(&tv_nsec) {
+                                let abs = std::time::Duration::new(tv_sec as u64, tv_nsec as u32);
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default();
+                                Some(abs.saturating_sub(now))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    let expected_seq = if cond_ptr.as_u32() != 0 {
+                        mem.read_u32(cond_ptr)?
+                    } else {
+                        0
+                    };
+                    self.pending_blocking_op = Some(BlockingBionicOp::CondWait {
+                        cond_ptr,
+                        mutex_ptr,
+                        expected_seq,
+                        timeout,
+                        is_timedwait,
+                    });
+                }
                 cpu.set_reg(Reg::R0, 0);
             }
-            BionicFuncId::PthreadCondSignal | BionicFuncId::PthreadCondBroadcast | BionicFuncId::PthreadCondDestroy => {
+            BionicFuncId::PthreadCondSignal | BionicFuncId::PthreadCondBroadcast => {
+                let cond_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                if cond_ptr.as_u32() != 0 {
+                    let count = if matches!(func_id, BionicFuncId::PthreadCondSignal) {
+                        1
+                    } else {
+                        i32::MAX as u32
+                    };
+                    futex_cond_signal(mem, &self.futex, cond_ptr, count)?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::PthreadCondDestroy => {
                 cpu.set_reg(Reg::R0, 0);
             }
             BionicFuncId::PthreadRwlockInit => {
@@ -10337,24 +10612,21 @@ impl BionicBridge {
             }
 
             // --- Atomic Builtins ---
-            BionicFuncId::AtomicFetchAdd4 => {
-                // __atomic_fetch_add_4(ptr, val, memorder) -> old_val
+            BionicFuncId::AtomicFetchAdd4 | BionicFuncId::SyncFetchAndAdd4 => {
                 let ptr = GuestAddr::new(cpu.reg(Reg::R0));
                 let val = cpu.reg(Reg::R1);
                 if ptr.as_u32() != 0 {
-                    let old = mem.read_u32(ptr)?;
-                    mem.write_u32(ptr, old.wrapping_add(val))?;
+                    let old = atomic_rmw_u32(mem, ptr, |cur| cur.wrapping_add(val))?;
                     cpu.set_reg(Reg::R0, old);
                 } else {
                     cpu.set_reg(Reg::R0, 0);
                 }
             }
-            BionicFuncId::AtomicFetchSub4 => {
+            BionicFuncId::AtomicFetchSub4 | BionicFuncId::SyncFetchAndSub4 => {
                 let ptr = GuestAddr::new(cpu.reg(Reg::R0));
                 let val = cpu.reg(Reg::R1);
                 if ptr.as_u32() != 0 {
-                    let old = mem.read_u32(ptr)?;
-                    mem.write_u32(ptr, old.wrapping_sub(val))?;
+                    let old = atomic_rmw_u32(mem, ptr, |cur| cur.wrapping_sub(val))?;
                     cpu.set_reg(Reg::R0, old);
                 } else {
                     cpu.set_reg(Reg::R0, 0);
@@ -10364,8 +10636,7 @@ impl BionicBridge {
                 let ptr = GuestAddr::new(cpu.reg(Reg::R0));
                 let val = cpu.reg(Reg::R1);
                 if ptr.as_u32() != 0 {
-                    let old = mem.read_u32(ptr)?;
-                    mem.write_u32(ptr, old & val)?;
+                    let old = atomic_rmw_u32(mem, ptr, |cur| cur & val)?;
                     cpu.set_reg(Reg::R0, old);
                 } else {
                     cpu.set_reg(Reg::R0, 0);
@@ -10375,8 +10646,7 @@ impl BionicBridge {
                 let ptr = GuestAddr::new(cpu.reg(Reg::R0));
                 let val = cpu.reg(Reg::R1);
                 if ptr.as_u32() != 0 {
-                    let old = mem.read_u32(ptr)?;
-                    mem.write_u32(ptr, old | val)?;
+                    let old = atomic_rmw_u32(mem, ptr, |cur| cur | val)?;
                     cpu.set_reg(Reg::R0, old);
                 } else {
                     cpu.set_reg(Reg::R0, 0);
@@ -10386,8 +10656,7 @@ impl BionicBridge {
                 let ptr = GuestAddr::new(cpu.reg(Reg::R0));
                 let val = cpu.reg(Reg::R1);
                 if ptr.as_u32() != 0 {
-                    let old = mem.read_u32(ptr)?;
-                    mem.write_u32(ptr, old ^ val)?;
+                    let old = atomic_rmw_u32(mem, ptr, |cur| cur ^ val)?;
                     cpu.set_reg(Reg::R0, old);
                 } else {
                     cpu.set_reg(Reg::R0, 0);
@@ -10408,7 +10677,7 @@ impl BionicBridge {
                 let ptr = GuestAddr::new(cpu.reg(Reg::R0));
                 let val = cpu.reg(Reg::R1);
                 if ptr.as_u32() != 0 {
-                    mem.write_u32(ptr, val)?;
+                    let _ = atomic_rmw_u32(mem, ptr, |_| val)?;
                 }
                 cpu.set_reg(Reg::R0, 0);
             }
@@ -10418,13 +10687,12 @@ impl BionicBridge {
                 let expected_ptr = GuestAddr::new(cpu.reg(Reg::R1));
                 let desired = cpu.reg(Reg::R2);
                 if ptr.as_u32() != 0 && expected_ptr.as_u32() != 0 {
-                    let current = mem.read_u32(ptr)?;
                     let expected = mem.read_u32(expected_ptr)?;
-                    if current == expected {
-                        mem.write_u32(ptr, desired)?;
+                    let actual = mem.atomic_cmpxchg_u32(ptr, expected, desired)?;
+                    if actual == expected {
                         cpu.set_reg(Reg::R0, 1); // true: success
                     } else {
-                        mem.write_u32(expected_ptr, current)?; // update expected to current
+                        mem.write_u32(expected_ptr, actual)?; // update expected to actual
                         cpu.set_reg(Reg::R0, 0); // false: failure
                     }
                 } else {
@@ -10436,8 +10704,7 @@ impl BionicBridge {
                 let ptr = GuestAddr::new(cpu.reg(Reg::R0));
                 let val = cpu.reg(Reg::R1);
                 if ptr.as_u32() != 0 {
-                    let old = mem.read_u32(ptr)?;
-                    mem.write_u32(ptr, val)?;
+                    let old = atomic_rmw_u32(mem, ptr, |_| val)?;
                     cpu.set_reg(Reg::R0, old);
                 } else {
                     cpu.set_reg(Reg::R0, 0);
@@ -10449,11 +10716,8 @@ impl BionicBridge {
                 let expected = cpu.reg(Reg::R1);
                 let desired = cpu.reg(Reg::R2);
                 if ptr.as_u32() != 0 {
-                    let current = mem.read_u32(ptr)?;
-                    if current == expected {
-                        mem.write_u32(ptr, desired)?;
-                    }
-                    cpu.set_reg(Reg::R0, current);
+                    let actual = mem.atomic_cmpxchg_u32(ptr, expected, desired)?;
+                    cpu.set_reg(Reg::R0, actual);
                 } else {
                     cpu.set_reg(Reg::R0, 0);
                 }
@@ -10464,37 +10728,8 @@ impl BionicBridge {
                 let expected = cpu.reg(Reg::R1);
                 let desired = cpu.reg(Reg::R2);
                 if ptr.as_u32() != 0 {
-                    let current = mem.read_u32(ptr)?;
-                    if current == expected {
-                        mem.write_u32(ptr, desired)?;
-                        cpu.set_reg(Reg::R0, 1);
-                    } else {
-                        cpu.set_reg(Reg::R0, 0);
-                    }
-                } else {
-                    cpu.set_reg(Reg::R0, 0);
-                }
-            }
-            BionicFuncId::SyncFetchAndAdd4 => {
-                // __sync_fetch_and_add_4(ptr, val) -> old_val
-                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
-                let val = cpu.reg(Reg::R1);
-                if ptr.as_u32() != 0 {
-                    let old = mem.read_u32(ptr)?;
-                    mem.write_u32(ptr, old.wrapping_add(val))?;
-                    cpu.set_reg(Reg::R0, old);
-                } else {
-                    cpu.set_reg(Reg::R0, 0);
-                }
-            }
-            BionicFuncId::SyncFetchAndSub4 => {
-                // __sync_fetch_and_sub_4(ptr, val) -> old_val
-                let ptr = GuestAddr::new(cpu.reg(Reg::R0));
-                let val = cpu.reg(Reg::R1);
-                if ptr.as_u32() != 0 {
-                    let old = mem.read_u32(ptr)?;
-                    mem.write_u32(ptr, old.wrapping_sub(val))?;
-                    cpu.set_reg(Reg::R0, old);
+                    let actual = mem.atomic_cmpxchg_u32(ptr, expected, desired)?;
+                    cpu.set_reg(Reg::R0, u32::from(actual == expected));
                 } else {
                     cpu.set_reg(Reg::R0, 0);
                 }

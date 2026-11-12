@@ -111,6 +111,11 @@ impl FlatMemory {
     pub fn offset(&self, addr: GuestAddr) -> Result<usize, MemoryError> {
         self.check_access(addr, 1, false)
     }
+
+    #[inline(always)]
+    pub(crate) fn base_ptr_offset(&self) -> *mut u8 {
+        ((self.data.as_ptr() as usize).wrapping_sub(self.base.as_u32() as usize)) as *mut u8
+    }
 }
 
 impl Memory for FlatMemory {
@@ -274,6 +279,10 @@ impl Memory for SharedMemory {
 
     fn get_protection(&self, addr: GuestAddr) -> u32 {
         self.inner.read().unwrap().get_protection(addr)
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.inner.read().unwrap().base_ptr_offset()
     }
 
     fn atomic_cmpxchg_u32(&mut self, addr: GuestAddr, expected: u32, new: u32) -> Result<u32, MemoryError> {

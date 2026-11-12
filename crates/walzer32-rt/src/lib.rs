@@ -21,7 +21,10 @@ pub use async_jit::{
     CompilationResult,
 };
 pub use cache::{ConcurrentJitCache, JitCache};
-pub use engine::{DbtEngine, DefaultSyscallHandler, EngineError, EngineStepResult, SyscallHandler};
+pub use engine::{
+    DbtEngine, DefaultSyscallHandler, EngineError, EngineStepResult, PendingClone, SharedJit,
+    SyscallHandler,
+};
 pub use futex::{FutexError, FutexManager, FUTEX_WAIT, FUTEX_WAKE, FUTEX_REQUEUE};
 pub use jit_memory::{JitPage, flush_icache, PAGE_SIZE};
 pub use jit_pool::{CommittedBlock, HostCodePtr, JitPool};

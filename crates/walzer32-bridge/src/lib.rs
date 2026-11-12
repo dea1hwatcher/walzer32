@@ -35,7 +35,11 @@ pub use audio::{
 };
 pub use audio_resample::AudioResampler;
 pub use audio_ring::AudioRingBuffer;
-pub use bionic::{BionicBridge, BionicFuncId, LogMessage, ThreadDescriptor, BIONIC_SVC_MAGIC};
+pub use bionic::{
+    atomic_rmw_u32, futex_cond_signal, futex_mutex_lock, futex_mutex_unlock, BionicBridge,
+    BionicFuncId, BlockingBionicOp, LogMessage, PendingThreadSpawn, ThreadDescriptor,
+    ThreadExitCoordinator, BIONIC_SVC_MAGIC,
+};
 pub use gles::{
     BufferState, DrawCallRecord, EglContextState, EglSurfaceState, GlesBridge, GlesFuncId,
     GLES_SVC_MAGIC, ShareGroup, SurfaceKind, SyncFenceState, TextureState, ThreadEglBinding,
@@ -57,8 +61,10 @@ pub use jni::{
 pub use jni_thunk::{JniThunk, JniThunkGenerator};
 pub use surface::{KeyEvent, SurfaceBridge, TouchEvent, GUEST_SURFACE_HANDLE};
 pub use trampoline::{
-    invoke_guest, invoke_guest_all, invoke_guest_extended, invoke_guest_full, invoke_jni_method,
-    invoke_jni_onload, SENTINEL_RETURN_ADDR,
+    check_fastmem_fault, dispatch_bridge_svc, flush_pending_mt_actions,
+    handle_mt_syscall_and_spawns, invoke_guest, invoke_guest_all, invoke_guest_extended,
+    invoke_guest_full, invoke_guest_mt, invoke_jni_method, invoke_jni_onload, prepare_guest_call,
+    run_guest_mt_loop, spawn_worker_engine, SharedGuestRuntime, SENTINEL_RETURN_ADDR,
 };
 pub use vulkan::{
     VkApplicationInfo32, VkDeviceCreateInfo32, VkInstanceCreateInfo32, VkSubmitInfo32, VulkanBridge,

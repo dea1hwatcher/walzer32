@@ -126,20 +126,16 @@ impl FutexManager {
 
     /// FUTEX_WAKE: Wakes up to `val` threads waiting on uaddr.
     pub fn wake(&self, uaddr: GuestAddr, count: u32) -> u32 {
-        let mut map = self.queues.lock().unwrap();
+        let map = self.queues.lock().unwrap();
         if let Some(queue) = map.get(&uaddr).cloned() {
+            drop(map);
             let (lock, cond) = &*queue;
-            let mut guard = lock.lock().unwrap();
+            let guard = lock.lock().unwrap();
             let waiters = guard.waiters_count as u32;
             let to_wake = waiters.min(count);
 
             for _ in 0..to_wake {
                 cond.notify_one();
-            }
-
-            guard.waiters_count = guard.waiters_count.saturating_sub(to_wake as usize);
-            if guard.waiters_count == 0 {
-                map.remove(&uaddr);
             }
 
             to_wake

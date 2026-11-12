@@ -1,26 +1,160 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
 use walzer32_apk::{ApkError, ApkPackage};
 use walzer32_bridge::{
-    invoke_guest_all, invoke_jni_onload, AssetBridge, AudioBridge, BionicBridge, GlesBridge,
-    HardwareBufferBridge, JniBridge, KeyEvent, RegisteredNativeMethod, SurfaceBridge, TouchEvent,
-    VulkanBridge, SL_PLAYSTATE_PLAYING,
+    check_fastmem_fault, dispatch_bridge_svc, flush_pending_mt_actions, prepare_guest_call,
+    run_guest_mt_loop, AssetBridge, AudioBridge, AudioRingBuffer, BionicBridge, GlesBridge,
+    HardwareBufferBridge, JniBridge, KeyEvent, RegisteredNativeMethod, SharedGuestRuntime,
+    SurfaceBridge, TouchEvent, VulkanBridge, SENTINEL_RETURN_ADDR, SL_PLAYSTATE_PLAYING,
 };
-use walzer32_core::{GuestAddr, Memory};
+use walzer32_core::{GuestAddr, Memory, Reg};
 #[cfg(not(target_os = "android"))]
-use walzer32_core::FlatMemory;
+use walzer32_core::SharedMemory;
 #[cfg(target_os = "android")]
-use walzer32_core::ArenaMemory;
+use walzer32_core::SharedArenaMemory;
 
-// Memory type alias: ArenaMemory on Android (4GB zero-overhead arena),
-// FlatMemory on dev-host (Windows/Linux x86-64).
+// Memory type alias: SharedArenaMemory on Android (4GB thread-safe zero-overhead arena),
+// SharedMemory on dev-host (Windows/Linux x86-64).
 #[cfg(target_os = "android")]
-type SessionMemory = ArenaMemory;
+type SessionMemory = SharedArenaMemory;
 #[cfg(not(target_os = "android"))]
-type SessionMemory = FlatMemory;
+type SessionMemory = SharedMemory;
 use walzer32_elf::{CompositeResolver, ElfLoader, LoadedLibrary, LoaderError, SymbolResolver};
-use walzer32_rt::DbtEngine;
+use walzer32_rt::{DbtEngine, EngineStepResult};
+
+/// Lock-free / ultra-short-lock channels for UI, Audio, and Telemetry JNI calls so they never
+/// block behind `GLOBAL_SESSION` while DBT execution or `nativeDrawFrame` holds the session mutex.
+pub struct FastSessionChannels {
+    pub audio_ring: Mutex<Option<Arc<AudioRingBuffer<i16>>>>,
+    pub audio_volume_mb: AtomicI32,
+    pub audio_volume_dirty: AtomicBool,
+    pub audio_target_latency_bits: AtomicU32,
+    pub audio_latency_dirty: AtomicBool,
+    pub pending_touch: Mutex<Vec<TouchEvent>>,
+    pub pending_key: Mutex<Vec<KeyEvent>>,
+    pub pending_resize: Mutex<Option<(u32, u32)>>,
+    pub telemetry_hud: Mutex<String>,
+    pub telemetry_json: Mutex<String>,
+}
+
+impl FastSessionChannels {
+    fn new() -> Self {
+        Self {
+            audio_ring: Mutex::new(None),
+            audio_volume_mb: AtomicI32::new(0),
+            audio_volume_dirty: AtomicBool::new(false),
+            audio_target_latency_bits: AtomicU32::new(10.0f32.to_bits()),
+            audio_latency_dirty: AtomicBool::new(false),
+            pending_touch: Mutex::new(Vec::new()),
+            pending_key: Mutex::new(Vec::new()),
+            pending_resize: Mutex::new(None),
+            telemetry_hud: Mutex::new(String::new()),
+            telemetry_json: Mutex::new("{}".to_string()),
+        }
+    }
+
+    pub fn push_touch(&self, ev: TouchEvent) {
+        self.pending_touch.lock().unwrap_or_else(|e| e.into_inner()).push(ev);
+    }
+
+    pub fn push_key(&self, ev: KeyEvent) {
+        self.pending_key.lock().unwrap_or_else(|e| e.into_inner()).push(ev);
+    }
+
+    pub fn set_pending_resize(&self, width: u32, height: u32) {
+        *self.pending_resize.lock().unwrap_or_else(|e| e.into_inner()) = Some((width, height));
+    }
+
+    pub fn set_volume_millibels(&self, millibels: i32) {
+        self.audio_volume_mb.store(millibels.clamp(-9600, 1000), Ordering::Release);
+        self.audio_volume_dirty.store(true, Ordering::Release);
+    }
+
+    pub fn set_target_latency_ms(&self, ms: f32) {
+        self.audio_target_latency_bits.store(ms.clamp(1.0, 100.0).to_bits(), Ordering::Release);
+        self.audio_latency_dirty.store(true, Ordering::Release);
+    }
+
+    pub fn read_audio_frames(&self, out: &mut [i16]) -> usize {
+        let ring = self
+            .audio_ring
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(Arc::clone);
+        if let Some(ring) = ring {
+            ring.pop_slice_with_concealment(out) / 2
+        } else {
+            out.fill(0);
+            0
+        }
+    }
+
+    pub fn audio_underruns(&self) -> u64 {
+        self.audio_ring
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|r| r.underrun_count())
+            .unwrap_or(0)
+    }
+
+    pub fn audio_overruns(&self) -> u64 {
+        self.audio_ring
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|r| r.overrun_count())
+            .unwrap_or(0)
+    }
+
+    pub fn audio_latency_ms(&self) -> f32 {
+        self.audio_ring
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|r| r.latency_ms(48000, 2))
+            .unwrap_or(0.0)
+    }
+
+    pub fn audio_watermark_ratio(&self) -> f32 {
+        self.audio_ring
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|r| r.watermark_fill_ratio())
+            .unwrap_or(0.0)
+    }
+
+    pub fn telemetry_hud_snapshot(&self) -> String {
+        self.telemetry_hud.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn telemetry_json_snapshot(&self) -> String {
+        self.telemetry_json.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn clear(&self) {
+        *self.audio_ring.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.audio_volume_mb.store(0, Ordering::Release);
+        self.audio_volume_dirty.store(false, Ordering::Release);
+        self.audio_target_latency_bits.store(10.0f32.to_bits(), Ordering::Release);
+        self.audio_latency_dirty.store(false, Ordering::Release);
+        self.pending_touch.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.pending_key.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        *self.pending_resize.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.telemetry_hud.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        *self.telemetry_json.lock().unwrap_or_else(|e| e.into_inner()) = "{}".to_string();
+    }
+}
+
+static FAST_CHANNELS: OnceLock<FastSessionChannels> = OnceLock::new();
+
+pub fn fast_channels() -> &'static FastSessionChannels {
+    FAST_CHANNELS.get_or_init(FastSessionChannels::new)
+}
 
 #[derive(Error, Debug)]
 pub enum SessionError {
@@ -60,21 +194,22 @@ pub struct Walzer32Session {
     pub guest_native_activity_ptr: u32,
     pub guest_native_callbacks_ptr: u32,
     pub initialized: bool,
+    pub active_mt_runtime: Option<SharedGuestRuntime>,
 }
 
 impl Walzer32Session {
     /// Initialize a new DBT session with a guest address space arena.
     ///
-    /// On Android: `arena_base` is the fixed layout base (0x7000_0000); ArenaMemory
-    /// reserves 4 GB and commits individual sections as needed.
-    /// On dev-host (Windows/Linux x86-64): FlatMemory with explicit base + size is used.
+    /// On Android: `arena_base` is the fixed layout base (0x7000_0000); SharedArenaMemory
+    /// reserves 4 GB and commits individual sections as needed across worker threads.
+    /// On dev-host (Windows/Linux x86-64): SharedMemory with explicit base + size is used.
     pub fn new(arena_base: GuestAddr, arena_size: usize) -> Result<Self, SessionError> {
         // ── Memory allocation ────────────────────────────────────────────────
         #[cfg(target_os = "android")]
-        let mut mem = ArenaMemory::new()?;
+        let mut mem = SharedArenaMemory::new()?;
 
         #[cfg(not(target_os = "android"))]
-        let mut mem = FlatMemory::new(arena_base, arena_size);
+        let mut mem = SharedMemory::new(arena_base, arena_size);
 
         // Layout inside arena:
         // arena_base + 0x0000_0000: Bionic stubs and TLS (0x100_000)
@@ -119,7 +254,7 @@ impl Walzer32Session {
         #[cfg(not(target_os = "android"))]
         let _ = gles_heap;
 
-        let bionic = BionicBridge::new(bionic_stubs, bionic_heap, 0x400_000);
+        let mut bionic = BionicBridge::new(bionic_stubs, bionic_heap, 0x400_000);
         bionic.install_stubs(&mut mem)?;
 
         let gles = GlesBridge::new(gles_stubs, gles_heap);
@@ -162,8 +297,11 @@ impl Walzer32Session {
         engine.cpu.set_sp(stack_top.as_u32() - 0x1000);
         engine.set_mmap_base(mmap_base);
         engine.sync_signal_state(&bionic.signal_state);
+        if let Some(futex) = engine.futex_manager() {
+            bionic.enable_multithreading(futex);
+        }
 
-        Ok(Self {
+        let session = Self {
             engine,
             bionic,
             gles,
@@ -182,7 +320,10 @@ impl Walzer32Session {
             guest_native_activity_ptr: 0,
             guest_native_callbacks_ptr: 0,
             initialized: true,
-        })
+            active_mt_runtime: None,
+        };
+        session.sync_fast_channels();
+        Ok(session)
     }
 
     /// Attach an APK package by raw bytes
@@ -284,31 +425,253 @@ impl Walzer32Session {
 
         // Call JNI_OnLoad if present
         if let Some(onload_addr) = loaded.find_symbol("JNI_OnLoad") {
-            let _ = invoke_jni_onload(
-                &mut self.engine,
-                &mut self.bionic,
-                &mut self.jni,
-                onload_addr,
-            )?;
+            let vm_ptr = self.jni.vm_ptr.as_u32();
+            let _ = self.call_native(onload_addr, &[vm_ptr, 0])?;
         }
 
         Ok(loaded)
     }
 
-    /// Call a 32-bit native function by guest address
-    pub fn call_native(&mut self, fn_addr: GuestAddr, args: &[u32]) -> Result<u32, SessionError> {
-        let res = invoke_guest_all(
-            &mut self.engine,
+    /// Synchronizes fast non-blocking UI/Audio/Telemetry channels with current session state.
+    pub fn sync_fast_channels(&self) {
+        let fc = fast_channels();
+        let ring = if let Some(rt) = &self.active_mt_runtime {
+            rt.audio
+                .as_ref()
+                .and_then(|a| a.lock().ok().map(|guard| Arc::clone(&guard.ring_buffer)))
+        } else {
+            Some(Arc::clone(&self.audio.ring_buffer))
+        };
+        if let Some(ring) = ring {
+            *fc.audio_ring.lock().unwrap_or_else(|e| e.into_inner()) = Some(ring);
+        }
+        if !fc.audio_volume_dirty.load(Ordering::Acquire) {
+            let vol = if let Some(rt) = &self.active_mt_runtime {
+                rt.audio
+                    .as_ref()
+                    .and_then(|a| a.lock().ok().map(|g| g.volume_millibels()))
+                    .unwrap_or_else(|| self.audio.volume_millibels())
+            } else {
+                self.audio.volume_millibels()
+            };
+            fc.audio_volume_mb.store(vol, Ordering::Release);
+        }
+        if !fc.audio_latency_dirty.load(Ordering::Acquire) {
+            let lat = if let Some(rt) = &self.active_mt_runtime {
+                rt.audio
+                    .as_ref()
+                    .and_then(|a| a.lock().ok().map(|g| g.target_latency_ms))
+                    .unwrap_or(self.audio.target_latency_ms)
+            } else {
+                self.audio.target_latency_ms
+            };
+            fc.audio_target_latency_bits.store(lat.to_bits(), Ordering::Release);
+        }
+        *fc.telemetry_hud.lock().unwrap_or_else(|e| e.into_inner()) = self.get_telemetry_hud();
+        *fc.telemetry_json.lock().unwrap_or_else(|e| e.into_inner()) = self.get_telemetry_json();
+    }
+
+    /// Drains queued touch, key, resize, and audio settings pushed via `FastSessionChannels`
+    /// while `GLOBAL_SESSION` was locked by DBT execution.
+    pub fn drain_pending_fast_inputs(&mut self) {
+        let fc = fast_channels();
+        let touches: Vec<TouchEvent> =
+            std::mem::take(&mut *fc.pending_touch.lock().unwrap_or_else(|e| e.into_inner()));
+        for ev in touches {
+            self.surface.push_touch_event(ev);
+        }
+
+        let keys: Vec<KeyEvent> =
+            std::mem::take(&mut *fc.pending_key.lock().unwrap_or_else(|e| e.into_inner()));
+        for ev in keys {
+            self.surface.push_key_event(ev);
+        }
+
+        if fc.audio_volume_dirty.swap(false, Ordering::AcqRel) {
+            let vol = fc.audio_volume_mb.load(Ordering::Acquire);
+            self.set_audio_volume(vol);
+        }
+
+        if fc.audio_latency_dirty.swap(false, Ordering::AcqRel) {
+            let ms = f32::from_bits(fc.audio_target_latency_bits.load(Ordering::Acquire));
+            self.set_target_audio_latency_ms(ms);
+        }
+
+        let resize = fc
+            .pending_resize
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some((w, h)) = resize {
+            self.on_surface_changed(w, h);
+        }
+    }
+
+    fn promote_to_mt_runtime(&mut self) -> SharedGuestRuntime {
+        let futex = self.engine.futex_manager().unwrap_or_default();
+        self.engine.set_futex_manager(futex.clone());
+        let bionic = std::mem::replace(
             &mut self.bionic,
-            &mut self.jni,
-            Some(&mut self.gles),
-            Some(&mut self.audio),
-            Some(&mut self.asset),
-            Some(&mut self.hardware_buffer),
-            Some(&mut self.vulkan),
-            fn_addr,
-            args,
-        )?;
+            BionicBridge::new(GuestAddr::new(0), GuestAddr::new(0), 0),
+        );
+        let jni = std::mem::replace(&mut self.jni, JniBridge::new(GuestAddr::new(0)));
+        let gles = std::mem::replace(
+            &mut self.gles,
+            GlesBridge::new(GuestAddr::new(0), GuestAddr::new(0)),
+        );
+        let audio = std::mem::replace(&mut self.audio, AudioBridge::with_stub_base(GuestAddr::new(0)));
+        let asset = std::mem::replace(
+            &mut self.asset,
+            AssetBridge::new(GuestAddr::new(0), GuestAddr::new(0), 0),
+        );
+        let hw_buffer = std::mem::replace(
+            &mut self.hardware_buffer,
+            HardwareBufferBridge::new(GuestAddr::new(0), GuestAddr::new(0), 0),
+        );
+        let vulkan = std::mem::replace(
+            &mut self.vulkan,
+            VulkanBridge::with_stub_base(GuestAddr::new(0)),
+        );
+
+        SharedGuestRuntime::new(bionic, jni, futex)
+            .with_gles(Arc::new(Mutex::new(gles)))
+            .with_audio(Arc::new(Mutex::new(audio)))
+            .with_asset(Arc::new(Mutex::new(asset)))
+            .with_hw_buffer(Arc::new(Mutex::new(hw_buffer)))
+            .with_vulkan(Arc::new(Mutex::new(vulkan)))
+    }
+
+    fn try_reclaim_mt_runtime(&mut self, rt: SharedGuestRuntime) -> Option<SharedGuestRuntime> {
+        if rt.active_worker_count() > 0 || Arc::strong_count(&rt.bionic) > 1 {
+            return Some(rt);
+        }
+        let SharedGuestRuntime {
+            bionic,
+            jni,
+            gles,
+            audio,
+            asset,
+            hw_buffer,
+            vulkan,
+            ..
+        } = rt;
+        if let Ok(m) = Arc::try_unwrap(bionic) {
+            self.bionic = m.into_inner().unwrap_or_else(|e| e.into_inner());
+        }
+        if let Ok(m) = Arc::try_unwrap(jni) {
+            self.jni = m.into_inner().unwrap_or_else(|e| e.into_inner());
+        }
+        if let Some(m) = gles.and_then(|a| Arc::try_unwrap(a).ok()) {
+            self.gles = m.into_inner().unwrap_or_else(|e| e.into_inner());
+        }
+        if let Some(m) = audio.and_then(|a| Arc::try_unwrap(a).ok()) {
+            self.audio = m.into_inner().unwrap_or_else(|e| e.into_inner());
+        }
+        if let Some(m) = asset.and_then(|a| Arc::try_unwrap(a).ok()) {
+            self.asset = m.into_inner().unwrap_or_else(|e| e.into_inner());
+        }
+        if let Some(m) = hw_buffer.and_then(|a| Arc::try_unwrap(a).ok()) {
+            self.hardware_buffer = m.into_inner().unwrap_or_else(|e| e.into_inner());
+        }
+        if let Some(m) = vulkan.and_then(|a| Arc::try_unwrap(a).ok()) {
+            self.vulkan = m.into_inner().unwrap_or_else(|e| e.into_inner());
+        }
+        None
+    }
+
+    fn run_active_mt_loop(&mut self, rt: SharedGuestRuntime) -> Result<u32, SessionError> {
+        let res = run_guest_mt_loop(&mut self.engine, &rt, 1000);
+        if let Some(s) = self.engine.signal_state() {
+            if let Ok(mut b) = rt.bionic.lock() {
+                b.signal_state = s.clone();
+            }
+        }
+        self.active_mt_runtime = self.try_reclaim_mt_runtime(rt);
+        self.sync_fast_channels();
+        res.map_err(Into::into)
+    }
+
+    /// Call a 32-bit native function by guest address.
+    /// Runs on a zero-lock single-thread fast path until the guest spawns a thread
+    /// (`pthread_create` / `SYS_clone`), then lazily promotes execution to `SharedJit`
+    /// and `SharedGuestRuntime` with real OS worker threads.
+    pub fn call_native(&mut self, fn_addr: GuestAddr, args: &[u32]) -> Result<u32, SessionError> {
+        if let Some(rt) = self.active_mt_runtime.take() {
+            self.active_mt_runtime = self.try_reclaim_mt_runtime(rt);
+        }
+
+        if let Some(rt) = self.active_mt_runtime.take() {
+            self.engine.enable_shared_jit();
+            prepare_guest_call(&mut self.engine, fn_addr, args)?;
+            if let Ok(b) = rt.bionic.lock() {
+                self.engine.sync_signal_state(&b.signal_state);
+            }
+            return self.run_active_mt_loop(rt);
+        }
+
+        prepare_guest_call(&mut self.engine, fn_addr, args)?;
+        self.engine.sync_signal_state(&self.bionic.signal_state);
+
+        #[cfg(test)]
+        let mut steps: u64 = 0;
+
+        while (self.engine.cpu.pc().as_u32() & !1) != (SENTINEL_RETURN_ADDR & !1) {
+            check_fastmem_fault(&mut self.engine)?;
+
+            match self.engine.step()? {
+                EngineStepResult::Syscall(_) => {
+                    if let Some(imm) = self.engine.last_svc_imm() {
+                        dispatch_bridge_svc(
+                            imm,
+                            &mut self.engine,
+                            &mut self.bionic,
+                            &mut self.jni,
+                            &mut Some(&mut self.gles),
+                            &mut Some(&mut self.audio),
+                            &mut Some(&mut self.asset),
+                            &mut Some(&mut self.hardware_buffer),
+                            &mut Some(&mut self.vulkan),
+                        )?;
+                    }
+                    if !self.bionic.pending_spawns.is_empty()
+                        || self.bionic.pending_blocking_op.is_some()
+                        || self.engine.has_pending_clone()
+                    {
+                        self.engine.enable_shared_jit();
+                        let rt = self.promote_to_mt_runtime();
+                        if let Some(retval) =
+                            flush_pending_mt_actions(&mut self.engine, &rt)?
+                        {
+                            self.active_mt_runtime = self.try_reclaim_mt_runtime(rt);
+                            self.sync_fast_channels();
+                            return Ok(retval);
+                        }
+                        return self.run_active_mt_loop(rt);
+                    }
+                }
+                EngineStepResult::Halted { exit_code } => {
+                    self.engine.cpu.set_reg(Reg::R0, exit_code);
+                    break;
+                }
+                EngineStepResult::Continue | EngineStepResult::Breakpoint { .. } => {}
+            }
+
+            #[cfg(test)]
+            {
+                steps += 1;
+                if steps > 10_000_000 {
+                    return Err(SessionError::Engine(walzer32_rt::EngineError::Trap(
+                        "Guest execution limit exceeded in test".into(),
+                    )));
+                }
+            }
+        }
+
+        if let Some(s) = self.engine.signal_state() {
+            self.bionic.signal_state = s.clone();
+        }
+        let res = self.engine.cpu.reg(Reg::R0);
+        self.sync_fast_channels();
         Ok(res)
     }
 
@@ -377,7 +740,19 @@ impl Walzer32Session {
 
     /// Sets audio playback volume in millibels (-9600 to 0 mB)
     pub fn set_audio_volume(&mut self, millibels: i32) {
-        self.audio.set_volume_millibels(millibels);
+        if let Some(rt) = &self.active_mt_runtime {
+            if let Some(a) = &rt.audio {
+                if let Ok(mut guard) = a.lock() {
+                    guard.set_volume_millibels(millibels);
+                }
+            }
+        } else {
+            self.audio.set_volume_millibels(millibels);
+        }
+        fast_channels()
+            .audio_volume_mb
+            .store(millibels.clamp(-9600, 1000), Ordering::Release);
+        fast_channels().audio_volume_dirty.store(false, Ordering::Release);
     }
 
     /// Returns total number of audio underruns encountered
@@ -397,7 +772,19 @@ impl Walzer32Session {
 
     /// Sets target audio latency in milliseconds
     pub fn set_target_audio_latency_ms(&mut self, ms: f32) {
-        self.audio.set_target_latency_ms(ms);
+        if let Some(rt) = &self.active_mt_runtime {
+            if let Some(a) = &rt.audio {
+                if let Ok(mut guard) = a.lock() {
+                    guard.set_target_latency_ms(ms);
+                }
+            }
+        } else {
+            self.audio.set_target_latency_ms(ms);
+        }
+        fast_channels()
+            .audio_target_latency_bits
+            .store(ms.clamp(1.0, 100.0).to_bits(), Ordering::Release);
+        fast_channels().audio_latency_dirty.store(false, Ordering::Release);
     }
 
     /// Returns audio ring buffer fill ratio [0.0 .. 1.0]
@@ -622,12 +1009,15 @@ impl Walzer32Session {
     }
 
     /// Triggers frame render in guest DBT if a render callback is registered
+    /// Triggers frame render in guest DBT
     pub fn on_draw_frame(&mut self) -> Result<(), SessionError> {
+        self.drain_pending_fast_inputs();
         self.engine.telemetry.record_frame(16.6);
         if let Some(render_fn) = self.surface.draw_frame_fn {
             let _ = self.call_native(render_fn, &[])?;
         }
         self.pump_audio_callbacks();
+        self.sync_fast_channels();
         Ok(())
     }
 
@@ -866,24 +1256,47 @@ pub fn find_self_apk_path() -> Option<String> {
 // Global static session protected by Mutex for JNI C ABI entry points
 static GLOBAL_SESSION: Mutex<Option<Walzer32Session>> = Mutex::new(None);
 
+fn create_default_session() -> Result<Walzer32Session, SessionError> {
+    // Default 128MB arena starting at 0x7000_0000
+    let mut session = Walzer32Session::new(GuestAddr::new(0x7000_0000), 0x800_0000)?;
+    let _ = session.ensure_bundled_apk_loaded();
+    session.sync_fast_channels();
+    Ok(session)
+}
+
 pub fn get_or_init_session() -> Result<std::sync::MutexGuard<'static, Option<Walzer32Session>>, SessionError> {
     let mut guard = GLOBAL_SESSION.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
-        // Default 128MB arena starting at 0x7000_0000
-        let mut session = Walzer32Session::new(GuestAddr::new(0x7000_0000), 0x800_0000)?;
-        let _ = session.ensure_bundled_apk_loaded();
-        *guard = Some(session);
+        *guard = Some(create_default_session()?);
     }
     Ok(guard)
+}
+
+/// Non-blocking attempt to acquire `GLOBAL_SESSION` (initializing it if currently `None`).
+/// Returns `None` immediately when DBT execution or another thread holds `GLOBAL_SESSION`.
+pub fn try_get_or_init_session(
+) -> Option<Result<std::sync::MutexGuard<'static, Option<Walzer32Session>>, SessionError>> {
+    let mut guard = GLOBAL_SESSION.try_lock().ok()?;
+    if guard.is_none() {
+        match create_default_session() {
+            Ok(session) => *guard = Some(session),
+            Err(e) => return Some(Err(e)),
+        }
+    }
+    Some(Ok(guard))
 }
 
 pub fn reset_session() {
     let mut guard = GLOBAL_SESSION.lock().unwrap_or_else(|e| e.into_inner());
     *guard = None;
+    fast_channels().clear();
 }
 
 impl Drop for Walzer32Session {
     fn drop(&mut self) {
+        if let Some(rt) = self.active_mt_runtime.take() {
+            rt.join_all_workers();
+        }
         self.release_host_window();
     }
 }

@@ -76,6 +76,16 @@ impl JitCache {
     }
 
     #[inline(always)]
+    pub fn peek(&self, addr: GuestAddr) -> Option<&CompiledBlock> {
+        self.blocks.get(&addr)
+    }
+
+    #[inline(always)]
+    pub fn peek_ptr(&self, addr: GuestAddr) -> Option<HostCodePtr> {
+        self.code_ptrs.get(&addr).copied()
+    }
+
+    #[inline(always)]
     pub fn lookup_ptr(&mut self, addr: GuestAddr) -> Option<HostCodePtr> {
         self.code_ptrs.get(&addr).copied()
     }

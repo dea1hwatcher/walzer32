@@ -40,6 +40,8 @@ pub mod nr {
     pub const GETTID: u32 = 224;
     pub const TKILL: u32 = 238;
     pub const FUTEX: u32 = 240;
+    pub const EXIT_GROUP: u32 = 248;
+    pub const SET_TID_ADDRESS: u32 = 256;
     pub const CLOCK_GETTIME: u32 = 263;
     pub const TGKILL: u32 = 268;
     pub const OPENAT: u32 = 322;
@@ -71,7 +73,10 @@ pub mod futex_op {
     pub const REQUEUE: u32 = 3;
     pub const CMP_REQUEUE: u32 = 4;
     pub const WAKE_OP: u32 = 5;
+    pub const WAIT_BITSET: u32 = 9;
+    pub const WAKE_BITSET: u32 = 10;
     pub const PRIVATE_FLAG: u32 = 128;
+    pub const CLOCK_REALTIME_FLAG: u32 = 256;
 }
 
 /// Syscall invocation arguments in ARM32 ABI
