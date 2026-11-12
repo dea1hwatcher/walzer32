@@ -6,11 +6,11 @@ use walzer32_bridge::{
     invoke_guest_extended, invoke_jni_onload, AssetBridge, AudioBridge, BionicBridge, GlesBridge,
     HardwareBufferBridge, JniBridge, KeyEvent, RegisteredNativeMethod, SurfaceBridge, TouchEvent,
 };
-use walzer32_core::GuestAddr;
+use walzer32_core::{GuestAddr, Memory};
 #[cfg(not(target_os = "android"))]
 use walzer32_core::FlatMemory;
 #[cfg(target_os = "android")]
-use walzer32_core::{ArenaMemory, Memory};
+use walzer32_core::ArenaMemory;
 
 // Memory type alias: ArenaMemory on Android (4GB zero-overhead arena),
 // FlatMemory on dev-host (Windows/Linux x86-64).
@@ -55,6 +55,8 @@ pub struct Walzer32Session {
     pub next_load_addr: GuestAddr,
     pub jni_registry: crate::dynamic_jni::JniMethodRegistry,
     pub owns_host_window: bool,
+    pub guest_native_activity_ptr: u32,
+    pub guest_native_callbacks_ptr: u32,
     pub initialized: bool,
 }
 
@@ -166,6 +168,8 @@ impl Walzer32Session {
             next_load_addr: lib_load_base,
             jni_registry: crate::dynamic_jni::JniMethodRegistry::new(),
             owns_host_window: false,
+            guest_native_activity_ptr: 0,
+            guest_native_callbacks_ptr: 0,
             initialized: true,
         })
     }
@@ -406,6 +410,118 @@ impl Walzer32Session {
     /// Get list of native methods registered via JNI env->RegisterNatives
     pub fn registered_natives(&self) -> &[RegisteredNativeMethod] {
         &self.jni.registered_natives
+    }
+
+    /// Searches all loaded 32-bit ELF libraries for an exported guest symbol
+    pub fn find_loaded_symbol(&self, name: &str) -> Option<GuestAddr> {
+        for lib in self.loaded_libraries.values() {
+            if let Some(addr) = lib.find_symbol(name) {
+                return Some(addr);
+            }
+        }
+        None
+    }
+
+    /// Allocates guest memory via Bionic heap/mmap and writes raw bytes
+    pub fn alloc_guest_bytes(&mut self, bytes: &[u8]) -> Result<u32, SessionError> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let ptr = self
+            .bionic
+            .alloc_guest_memory(bytes.len() as u32, 8, &mut self.engine.mem);
+        if ptr.as_u32() != 0 {
+            self.engine.mem.write_bytes(ptr, bytes)?;
+        }
+        Ok(ptr.as_u32())
+    }
+
+    /// Invokes a slot in guest ANativeActivityCallbacks32 if registered
+    pub fn invoke_native_activity_callback(
+        &mut self,
+        slot_index: usize,
+        extra_arg: Option<u32>,
+    ) -> Result<bool, SessionError> {
+        if self.guest_native_activity_ptr == 0 || self.guest_native_callbacks_ptr == 0 {
+            return Ok(false);
+        }
+        let slot_addr = GuestAddr::new(self.guest_native_callbacks_ptr).add((slot_index * 4) as u32);
+        let fn_ptr = self.engine.mem.read_u32(slot_addr)?;
+        if fn_ptr == 0 {
+            return Ok(false);
+        }
+        match extra_arg {
+            Some(arg) => {
+                let _ = self.call_native(GuestAddr::new(fn_ptr), &[self.guest_native_activity_ptr, arg])?;
+            }
+            None => {
+                let _ = self.call_native(GuestAddr::new(fn_ptr), &[self.guest_native_activity_ptr])?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Marshals a 32-bit ANativeActivity struct and executes guest ANativeActivity_onCreate
+    pub fn setup_native_activity32(
+        &mut self,
+        internal_path: &str,
+        external_path: &str,
+        obb_path: &str,
+        sdk_version: i32,
+        saved_state: &[u8],
+    ) -> Result<bool, SessionError> {
+        let Some(on_create_addr) = self.find_loaded_symbol("ANativeActivity_onCreate") else {
+            return Ok(false);
+        };
+
+        let callbacks_ptr = self
+            .bionic
+            .alloc_guest_memory(64, 8, &mut self.engine.mem);
+        self.engine.mem.write_bytes(callbacks_ptr, &[0u8; 64])?;
+
+        let activity_ptr = self
+            .bionic
+            .alloc_guest_memory(40, 8, &mut self.engine.mem);
+        self.engine.mem.write_bytes(activity_ptr, &[0u8; 40])?;
+
+        let mut internal_c = internal_path.as_bytes().to_vec();
+        internal_c.push(0);
+        let internal_guest = self.alloc_guest_bytes(&internal_c)?;
+
+        let mut external_c = external_path.as_bytes().to_vec();
+        external_c.push(0);
+        let external_guest = self.alloc_guest_bytes(&external_c)?;
+
+        let mut obb_c = obb_path.as_bytes().to_vec();
+        obb_c.push(0);
+        let obb_guest = self.alloc_guest_bytes(&obb_c)?;
+
+        // Match NDK 32-bit ANativeActivity struct layout
+        self.engine.mem.write_u32(activity_ptr, callbacks_ptr.as_u32())?;
+        self.engine.mem.write_u32(activity_ptr.add(4), self.jni.vm_ptr.as_u32())?;
+        self.engine.mem.write_u32(activity_ptr.add(8), self.jni.env_ptr.as_u32())?;
+        self.engine.mem.write_u32(activity_ptr.add(12), 0x3000_0002)?; // clazz/activity jobject
+        self.engine.mem.write_u32(activity_ptr.add(16), internal_guest)?;
+        self.engine.mem.write_u32(activity_ptr.add(20), external_guest)?;
+        self.engine.mem.write_u32(activity_ptr.add(24), sdk_version as u32)?;
+        self.engine.mem.write_u32(activity_ptr.add(28), 0)?; // instance
+        self.engine.mem.write_u32(activity_ptr.add(32), 0xA55E_0001)?; // AAssetManager*
+        self.engine.mem.write_u32(activity_ptr.add(36), obb_guest)?;
+
+        let saved_state_guest = if saved_state.is_empty() {
+            0
+        } else {
+            self.alloc_guest_bytes(saved_state)?
+        };
+
+        self.guest_native_activity_ptr = activity_ptr.as_u32();
+        self.guest_native_callbacks_ptr = callbacks_ptr.as_u32();
+
+        let _ = self.call_native(
+            on_create_addr,
+            &[activity_ptr.as_u32(), saved_state_guest, saved_state.len() as u32],
+        )?;
+        Ok(true)
     }
 
     fn release_host_window(&mut self) {

@@ -1215,14 +1215,187 @@ pub unsafe extern "C" fn Java_com_noodlecake_ads_PlayHaven_nativeUnlockReward(
 }
 
 
+#[repr(C)]
+#[allow(dead_code)]
+struct HostANativeActivityCallbacks {
+    on_start: Option<unsafe extern "C" fn(*mut c_void)>,
+    on_resume: Option<unsafe extern "C" fn(*mut c_void)>,
+    on_save_instance_state: Option<unsafe extern "C" fn(*mut c_void, *mut usize) -> *mut c_void>,
+    on_pause: Option<unsafe extern "C" fn(*mut c_void)>,
+    on_stop: Option<unsafe extern "C" fn(*mut c_void)>,
+    on_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+    on_window_focus_changed: Option<unsafe extern "C" fn(*mut c_void, i32)>,
+    on_native_window_created: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    on_native_window_resized: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    on_native_window_redraw_needed: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    on_native_window_destroyed: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    on_input_queue_created: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    on_input_queue_destroyed: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    on_content_rect_changed: Option<unsafe extern "C" fn(*mut c_void, *const c_void)>,
+    on_configuration_changed: Option<unsafe extern "C" fn(*mut c_void)>,
+    on_low_memory: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+#[repr(C)]
+#[allow(dead_code)]
+struct HostANativeActivity {
+    callbacks: *mut HostANativeActivityCallbacks,
+    vm: *mut c_void,
+    env: *mut c_void,
+    clazz: *mut c_void,
+    internal_data_path: *const std::ffi::c_char,
+    external_data_path: *const std::ffi::c_char,
+    sdk_version: i32,
+    instance: *mut c_void,
+    asset_manager: *mut c_void,
+    obb_path: *const std::ffi::c_char,
+}
+
+fn dispatch_guest_activity_cb(slot_index: usize, extra_arg: Option<u32>) {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let _ = session.invoke_native_activity_callback(slot_index, extra_arg);
+        }
+    }
+}
+
+unsafe extern "C" fn host_cb_on_start(_act: *mut c_void) {
+    dispatch_guest_activity_cb(0, None);
+}
+unsafe extern "C" fn host_cb_on_resume(_act: *mut c_void) {
+    dispatch_guest_activity_cb(1, None);
+}
+unsafe extern "C" fn host_cb_on_pause(_act: *mut c_void) {
+    dispatch_guest_activity_cb(3, None);
+}
+unsafe extern "C" fn host_cb_on_stop(_act: *mut c_void) {
+    dispatch_guest_activity_cb(4, None);
+}
+unsafe extern "C" fn host_cb_on_destroy(_act: *mut c_void) {
+    dispatch_guest_activity_cb(5, None);
+}
+unsafe extern "C" fn host_cb_on_window_focus_changed(_act: *mut c_void, has_focus: i32) {
+    dispatch_guest_activity_cb(6, Some(has_focus as u32));
+}
+unsafe extern "C" fn host_cb_on_native_window_created(_act: *mut c_void, window: *mut c_void) {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let w = 0u32;
+            let h = 0u32;
+            session.on_surface_created(window as usize, w, h);
+            let _ = session.invoke_native_activity_callback(
+                7,
+                Some(walzer32_bridge::GUEST_SURFACE_HANDLE),
+            );
+        }
+    }
+}
+unsafe extern "C" fn host_cb_on_native_window_resized(_act: *mut c_void, _window: *mut c_void) {
+    dispatch_guest_activity_cb(8, Some(walzer32_bridge::GUEST_SURFACE_HANDLE));
+}
+unsafe extern "C" fn host_cb_on_native_window_redraw_needed(_act: *mut c_void, _window: *mut c_void) {
+    dispatch_guest_activity_cb(9, Some(walzer32_bridge::GUEST_SURFACE_HANDLE));
+}
+unsafe extern "C" fn host_cb_on_native_window_destroyed(_act: *mut c_void, _window: *mut c_void) {
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let _ = session.invoke_native_activity_callback(
+                10,
+                Some(walzer32_bridge::GUEST_SURFACE_HANDLE),
+            );
+            session.on_surface_destroyed();
+        }
+    }
+}
+unsafe extern "C" fn host_cb_on_configuration_changed(_act: *mut c_void) {
+    dispatch_guest_activity_cb(14, None);
+}
+unsafe extern "C" fn host_cb_on_low_memory(_act: *mut c_void) {
+    dispatch_guest_activity_cb(15, None);
+}
+
+unsafe fn read_host_cstr(ptr: *const std::ffi::c_char) -> String {
+    if ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 /// Android NDK NativeActivity Entry Point:
 /// Invoked by Android OS NativeActivity framework when creating a pure native C/C++ or Unity/Unreal activity.
-/// Safely handles out-of-order startup (when ANativeActivity_onCreate is invoked before JNI_OnLoad).
+/// Marshals a 32-bit ANativeActivity struct + callback table and executes guest ANativeActivity_onCreate.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ANativeActivity_onCreate(
-    _activity: *mut c_void,
-    _saved_state: *mut c_void,
-    _saved_state_size: usize,
+    activity: *mut c_void,
+    saved_state: *mut c_void,
+    saved_state_size: usize,
 ) {
-    drop(get_or_init_session());
+    log_i!("Walzer32: ANativeActivity_onCreate invoked");
+    let mut guard = match get_or_init_session() {
+        Ok(g) => g,
+        Err(e) => {
+            log_e!("Walzer32: ANativeActivity_onCreate session init error: {:?}", e);
+            return;
+        }
+    };
+    let Some(session) = guard.as_mut() else {
+        return;
+    };
+    let _ = session.ensure_bundled_apk_loaded();
+
+    let (internal_path, external_path, obb_path, sdk_version, host_cb_ptr) = if !activity.is_null() {
+        let host_act = unsafe { &*(activity as *const HostANativeActivity) };
+        (
+            unsafe { read_host_cstr(host_act.internal_data_path) },
+            unsafe { read_host_cstr(host_act.external_data_path) },
+            unsafe { read_host_cstr(host_act.obb_path) },
+            host_act.sdk_version,
+            host_act.callbacks,
+        )
+    } else {
+        (
+            "/data/data/com.walzer32.loader/files".to_string(),
+            "/sdcard/Android/data/com.walzer32.loader/files".to_string(),
+            "/sdcard/Android/obb/com.walzer32.loader".to_string(),
+            29,
+            std::ptr::null_mut(),
+        )
+    };
+
+    let saved_slice = if !saved_state.is_null() && saved_state_size > 0 {
+        unsafe { std::slice::from_raw_parts(saved_state as *const u8, saved_state_size) }
+    } else {
+        &[]
+    };
+
+    if !host_cb_ptr.is_null() {
+        let host_cbs = unsafe { &mut *host_cb_ptr };
+        host_cbs.on_start = Some(host_cb_on_start);
+        host_cbs.on_resume = Some(host_cb_on_resume);
+        host_cbs.on_pause = Some(host_cb_on_pause);
+        host_cbs.on_stop = Some(host_cb_on_stop);
+        host_cbs.on_destroy = Some(host_cb_on_destroy);
+        host_cbs.on_window_focus_changed = Some(host_cb_on_window_focus_changed);
+        host_cbs.on_native_window_created = Some(host_cb_on_native_window_created);
+        host_cbs.on_native_window_resized = Some(host_cb_on_native_window_resized);
+        host_cbs.on_native_window_redraw_needed = Some(host_cb_on_native_window_redraw_needed);
+        host_cbs.on_native_window_destroyed = Some(host_cb_on_native_window_destroyed);
+        host_cbs.on_configuration_changed = Some(host_cb_on_configuration_changed);
+        host_cbs.on_low_memory = Some(host_cb_on_low_memory);
+    }
+
+    match session.setup_native_activity32(
+        &internal_path,
+        &external_path,
+        &obb_path,
+        sdk_version,
+        saved_slice,
+    ) {
+        Ok(true) => log_i!("Walzer32: Guest ANativeActivity_onCreate completed"),
+        Ok(false) => log_i!("Walzer32: No guest ANativeActivity_onCreate symbol found"),
+        Err(e) => log_e!("Walzer32: Guest ANativeActivity_onCreate error: {:?}", e),
+    }
 }
