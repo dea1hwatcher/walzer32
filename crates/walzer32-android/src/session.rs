@@ -6,7 +6,18 @@ use walzer32_bridge::{
     invoke_guest_extended, invoke_jni_onload, AssetBridge, AudioBridge, BionicBridge, GlesBridge,
     HardwareBufferBridge, JniBridge, KeyEvent, RegisteredNativeMethod, SurfaceBridge, TouchEvent,
 };
-use walzer32_core::{FlatMemory, GuestAddr};
+use walzer32_core::GuestAddr;
+#[cfg(not(target_os = "android"))]
+use walzer32_core::FlatMemory;
+#[cfg(target_os = "android")]
+use walzer32_core::{ArenaMemory, Memory};
+
+// Memory type alias: ArenaMemory on Android (4GB zero-overhead arena),
+// FlatMemory on dev-host (Windows/Linux x86-64).
+#[cfg(target_os = "android")]
+type SessionMemory = ArenaMemory;
+#[cfg(not(target_os = "android"))]
+type SessionMemory = FlatMemory;
 use walzer32_elf::{CompositeResolver, ElfLoader, LoadedLibrary, LoaderError, SymbolResolver};
 use walzer32_rt::DbtEngine;
 
@@ -30,7 +41,7 @@ pub enum SessionError {
 
 /// Global DBT Execution Session for Android Runtime
 pub struct Walzer32Session {
-    pub engine: DbtEngine<FlatMemory>,
+    pub engine: DbtEngine<SessionMemory>,
     pub bionic: BionicBridge,
     pub gles: GlesBridge,
     pub jni: JniBridge,
@@ -47,8 +58,17 @@ pub struct Walzer32Session {
 }
 
 impl Walzer32Session {
-    /// Initialize a new DBT session with a guest address space arena
+    /// Initialize a new DBT session with a guest address space arena.
+    ///
+    /// On Android: `arena_base` is the fixed layout base (0x7000_0000); ArenaMemory
+    /// reserves 4 GB and commits individual sections as needed.
+    /// On dev-host (Windows/Linux x86-64): FlatMemory with explicit base + size is used.
     pub fn new(arena_base: GuestAddr, arena_size: usize) -> Result<Self, SessionError> {
+        // ── Memory allocation ────────────────────────────────────────────────
+        #[cfg(target_os = "android")]
+        let mut mem = ArenaMemory::new()?;
+
+        #[cfg(not(target_os = "android"))]
         let mut mem = FlatMemory::new(arena_base, arena_size);
 
         // Layout inside arena:
@@ -74,6 +94,26 @@ impl Walzer32Session {
         let mmap_base = arena_base.add(0xC00_000);
         let lib_load_base = arena_base.add(0x100_0000);
 
+        // On Android commit pages for every fixed section up front.
+        // ArenaMemory::commit_range(addr: GuestAddr, len: usize) -> Result<(), MemoryError>
+        #[cfg(target_os = "android")]
+        {
+            mem.commit_range(bionic_stubs, 0x100_000)?;   // Bionic stubs + TLS
+            mem.commit_range(bionic_heap,  0x400_000)?;   // Bionic heap
+            mem.commit_range(gles_stubs,   0x180_000)?;   // GLES stubs + heap (up to jni_base)
+            mem.commit_range(jni_base,     0x100_000)?;   // JNIEnv / JavaVM
+            mem.commit_range(audio_stubs,  0x100_000)?;   // Audio stubs
+            mem.commit_range(asset_stubs,  0x100_000)?;   // AssetManager stubs
+            mem.commit_range(hw_buffer_stubs, 0x100_000)?;// HardwareBuffer stubs
+            mem.commit_range(arena_base.add(0xA00_000), 0x200_000)?; // Stack region
+            mem.commit_range(mmap_base,    0x400_000)?;   // mmap dynamic heap
+        }
+
+        // Suppress unused-variable warning on targets where arena_size is not used directly
+        let _ = arena_size;
+        #[cfg(not(target_os = "android"))]
+        let _ = gles_heap;
+
         let bionic = BionicBridge::new(bionic_stubs, bionic_heap, 0x400_000);
         bionic.install_stubs(&mut mem)?;
 
@@ -95,6 +135,17 @@ impl Walzer32Session {
         let surface = SurfaceBridge::new();
 
         let mut engine = DbtEngine::new(mem);
+
+        // Install host signal handlers for Fastmem/SMC on Android with actual host arena base
+        #[cfg(target_os = "android")]
+        {
+            let host_base = engine.mem.as_mut_ptr() as usize;
+            let mut sig_mgr = walzer32_rt::SignalManager::new(host_base, walzer32_core::ARENA_4GB_SIZE);
+            if let Err(e) = sig_mgr.install_handlers() {
+                log_e!("[walzer32] Warning: Failed to install signal handlers: {}", e);
+            }
+        }
+
         engine.cpu.set_sp(stack_top.as_u32() - 0x1000);
         engine.set_mmap_base(mmap_base);
         engine.sync_signal_state(&bionic.signal_state);

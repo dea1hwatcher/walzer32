@@ -9,8 +9,125 @@
 /// Walzer32 synthesizes a guest exception / Data Abort trap rather than crashing the host process.
 
 use byteorder::{ByteOrder, LittleEndian};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use walzer32_core::{CpuState, GuestAddr, Memory, MemoryError, Reg};
+
+// ── Global arena bounds & chained host handlers (async-signal-safe) ───────────
+static ARENA_HOST_BASE: AtomicUsize = AtomicUsize::new(0);
+static ARENA_HOST_SIZE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(unix)]
+static PREV_HANDLERS_READY: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
+static mut PREV_SIGSEGV: Option<libc::sigaction> = None;
+#[cfg(unix)]
+static mut PREV_SIGBUS: Option<libc::sigaction> = None;
+#[cfg(unix)]
+static mut PREV_SIGILL: Option<libc::sigaction> = None;
+
+// ── Fastmem fault relay atomics (async-signal-safe) ──────────────────────────
+// Written in host_signal_handler, read in the execution loop via take_fastmem_fault().
+
+#[cfg(unix)]
+static FASTMEM_FAULT_PENDING: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
+static FASTMEM_FAULT_ADDR: AtomicU64 = AtomicU64::new(0);
+#[cfg(unix)]
+static FASTMEM_FAULT_SIG: AtomicU32 = AtomicU32::new(0);
+
+/// Drains a pending hardware fault notification set by the POSIX signal handler.
+///
+/// Returns `Some((signal_number, fault_address))` exactly once per fault, or `None`.
+/// This is async-signal-safe on the write side and lock-free on the read side.
+pub fn take_fastmem_fault() -> Option<(u32, u64)> {
+    #[cfg(unix)]
+    if FASTMEM_FAULT_PENDING.swap(false, Ordering::AcqRel) {
+        let sig = FASTMEM_FAULT_SIG.load(Ordering::Acquire);
+        let addr = FASTMEM_FAULT_ADDR.load(Ordering::Acquire);
+        return Some((sig, addr));
+    }
+    None
+}
+
+// ── Thread-local sigsetjmp/siglongjmp guard for zero-loop AArch64 JIT faults ──
+#[cfg(all(target_arch = "aarch64", target_os = "android"))]
+mod jit_guard {
+    use std::cell::{Cell, UnsafeCell};
+    use walzer32_core::CpuState;
+
+    // Bionic aarch64 <setjmp.h>: #define _JBLEN 32; typedef long sigjmp_buf[_JBLEN + 1];
+    pub const SIGJMP_LEN: usize = 33;
+
+    unsafe extern "C" {
+        pub fn sigsetjmp(env: *mut libc::c_long, savemask: libc::c_int) -> libc::c_int;
+        pub fn siglongjmp(env: *mut libc::c_long, val: libc::c_int) -> !;
+    }
+
+    pub struct ThreadFaultGuard {
+        pub active: Cell<bool>,
+        pub jmp_buf: UnsafeCell<[libc::c_long; SIGJMP_LEN]>,
+        pub fault_sig: Cell<u32>,
+        pub fault_guest_addr: Cell<u64>,
+    }
+
+    impl ThreadFaultGuard {
+        const fn new() -> Self {
+            Self {
+                active: Cell::new(false),
+                jmp_buf: UnsafeCell::new([0; SIGJMP_LEN]),
+                fault_sig: Cell::new(0),
+                fault_guest_addr: Cell::new(0),
+            }
+        }
+    }
+
+    thread_local! {
+        pub static GUARD: ThreadFaultGuard = const { ThreadFaultGuard::new() };
+    }
+
+    #[inline(never)]
+    pub unsafe fn invoke_jit_guarded(
+        jit_fn: unsafe extern "C" fn(*mut CpuState, *mut u8) -> u64,
+        cpu: *mut CpuState,
+        mem_base: *mut u8,
+    ) -> Result<u64, (u32, u64)> {
+        GUARD.with(|g| {
+            g.active.set(true);
+            let buf_ptr = g.jmp_buf.get() as *mut libc::c_long;
+            // savemask = 0 avoids a sigprocmask syscall on every JIT block entry;
+            // host_signal_handler explicitly unblocks the caught signal before siglongjmp.
+            if unsafe { sigsetjmp(buf_ptr, 0) } == 0 {
+                let res = unsafe { jit_fn(cpu, mem_base) };
+                g.active.set(false);
+                Ok(res)
+            } else {
+                g.active.set(false);
+                Err((g.fault_sig.get(), g.fault_guest_addr.get()))
+            }
+        })
+    }
+}
+
+/// Executes compiled AArch64 JIT code under a hardware fault guard.
+///
+/// On Android AArch64, traps occurring inside the guest arena during JIT execution
+/// unwind cleanly via `siglongjmp` returning `Err((signal_nr, guest_fault_addr))`.
+#[inline]
+pub unsafe fn invoke_jit_guarded(
+    jit_fn: unsafe extern "C" fn(*mut CpuState, *mut u8) -> u64,
+    cpu: *mut CpuState,
+    mem_base: *mut u8,
+) -> Result<u64, (u32, u64)> {
+    #[cfg(all(target_arch = "aarch64", target_os = "android"))]
+    {
+        unsafe { jit_guard::invoke_jit_guarded(jit_fn, cpu, mem_base) }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_os = "android")))]
+    {
+        Ok(unsafe { jit_fn(cpu, mem_base) })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultOrigin {
@@ -114,6 +231,11 @@ impl SignalManager {
 
     /// Installs POSIX signal handlers on Unix/Android targets
     pub fn install_handlers(&mut self) -> Result<(), String> {
+        if self.arena_size > 0 {
+            ARENA_HOST_BASE.store(self.arena_base, Ordering::Release);
+            ARENA_HOST_SIZE.store(self.arena_size, Ordering::Release);
+        }
+
         if SIGNAL_HANDLERS_ACTIVE.swap(true, Ordering::SeqCst) {
             self.handlers_installed = true;
             return Ok(());
@@ -135,21 +257,31 @@ impl SignalManager {
                 return Err("Failed to setup sigaltstack".into());
             }
 
-            // 2. Configure sigaction handler
+            // 2. Configure sigaction handler and preserve previous handlers (for ART chaining)
             let mut sa: sigaction = unsafe { mem::zeroed() };
             sa.sa_sigaction = host_signal_handler as *const () as usize;
             sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
 
             unsafe {
-                if sigaction(SIGSEGV, &sa, std::ptr::null_mut()) != 0 {
+                let mut prev_segv: sigaction = mem::zeroed();
+                if sigaction(SIGSEGV, &sa, &mut prev_segv) != 0 {
                     return Err("Failed to install SIGSEGV handler".into());
                 }
-                if sigaction(SIGBUS, &sa, std::ptr::null_mut()) != 0 {
+                PREV_SIGSEGV = Some(prev_segv);
+
+                let mut prev_bus: sigaction = mem::zeroed();
+                if sigaction(SIGBUS, &sa, &mut prev_bus) != 0 {
                     return Err("Failed to install SIGBUS handler".into());
                 }
-                if sigaction(SIGILL, &sa, std::ptr::null_mut()) != 0 {
+                PREV_SIGBUS = Some(prev_bus);
+
+                let mut prev_ill: sigaction = mem::zeroed();
+                if sigaction(SIGILL, &sa, &mut prev_ill) != 0 {
                     return Err("Failed to install SIGILL handler".into());
                 }
+                PREV_SIGILL = Some(prev_ill);
+
+                PREV_HANDLERS_READY.store(true, Ordering::Release);
             }
         }
 
@@ -717,19 +849,113 @@ impl SignalState {
 }
 
 #[cfg(unix)]
-extern "C" fn host_signal_handler(sig: libc::c_int, info: *mut libc::siginfo_t, _ucontext: *mut libc::c_void) {
-    let _fault_addr = if !info.is_null() {
+extern "C" fn host_signal_handler(sig: libc::c_int, info: *mut libc::siginfo_t, ucontext: *mut libc::c_void) {
+    // Async-signal-safe: only atomics, TLS Cells, pthread_sigmask, siglongjmp, and handler chaining.
+    let fault_addr: usize = if !info.is_null() {
         unsafe { (*info).si_addr() as usize }
     } else {
         0
     };
-    // Async-signal-safe write to STDERR_FILENO without heap allocation or stdio locks
-    let msg = b"CRITICAL: host_signal_handler caught fatal signal in guest DBT\n";
-    unsafe {
-        libc::write(libc::STDERR_FILENO, msg.as_ptr() as *const libc::c_void, msg.len());
+
+    let arena_base = ARENA_HOST_BASE.load(Ordering::Acquire);
+    let arena_size = ARENA_HOST_SIZE.load(Ordering::Acquire);
+    let in_arena = arena_size > 0
+        && fault_addr >= arena_base
+        && fault_addr < arena_base.saturating_add(arena_size);
+
+    #[cfg(all(target_arch = "aarch64", target_os = "android"))]
+    if in_arena || sig == libc::SIGILL {
+        let should_unwind = jit_guard::GUARD.with(|g| g.active.get());
+        if should_unwind {
+            let guest_offset = if in_arena {
+                (fault_addr - arena_base) as u64
+            } else {
+                0
+            };
+            let guest_sig = match sig {
+                libc::SIGSEGV => signal_nr::SIGSEGV,
+                libc::SIGBUS => signal_nr::SIGBUS,
+                libc::SIGILL => signal_nr::SIGILL,
+                _ => signal_nr::SIGSEGV,
+            };
+
+            let origin = if guest_offset < 0x1000 {
+                FaultOrigin::GuestNullPointer { fault_addr }
+            } else {
+                FaultOrigin::GuestArenaViolation {
+                    fault_addr,
+                    guest_addr: GuestAddr::new(guest_offset as u32),
+                }
+            };
+            LAST_GUEST_FAULT.with(|cell| {
+                let _ = cell.replace(Some(origin));
+            });
+
+            jit_guard::GUARD.with(|g| {
+                g.active.set(false);
+                g.fault_sig.set(guest_sig);
+                g.fault_guest_addr.set(guest_offset);
+
+                // Unblock the signal before siglongjmp (since sigsetjmp used savemask = 0)
+                unsafe {
+                    let mut set: libc::sigset_t = std::mem::zeroed();
+                    libc::sigemptyset(&mut set);
+                    libc::sigaddset(&mut set, sig);
+                    libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+                    jit_guard::siglongjmp(g.jmp_buf.get() as *mut libc::c_long, 1);
+                }
+            });
+        }
     }
-    let _ = sig;
-    std::process::abort();
+
+    // Outside active JIT execution or outside guest arena: record fault and chain to previous (e.g. ART) handler
+    if in_arena {
+        let guest_offset = (fault_addr - arena_base) as u32;
+        LAST_GUEST_FAULT.with(|cell| {
+            let _ = cell.replace(Some(FaultOrigin::GuestArenaViolation {
+                fault_addr,
+                guest_addr: GuestAddr::new(guest_offset),
+            }));
+        });
+        FASTMEM_FAULT_ADDR.store(guest_offset as u64, Ordering::Release);
+        FASTMEM_FAULT_SIG.store(sig as u32, Ordering::Release);
+        FASTMEM_FAULT_PENDING.store(true, Ordering::Release);
+        return;
+    }
+
+    if PREV_HANDLERS_READY.load(Ordering::Acquire) {
+        let prev_opt = unsafe {
+            match sig {
+                libc::SIGSEGV => PREV_SIGSEGV,
+                libc::SIGBUS => PREV_SIGBUS,
+                libc::SIGILL => PREV_SIGILL,
+                _ => None,
+            }
+        };
+        if let Some(prev) = prev_opt {
+            let handler = prev.sa_sigaction;
+            if handler != 0 && handler != libc::SIG_DFL && handler != libc::SIG_IGN {
+                if (prev.sa_flags & libc::SA_SIGINFO) != 0 {
+                    let f: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) =
+                        unsafe { std::mem::transmute(handler) };
+                    f(sig, info, ucontext);
+                } else {
+                    let f: extern "C" fn(libc::c_int) = unsafe { std::mem::transmute(handler) };
+                    f(sig);
+                }
+                return;
+            }
+            if handler == libc::SIG_IGN {
+                return;
+            }
+            unsafe {
+                libc::sigaction(sig, &prev, std::ptr::null_mut());
+            }
+            return;
+        }
+    }
+
+    let _ = ucontext;
 }
 
 #[cfg(test)]

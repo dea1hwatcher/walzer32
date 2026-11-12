@@ -1,5 +1,7 @@
 use walzer32_core::{GuestAddr, Memory, Reg};
 use walzer32_rt::{DbtEngine, EngineError};
+#[cfg(unix)]
+use libc;
 use crate::asset::AssetBridge;
 use crate::audio::AudioBridge;
 use crate::bionic::BionicBridge;
@@ -149,6 +151,30 @@ pub fn invoke_guest_extended<M: Memory>(
                         }
                         continue;
                     }
+                }
+            }
+        }
+
+        // Check for pending Fastmem faults from hardware signal handler
+        #[cfg(unix)]
+        if let Some((sig, fault_addr)) = walzer32_rt::take_fastmem_fault() {
+            let sig_nr = match sig as libc::c_int {
+                libc::SIGSEGV => walzer32_rt::signals::signal_nr::SIGSEGV,
+                libc::SIGBUS  => walzer32_rt::signals::signal_nr::SIGBUS,
+                libc::SIGILL  => walzer32_rt::signals::signal_nr::SIGILL,
+                _ => walzer32_rt::signals::signal_nr::SIGSEGV,
+            };
+            // Try SMC first (write to code page)
+            if engine.handle_write_fault(walzer32_core::GuestAddr::new(fault_addr as u32)) {
+                continue; // SMC handled, retry
+            }
+            // Try guest signal delivery
+            match engine.handle_guest_fault(sig_nr, Some(fault_addr as u32)) {
+                Ok(true) => continue,
+                _ => {
+                    return Err(EngineError::Trap(
+                        format!("Unhandled guest signal {} at 0x{:08x}", sig_nr, fault_addr)
+                    ));
                 }
             }
         }

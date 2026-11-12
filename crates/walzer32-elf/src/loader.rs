@@ -388,9 +388,12 @@ impl ElfLoader {
 
         let total_size = (max_vaddr - min_vaddr) as usize;
 
-        // 2. Load PT_LOAD segments into guest memory
+        // 2. Load PT_LOAD segments into guest memory (committing pages first for ArenaMemory)
         for ph in parser.load_segments() {
             let seg_target = load_base.add(ph.p_vaddr);
+            if ph.p_memsz > 0 {
+                mem.commit_range(seg_target, ph.p_memsz as usize)?;
+            }
             let file_bytes = parser.segment_bytes(ph)?;
 
             // Copy file data

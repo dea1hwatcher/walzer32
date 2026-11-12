@@ -320,6 +320,9 @@ impl SyscallHandler for DefaultSyscallHandler {
                 if req_brk == 0 || req_brk < self.brk {
                     cpu.set_reg(Reg::R0, self.brk);
                 } else {
+                    if req_brk > self.brk {
+                        let _ = mem.commit_range(GuestAddr::new(self.brk), (req_brk - self.brk) as usize);
+                    }
                     self.brk = req_brk;
                     cpu.set_reg(Reg::R0, self.brk);
                 }
@@ -412,6 +415,11 @@ impl SyscallHandler for DefaultSyscallHandler {
                     self.mmap_current = self.mmap_current.add(aligned_len as u32);
                     addr
                 };
+
+                // Commit physical pages in ArenaMemory before copying ashmem or applying mprotect
+                if aligned_len > 0 {
+                    let _ = mem.commit_range(map_addr, aligned_len);
+                }
 
                 // If fd corresponds to an ashmem region, copy its initial data into guest memory
                 if let Some(ashmem) = self.vfs.ashmem_regions.get(&fd) {
@@ -967,7 +975,25 @@ impl<M: Memory> DbtEngine<M> {
                 type JitFn = unsafe extern "C" fn(cpu: *mut CpuState, mem_base: *mut u8) -> u64;
                 let jit_fn: JitFn = unsafe { std::mem::transmute(host_ptr.0) };
                 let mem_base = self.mem.as_mut_ptr();
-                let res = unsafe { jit_fn(&mut self.cpu as *mut _, mem_base) };
+                let res = match unsafe {
+                    crate::signals::invoke_jit_guarded(jit_fn, &mut self.cpu as *mut _, mem_base)
+                } {
+                    Ok(v) => v,
+                    Err((sig, guest_fault_addr)) => {
+                        self.last_direct_exit = None;
+                        let guest_addr = GuestAddr::new(guest_fault_addr as u32);
+                        if self.handle_write_fault(guest_addr) {
+                            return Ok(EngineStepResult::Continue);
+                        }
+                        if let Ok(true) = self.handle_guest_fault(sig, Some(guest_fault_addr as u32)) {
+                            return Ok(EngineStepResult::Continue);
+                        }
+                        return Err(EngineError::Trap(format!(
+                            "Unhandled guest JIT signal {} at guest 0x{:08x}",
+                            sig, guest_fault_addr
+                        )));
+                    }
+                };
 
                 let exit_reason = (res >> 32) as u64;
                 let exit_payload = res as u32;

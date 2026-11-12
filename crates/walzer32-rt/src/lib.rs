@@ -26,6 +26,7 @@ pub use futex::{FutexError, FutexManager, FUTEX_WAIT, FUTEX_WAKE, FUTEX_REQUEUE}
 pub use jit_memory::{JitPage, flush_icache, PAGE_SIZE};
 pub use jit_pool::{CommittedBlock, HostCodePtr, JitPool};
 pub use signals::{FaultOrigin, SignalManager};
+pub use signals::take_fastmem_fault;
 pub use syscall::{futex_op, nr, SyscallArgs};
 pub use telemetry::TelemetryManager;
 pub use thread::{DEFAULT_THREAD_STACK_SIZE, MAIN_THREAD_TID, ThreadDescriptor, ThreadManager};
