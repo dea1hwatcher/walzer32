@@ -54,6 +54,7 @@ pub struct Walzer32Session {
     pub loaded_libraries: HashMap<String, LoadedLibrary>,
     pub next_load_addr: GuestAddr,
     pub jni_registry: crate::dynamic_jni::JniMethodRegistry,
+    pub owns_host_window: bool,
     pub initialized: bool,
 }
 
@@ -164,6 +165,7 @@ impl Walzer32Session {
             loaded_libraries: HashMap::new(),
             next_load_addr: lib_load_base,
             jni_registry: crate::dynamic_jni::JniMethodRegistry::new(),
+            owns_host_window: false,
             initialized: true,
         })
     }
@@ -406,18 +408,40 @@ impl Walzer32Session {
         &self.jni.registered_natives
     }
 
+    fn release_host_window(&mut self) {
+        #[cfg(target_os = "android")]
+        if self.owns_host_window && self.gles.host_window_ptr != 0 {
+            if let Some(fp) = self.gles.resolve_host_symbol("ANativeWindow_release") {
+                let release_fn: unsafe extern "C" fn(*mut std::ffi::c_void) =
+                    unsafe { std::mem::transmute(fp) };
+                unsafe { release_fn(self.gles.host_window_ptr as *mut std::ffi::c_void) };
+            }
+        }
+        self.owns_host_window = false;
+        self.gles.host_window_ptr = 0;
+    }
+
     /// Handles SurfaceCreated lifecycle event from Android UI thread
     pub fn on_surface_created(&mut self, window_ptr: usize, width: u32, height: u32) {
+        if self.gles.host_window_ptr != 0 && self.gles.host_window_ptr != window_ptr {
+            self.release_host_window();
+        }
+        self.gles.host_window_ptr = window_ptr;
+        self.bionic.surface_width = width;
+        self.bionic.surface_height = height;
         self.surface.on_surface_created(window_ptr, width, height);
     }
 
     /// Handles SurfaceChanged viewport dimension update
     pub fn on_surface_changed(&mut self, width: u32, height: u32) {
+        self.bionic.surface_width = width;
+        self.bionic.surface_height = height;
         self.surface.on_surface_changed(width, height);
     }
 
     /// Handles SurfaceDestroyed event
     pub fn on_surface_destroyed(&mut self) {
+        self.release_host_window();
         self.surface.on_surface_destroyed();
     }
 
@@ -679,4 +703,10 @@ pub fn get_or_init_session() -> Result<std::sync::MutexGuard<'static, Option<Wal
 pub fn reset_session() {
     let mut guard = GLOBAL_SESSION.lock().unwrap_or_else(|e| e.into_inner());
     *guard = None;
+}
+
+impl Drop for Walzer32Session {
+    fn drop(&mut self) {
+        self.release_host_window();
+    }
 }

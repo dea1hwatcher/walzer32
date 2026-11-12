@@ -66,6 +66,9 @@ pub struct HostBridge {
     symbols: HashMap<String, RawFnPtr>,
 }
 
+unsafe impl Send for HostBridge {}
+unsafe impl Sync for HostBridge {}
+
 impl HostBridge {
     /// Returns `true` when running on an actual Android device / emulator.
     pub fn available() -> bool {
@@ -90,6 +93,8 @@ impl HostBridge {
                 "libEGL.so\0",
                 "libGLESv2.so\0",
                 "libGLESv3.so\0",
+                "libandroid.so\0",
+                "libaaudio.so\0",
                 "liblog.so\0",
                 "libc.so\0",
                 "libm.so\0",

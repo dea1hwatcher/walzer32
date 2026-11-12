@@ -160,7 +160,7 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeReset(
 /// JNI Export: SurfaceView created - establishes native window and assigns 32-bit guest handle
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeSurfaceCreated(
-    _env: JNIEnv,
+    env: JNIEnv,
     _clazz: JClass,
     surface: JObject,
     width: JInt,
@@ -171,7 +171,55 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeSurfaceCr
         Err(_) => return JNI_ERR_GENERIC,
     };
     if let Some(session) = guard.as_mut() {
-        session.on_surface_created(surface as usize, width as u32, height as u32);
+        #[cfg(target_os = "android")]
+        let (window_ptr, owns_window) = if !env.is_null() && !surface.is_null() {
+            if let Some(fp) = session.gles.resolve_host_symbol("ANativeWindow_fromSurface") {
+                let from_surface: unsafe extern "C" fn(JNIEnv, JObject) -> *mut c_void =
+                    unsafe { std::mem::transmute(fp) };
+                let win = unsafe { from_surface(env, surface) };
+                if !win.is_null() {
+                    (win as usize, true)
+                } else {
+                    (surface as usize, false)
+                }
+            } else {
+                (surface as usize, false)
+            }
+        } else {
+            (surface as usize, false)
+        };
+        #[cfg(not(target_os = "android"))]
+        let (window_ptr, owns_window) = {
+            let _ = env;
+            (surface as usize, false)
+        };
+
+        #[allow(unused_mut)]
+        let mut final_w = width as u32;
+        #[allow(unused_mut)]
+        let mut final_h = height as u32;
+        #[cfg(target_os = "android")]
+        if owns_window && window_ptr != 0 && (final_w == 0 || final_h == 0) {
+            if let Some(fp) = session.gles.resolve_host_symbol("ANativeWindow_getWidth") {
+                let get_w: unsafe extern "C" fn(*mut c_void) -> i32 =
+                    unsafe { std::mem::transmute(fp) };
+                let w = unsafe { get_w(window_ptr as *mut c_void) };
+                if w > 0 {
+                    final_w = w as u32;
+                }
+            }
+            if let Some(fp) = session.gles.resolve_host_symbol("ANativeWindow_getHeight") {
+                let get_h: unsafe extern "C" fn(*mut c_void) -> i32 =
+                    unsafe { std::mem::transmute(fp) };
+                let h = unsafe { get_h(window_ptr as *mut c_void) };
+                if h > 0 {
+                    final_h = h as u32;
+                }
+            }
+        }
+
+        session.on_surface_created(window_ptr, final_w, final_h);
+        session.owns_host_window = owns_window;
         JNI_OK
     } else {
         JNI_ERR_GENERIC
