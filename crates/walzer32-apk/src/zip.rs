@@ -292,6 +292,19 @@ impl ZipBuilder {
         self.entries.is_empty()
     }
 
+    /// Replaces an existing entry by name in-place (preserves order).
+    /// If no entry with that name exists, the data is added as a new stored entry.
+    pub fn replace_file(&mut self, name: &str, data: &[u8]) {
+        for entry in &mut self.entries {
+            if entry.name == name {
+                entry.data = data.to_vec();
+                return;
+            }
+        }
+        // Not found — add as a new stored (uncompressed) entry
+        self.add_file(name, data);
+    }
+
     /// Builds the complete ZIP archive bytes in memory
     pub fn build(&self) -> Vec<u8> {
         let mut data = Vec::new();

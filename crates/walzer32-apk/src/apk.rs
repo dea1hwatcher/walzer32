@@ -17,6 +17,8 @@ pub enum ApkError {
     NoArm32Libraries,
     #[error("Library '{0}' not found in APK")]
     LibraryNotFound(String),
+    #[error("APK signing failed: {0}")]
+    Signer(String),
 }
 
 /// Information about a native shared library (.so) inside an APK

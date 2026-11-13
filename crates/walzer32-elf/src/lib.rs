@@ -9,4 +9,4 @@ pub use loader::{
     CompositeResolver, DsoRegistry, ElfLoader, LoadedLibrary, LoaderError, NullResolver,
     SymbolBinding, SymbolInfo, SymbolResolver, TlsTemplateInfo,
 };
-pub use parser::{ElfError, ElfParser};
+pub use parser::{topological_sort_libs, ElfError, ElfParser};

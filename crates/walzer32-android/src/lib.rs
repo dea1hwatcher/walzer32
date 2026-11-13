@@ -7,6 +7,9 @@ pub mod session;
 
 pub use dynamic_jni::{JniMethodInfo, JniMethodRegistry, parse_jni_export};
 pub use jni_exports::*;
-pub use session::{SessionError, Walzer32Session, get_or_init_session, reset_session};
+pub use session::{
+    get_or_init_session, reset_session, walzer32_universal_jni_dispatcher, CompiledJniThunk,
+    SessionError, UniversalJniDescriptor, Walzer32Session,
+};
 pub use walzer32_elf::LoadedLibrary;
 pub use walzer32_rt::{TelemetryManager, TombstoneReport, TombstoneSignal};

@@ -1,5 +1,6 @@
 use crate::apk::{ApkError, ApkPackage};
 use crate::zip::ZipBuilder;
+use crate::{arm64_elf, dex, manifest};
 
 /// Configuration options for APK repackaging
 #[derive(Debug, Clone)]
@@ -14,6 +15,14 @@ pub struct RepackageOptions {
     pub so_alignment: usize,
     /// Keep legacy signatures in META-INF (default: false, stripped for re-signing)
     pub keep_legacy_signatures: bool,
+    /// Patch AndroidManifest.xml to set extractNativeLibs=true (default: true)
+    pub patch_manifest: bool,
+    /// Inject walzer32 DEX bootstrap as classes2.dex (default: true)
+    pub inject_dex_bootstrap: bool,
+    /// Sign the output APK via apksigner (requires JAVA_HOME + ANDROID_HOME, default: false)
+    pub sign_output_apk: bool,
+    /// Generate dynamic ARM64 stubs per-library using arm64_elf module (default: true)
+    pub use_dynamic_arm64_stubs: bool,
 }
 
 impl Default for RepackageOptions {
@@ -24,6 +33,10 @@ impl Default for RepackageOptions {
             primary_lib: None,
             so_alignment: 4096,
             keep_legacy_signatures: false,
+            patch_manifest: true,
+            inject_dex_bootstrap: true,
+            sign_output_apk: false,
+            use_dynamic_arm64_stubs: true,
         }
     }
 }
@@ -38,6 +51,9 @@ pub struct RepackageReport {
     pub injected_config_path: String,
     pub primary_lib: String,
     pub output_size: usize,
+    pub patched_manifest: bool,
+    pub injected_dex_bootstrap: bool,
+    pub signed: bool,
 }
 
 /// Precompiled valid AArch64 ELF shared library stub satisfying Android 15/16 Bionic invariants
@@ -65,20 +81,30 @@ pub fn repackage_for_arm64(
         return Err(ApkError::NoArm32Libraries);
     }
 
-    let arm32_names: Vec<String> = arm32_libs.iter().map(|lib| lib.filename.clone()).collect();
+    // Collect metadata before reading all files (avoid borrow conflict with apk)
+    let arm32_meta: Vec<(String, String)> = arm32_libs
+        .iter()
+        .map(|lib| (lib.path.clone(), lib.filename.clone()))
+        .collect();
     let primary_lib = match options.primary_lib {
         Some(ref name) => name.clone(),
-        None => arm32_libs[0].filename.clone(),
+        None => arm32_meta[0].1.clone(),
     };
+    let arm32_names: Vec<String> = arm32_meta.iter().map(|(_, n)| n.clone()).collect();
 
     let all_files = apk.read_all_files()?;
+
+    // Build a lookup: zip-path -> bytes (used for dynamic stub generation)
+    let file_map: std::collections::HashMap<String, Vec<u8>> =
+        all_files.iter().cloned().collect();
+
     let mut builder = ZipBuilder::new();
     builder.set_default_so_alignment(options.so_alignment);
 
-    let mut preserved_files = 0;
-    let mut stripped_signatures = 0;
+    let mut preserved_files = 0usize;
+    let mut stripped_signatures = 0usize;
 
-    for (name, data) in all_files {
+    for (name, data) in &all_files {
         // Strip legacy signatures unless explicitly told to keep them
         if !options.keep_legacy_signatures
             && name.starts_with("META-INF/")
@@ -91,21 +117,38 @@ pub fn repackage_for_arm64(
             continue;
         }
 
-        // Avoid duplicate bridge injection
+        // Skip entries we will re-inject
         if name == "lib/arm64-v8a/libwalzer32.so" || name == "assets/walzer32_config.prop" {
             continue;
         }
 
         if name.ends_with(".so") {
-            let mut so_bytes = data;
+            let mut so_bytes = data.clone();
             // Sanitize ELF headers for 32-bit ARM libraries (strip DT_TEXTREL & normalize DT_NEEDED)
             let _ = walzer32_elf::sanitize_elf_headers(&mut so_bytes);
-            builder.add_file_aligned(&name, &so_bytes, options.so_alignment);
+            builder.add_file_aligned(name, &so_bytes, options.so_alignment);
         } else {
-            builder.add_file(&name, &data);
+            builder.add_file(name, data);
         }
         preserved_files += 1;
     }
+
+    // Optionally patch AndroidManifest.xml
+    let patched_manifest = if options.patch_manifest {
+        if let Some(raw) = file_map.get("AndroidManifest.xml") {
+            match manifest::patch_manifest_extract_native_libs(raw, true) {
+                Ok(patched) => {
+                    builder.replace_file("AndroidManifest.xml", &patched);
+                    true
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
 
     // Inject host ARM64 DBT bridge library
     let arm64_bridge_bytes = match options.custom_libwalzer32 {
@@ -118,15 +161,31 @@ pub fn repackage_for_arm64(
         options.so_alignment,
     );
 
-    // Also inject arm64-v8a stubs for each guest 32-bit library so System.loadLibrary succeeds
-    for lib_name in &arm32_names {
-        if lib_name == "libwalzer32.so" {
+    // Inject arm64-v8a stubs for each guest 32-bit library so System.loadLibrary succeeds
+    for (zip_path, lib_filename) in &arm32_meta {
+        if lib_filename == "libwalzer32.so" {
             continue;
         }
-        let stub_elf = generate_synthetic_arm64_stub(lib_name, Some("libwalzer32.so"));
-        let stub_path = format!("lib/arm64-v8a/{}", lib_name);
+        let stub_elf = if options.use_dynamic_arm64_stubs {
+            let empty = Vec::new();
+            let lib_bytes = file_map.get(zip_path).unwrap_or(&empty);
+            let exports = arm64_elf::extract_arm32_jni_exports(lib_bytes);
+            arm64_elf::generate_dynamic_arm64_stub(lib_filename, &["libwalzer32.so"], &exports)
+        } else {
+            generate_synthetic_arm64_stub(lib_filename, Some("libwalzer32.so"))
+        };
+        let stub_path = format!("lib/arm64-v8a/{}", lib_filename);
         builder.add_file_aligned(&stub_path, &stub_elf, options.so_alignment);
     }
+
+    // Optionally inject DEX bootstrap
+    let injected_dex_bootstrap = if options.inject_dex_bootstrap {
+        let dex_bytes = dex::generate_walzer32_bootstrap_dex();
+        builder.add_file("classes2.dex", &dex_bytes);
+        true
+    } else {
+        false
+    };
 
     // Build assets/walzer32_config.prop
     let mut config_text = String::new();
@@ -148,7 +207,18 @@ pub fn repackage_for_arm64(
 
     builder.add_file("assets/walzer32_config.prop", config_text.as_bytes());
 
-    let repackaged_bytes = builder.build();
+    let mut repackaged_bytes = builder.build();
+
+    // Optionally sign the APK
+    let signed = if options.sign_output_apk {
+        repackaged_bytes = crate::signer::sign_apk(repackaged_bytes)
+            .map_err(ApkError::Signer)?;
+        true
+    } else {
+        false
+    };
+
+    let output_size = repackaged_bytes.len();
     let report = RepackageReport {
         preserved_files,
         stripped_signature_files: stripped_signatures,
@@ -156,7 +226,10 @@ pub fn repackage_for_arm64(
         injected_arm64_lib: "lib/arm64-v8a/libwalzer32.so".to_string(),
         injected_config_path: "assets/walzer32_config.prop".to_string(),
         primary_lib,
-        output_size: repackaged_bytes.len(),
+        output_size,
+        patched_manifest,
+        injected_dex_bootstrap,
+        signed,
     };
 
     Ok((repackaged_bytes, report))

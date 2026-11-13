@@ -9,6 +9,10 @@ pub fn handle_package_command(
     primary_lib: Option<&str>,
     align: Option<usize>,
     config_props: &[(String, String)],
+    sign: bool,
+    patch_manifest: bool,
+    inject_dex: bool,
+    dynamic_stubs: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Walzer32 APK Repackaging Pipeline ===");
     println!("Input APK:       {}", input_path);
@@ -34,11 +38,19 @@ pub fn handle_package_command(
     }
 
     if arm32_libs.is_empty() {
-        return Err("Cannot repackage: No 32-bit ARM (armeabi-v7a) native libraries found in APK".into());
+        return Err(
+            "Cannot repackage: No 32-bit ARM (armeabi-v7a) native libraries found in APK".into(),
+        );
     }
 
     // Prepare repackaging options
-    let mut options = RepackageOptions::default();
+    let mut options = RepackageOptions {
+        patch_manifest,
+        inject_dex_bootstrap: inject_dex,
+        sign_output_apk: sign,
+        use_dynamic_arm64_stubs: dynamic_stubs,
+        ..Default::default()
+    };
     if let Some(align_val) = align {
         options.so_alignment = align_val;
     }
@@ -51,6 +63,10 @@ pub fn handle_package_command(
         options.custom_libwalzer32 = Some(bridge_bytes);
     }
     options.config_properties = config_props.to_vec();
+
+    if sign {
+        println!("APK Signing:     enabled (debug keystore via keytool + apksigner)");
+    }
 
     println!("\nRepackaging for ARM64-only devices...");
     let (repackaged_bytes, report) = repackage_for_arm64(&input_bytes, &options)?;
@@ -69,8 +85,14 @@ pub fn handle_package_command(
     println!("  Preserved Files:       {}", report.preserved_files);
     println!("  Stripped Signatures:   {}", report.stripped_signature_files);
     println!("  Primary 32-bit Lib:    {}", report.primary_lib);
-    println!("  Injected Host Bridge:  {} (4KB page-aligned)", report.injected_arm64_lib);
+    println!(
+        "  Injected Host Bridge:  {} (4KB page-aligned)",
+        report.injected_arm64_lib
+    );
     println!("  Injected Config:       {}", report.injected_config_path);
+    println!("  Manifest Patched:      {}", report.patched_manifest);
+    println!("  DEX Bootstrap:         {}", report.injected_dex_bootstrap);
+    println!("  APK Signed:            {}", report.signed);
     println!("  Output File:           {}", final_output);
     println!(
         "  Output Size:           {:.2} KB (was {:.2} KB)",
@@ -78,10 +100,19 @@ pub fn handle_package_command(
         input_bytes.len() as f64 / 1024.0
     );
 
-    println!("\nNext steps:");
-    println!("  1. (Optional) Sign APK:   apksigner sign --ks debug.keystore {}", final_output);
-    println!("  2. Install via ADB:       walzer32-cli install {}", final_output);
-    println!("  3. Launch on device:      walzer32-cli launch {}", final_output);
+    if !sign {
+        println!("\nNext steps:");
+        println!(
+            "  1. (Optional) Sign APK:   walzer32-cli package --sign {}",
+            input_path
+        );
+        println!("  2. Install via ADB:       walzer32-cli install {}", final_output);
+        println!("  3. Launch on device:      walzer32-cli launch {}", final_output);
+    } else {
+        println!("\nNext steps:");
+        println!("  1. Install via ADB:  walzer32-cli install {}", final_output);
+        println!("  2. Launch on device: walzer32-cli launch {}", final_output);
+    }
 
     Ok(())
 }

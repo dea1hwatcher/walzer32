@@ -4,10 +4,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
 use walzer32_apk::{ApkError, ApkPackage};
 use walzer32_bridge::{
-    check_fastmem_fault, dispatch_bridge_svc, flush_pending_mt_actions, prepare_guest_call,
-    run_guest_mt_loop, AssetBridge, AudioBridge, AudioRingBuffer, BionicBridge, GlesBridge,
-    HardwareBufferBridge, JniBridge, KeyEvent, RegisteredNativeMethod, SharedGuestRuntime,
-    SurfaceBridge, TouchEvent, VulkanBridge, SENTINEL_RETURN_ADDR, SL_PLAYSTATE_PLAYING,
+    check_fastmem_fault, dispatch_bridge_svc, flush_pending_mt_actions,
+    marshal_host_jni_frame_to_aapcs32, prepare_guest_call, run_guest_mt_loop,
+    unpack_guest_return_to_host_u64, AssetBridge, AudioBridge, AudioRingBuffer, BionicBridge,
+    GlesBridge, HardwareBufferBridge, HostJniCallFrame, JniBridge, JniSignature,
+    JniThunkGenerator, KeyEvent, RegisteredNativeMethod, SharedGuestRuntime, SurfaceBridge,
+    TouchEvent, VulkanBridge, SENTINEL_RETURN_ADDR, SL_PLAYSTATE_PLAYING,
 };
 use walzer32_core::{GuestAddr, Memory, Reg};
 #[cfg(not(target_os = "android"))]
@@ -21,8 +23,138 @@ use walzer32_core::SharedArenaMemory;
 type SessionMemory = SharedArenaMemory;
 #[cfg(not(target_os = "android"))]
 type SessionMemory = SharedMemory;
-use walzer32_elf::{CompositeResolver, ElfLoader, LoadedLibrary, LoaderError, SymbolResolver};
-use walzer32_rt::{DbtEngine, EngineStepResult};
+use walzer32_elf::{
+    topological_sort_libs, CompositeResolver, ElfLoader, ElfParser, LoadedLibrary, LoaderError,
+    SymbolResolver,
+};
+use walzer32_rt::{DbtEngine, EngineStepResult, JitPool};
+
+#[derive(Debug, Clone)]
+pub struct UniversalJniDescriptor {
+    pub class_name: String,
+    pub method_name: String,
+    pub signature: String,
+    pub guest_fn_ptr: GuestAddr,
+    pub parsed_sig: JniSignature,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledJniThunk {
+    pub class_name: String,
+    pub method_name: String,
+    pub signature: String,
+    pub guest_fn_ptr: GuestAddr,
+    pub host_fn_ptr: usize,
+    pub descriptor_ptr: usize,
+}
+
+#[repr(C)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct HostJniNativeMethod {
+    name: *const std::ffi::c_char,
+    signature: *const std::ffi::c_char,
+    fn_ptr: *const std::ffi::c_void,
+}
+
+/// Universal 64-bit->32-bit FFI trampoline invoked by generated AArch64 JNI thunks.
+/// Marshals `HostJniCallFrame` arguments into AAPCS32 softfp and executes the guest 32-bit function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn walzer32_universal_jni_dispatcher(
+    descriptor_ptr: usize,
+    frame: *mut HostJniCallFrame,
+) -> u64 {
+    if descriptor_ptr == 0 || frame.is_null() {
+        return 0;
+    }
+    let frame_copy = unsafe { *frame };
+    let Ok(mut guard) = get_or_init_session() else {
+        return 0;
+    };
+    let Some(session) = guard.as_mut() else {
+        return 0;
+    };
+    let desc = unsafe { &*(descriptor_ptr as *const UniversalJniDescriptor) }.clone();
+    let args32 =
+        marshal_host_jni_frame_to_aapcs32(&desc.parsed_sig, &frame_copy, &mut session.jni);
+    match session.call_native(desc.guest_fn_ptr, &args32) {
+        Ok(r0) => {
+            let r1 = session.engine.cpu.reg(Reg::R1);
+            unpack_guest_return_to_host_u64(desc.parsed_sig.ret, r0, r1, &session.jni)
+        }
+        Err(e) => {
+            log_e!(
+                "Walzer32: Universal JNI dispatch failed for {}.{}{}: {:?}",
+                desc.class_name,
+                desc.method_name,
+                desc.signature,
+                e
+            );
+            0
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+unsafe fn register_natives_on_host_env(
+    host_jni_env: usize,
+    class_name: &str,
+    methods: &[(std::ffi::CString, std::ffi::CString, usize)],
+) -> i32 {
+    if host_jni_env == 0 || methods.is_empty() {
+        return 0;
+    }
+    let env_ptr = host_jni_env as *mut std::ffi::c_void;
+    let vtable = unsafe { *(host_jni_env as *const *const usize) };
+    if vtable.is_null() {
+        return -1;
+    }
+    // JNIEnv table indices: FindClass = 6, ExceptionClear = 17, RegisterNatives = 215, ExceptionCheck = 228
+    let find_class: unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_char) -> *mut std::ffi::c_void =
+        unsafe { std::mem::transmute(*vtable.add(6)) };
+    let exception_clear: unsafe extern "C" fn(*mut std::ffi::c_void) =
+        unsafe { std::mem::transmute(*vtable.add(17)) };
+    let register_natives: unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        *const HostJniNativeMethod,
+        i32,
+    ) -> i32 = unsafe { std::mem::transmute(*vtable.add(215)) };
+    let exception_check: unsafe extern "C" fn(*mut std::ffi::c_void) -> u8 =
+        unsafe { std::mem::transmute(*vtable.add(228)) };
+
+    let Ok(cls_cstr) = std::ffi::CString::new(class_name.replace('.', "/")) else {
+        return -1;
+    };
+    let clazz = unsafe { find_class(env_ptr, cls_cstr.as_ptr()) };
+    if clazz.is_null() || unsafe { exception_check(env_ptr) } != 0 {
+        unsafe { exception_clear(env_ptr) };
+        return -1;
+    }
+
+    let c_methods: Vec<HostJniNativeMethod> = methods
+        .iter()
+        .map(|(n, s, ptr)| HostJniNativeMethod {
+            name: n.as_ptr(),
+            signature: s.as_ptr(),
+            fn_ptr: *ptr as *const std::ffi::c_void,
+        })
+        .collect();
+
+    let rc = unsafe { register_natives(env_ptr, clazz, c_methods.as_ptr(), c_methods.len() as i32) };
+    if unsafe { exception_check(env_ptr) } != 0 {
+        unsafe { exception_clear(env_ptr) };
+    }
+    rc
+}
+
+#[cfg(not(target_os = "android"))]
+unsafe fn register_natives_on_host_env(
+    _host_jni_env: usize,
+    _class_name: &str,
+    _methods: &[(std::ffi::CString, std::ffi::CString, usize)],
+) -> i32 {
+    0
+}
 
 /// Lock-free / ultra-short-lock channels for UI, Audio, and Telemetry JNI calls so they never
 /// block behind `GLOBAL_SESSION` while DBT execution or `nativeDrawFrame` holds the session mutex.
@@ -193,6 +325,11 @@ pub struct Walzer32Session {
     pub owns_host_window: bool,
     pub guest_native_activity_ptr: u32,
     pub guest_native_callbacks_ptr: u32,
+    pub host_java_vm: usize,
+    pub host_jni_env: usize,
+    pub jni_thunk_pool: JitPool,
+    pub jni_descriptors: Vec<Box<UniversalJniDescriptor>>,
+    pub compiled_jni_thunks: HashMap<(String, String, String), CompiledJniThunk>,
     pub initialized: bool,
     pub active_mt_runtime: Option<SharedGuestRuntime>,
 }
@@ -300,6 +437,7 @@ impl Walzer32Session {
         if let Some(futex) = engine.futex_manager() {
             bionic.enable_multithreading(futex);
         }
+        bionic.enable_deferred_dlopen();
 
         let session = Self {
             engine,
@@ -319,6 +457,11 @@ impl Walzer32Session {
             owns_host_window: false,
             guest_native_activity_ptr: 0,
             guest_native_callbacks_ptr: 0,
+            host_java_vm: 0,
+            host_jni_env: 0,
+            jni_thunk_pool: JitPool::new(),
+            jni_descriptors: Vec::new(),
+            compiled_jni_thunks: HashMap::new(),
             initialized: true,
             active_mt_runtime: None,
         };
@@ -326,9 +469,25 @@ impl Walzer32Session {
         Ok(session)
     }
 
-    /// Attach an APK package by raw bytes
+    /// Attach an APK package by raw bytes and expose bundled 32-bit `.so` libraries in VFS for dynamic `dlopen`.
     pub fn attach_apk(&mut self, apk_bytes: Vec<u8>) {
         let _ = self.asset.load_apk(&apk_bytes);
+        if let Ok(apk) = ApkPackage::open(&apk_bytes) {
+            for lib in apk.arm32_libraries() {
+                if let Ok(bytes) = apk.extract_library(&lib.filename) {
+                    let arc = std::sync::Arc::new(bytes);
+                    for path in [
+                        format!("/lib/armeabi-v7a/{}", lib.filename),
+                        format!("/data/app/lib/arm/{}", lib.filename),
+                    ] {
+                        self.bionic.vfs.register_file_arc(&path, std::sync::Arc::clone(&arc));
+                        if let Some(vfs) = self.engine.vfs_mut() {
+                            vfs.register_file_arc(&path, std::sync::Arc::clone(&arc));
+                        }
+                    }
+                }
+            }
+        }
         self.apk_bytes = Some(apk_bytes);
     }
 
@@ -357,8 +516,17 @@ impl Walzer32Session {
         }
     }
 
-    /// Load a 32-bit ELF shared library by name from raw bytes
+    /// Load a 32-bit ELF shared library by name from raw bytes (runs DT_INIT/DT_INIT_ARRAY and JNI_OnLoad).
     pub fn load_library_bytes(&mut self, name: &str, elf_bytes: &[u8]) -> Result<LoadedLibrary, SessionError> {
+        let basename = name.rsplit('/').next().unwrap_or(name);
+        if let Some(existing) = self
+            .loaded_libraries
+            .get(name)
+            .or_else(|| self.loaded_libraries.get(basename))
+        {
+            return Ok(existing.clone());
+        }
+
         let load_addr = self.next_load_addr;
 
         // Specialized NDK bridges precede BionicBridge so dedicated handlers
@@ -385,20 +553,23 @@ impl Walzer32Session {
         let map_resolver = LoadedMapResolver(&self.loaded_libraries);
         composite.add(&map_resolver);
 
-        let loaded = ElfLoader::load(elf_bytes, load_addr, &mut self.engine.mem, &composite)?;
+        let mut loaded = ElfLoader::load(elf_bytes, load_addr, &mut self.engine.mem, &composite)?;
+        if loaded.soname.is_none() {
+            loaded.soname = Some(basename.to_string());
+        }
 
         // Align next load address to 64KB boundary
         let size_aligned = ((loaded.total_size + 0xFFFF) / 0x10000) * 0x10000;
         self.next_load_addr = load_addr.add(size_aligned as u32);
 
-        self.loaded_libraries.insert(name.to_string(), loaded.clone());
+        self.loaded_libraries.insert(basename.to_string(), loaded.clone());
         let _ = self.bionic.register_library(loaded.clone());
         self.jni_registry.register_library(&loaded);
 
         // Automatic AOT translation cache loading & pre-compilation
         if let Some(ref dir) = self.aot_cache_dir {
             let hash = walzer32_rt::calculate_sha256(elf_bytes);
-            let cache_filename = format!("{name}.walzer32_cache");
+            let cache_filename = format!("{basename}.walzer32_cache");
             let cache_path = dir.join(cache_filename);
 
             if cache_path.exists() {
@@ -423,13 +594,139 @@ impl Walzer32Session {
             }
         }
 
-        // Call JNI_OnLoad if present
-        if let Some(onload_addr) = loaded.find_symbol("JNI_OnLoad") {
-            let vm_ptr = self.jni.vm_ptr.as_u32();
-            let _ = self.call_native(onload_addr, &[vm_ptr, 0])?;
+        // Invoke DT_INIT and DT_INIT_ARRAY constructors within mapped module bounds
+        let range_start = loaded.load_base.as_u32();
+        let range_end = range_start.saturating_add(loaded.total_size as u32);
+        let in_module = |addr: GuestAddr| {
+            let raw = addr.as_u32() & !1;
+            raw != 0 && raw != 0xFFFF_FFFE && raw >= range_start && raw < range_end
+        };
+
+        let mut init_fns = Vec::new();
+        if let Some(init) = loaded.init_func {
+            if in_module(init) {
+                init_fns.push(init);
+            }
+        }
+        for &init in &loaded.init_array {
+            if in_module(init) {
+                init_fns.push(init);
+            }
         }
 
+        let onload_opt = loaded.find_symbol("JNI_OnLoad").filter(|&a| in_module(a));
+        if !init_fns.is_empty() || onload_opt.is_some() {
+            let saved_cpu = self.engine.cpu.clone();
+            for ctor in init_fns {
+                if let Err(e) = self.call_native(ctor, &[0, 0, 0]) {
+                    log_e!("Walzer32: constructor 0x{:08x} in {} error: {:?}", ctor.as_u32(), basename, e);
+                }
+            }
+            if let Some(onload_addr) = onload_opt {
+                let vm_ptr = self.jni.vm_ptr.as_u32();
+                self.call_native(onload_addr, &[vm_ptr, 0])?;
+            }
+            self.engine.cpu = saved_cpu;
+        }
+        let _ = self.flush_pending_jni_registrations();
+
         Ok(loaded)
+    }
+
+    /// Compiles an executable AArch64 JNI thunk for `(class_name, method_name, signature)` -> `guest_fn_ptr`.
+    pub fn compile_jni_thunk(
+        &mut self,
+        class_name: &str,
+        method_name: &str,
+        signature: &str,
+        guest_fn_ptr: GuestAddr,
+    ) -> Option<CompiledJniThunk> {
+        let key = (
+            class_name.to_string(),
+            method_name.to_string(),
+            signature.to_string(),
+        );
+        if let Some(existing) = self.compiled_jni_thunks.get(&key) {
+            return Some(existing.clone());
+        }
+        let parsed_sig = JniSignature::parse(signature)?;
+        let desc = Box::new(UniversalJniDescriptor {
+            class_name: key.0.clone(),
+            method_name: key.1.clone(),
+            signature: key.2.clone(),
+            guest_fn_ptr,
+            parsed_sig,
+        });
+        let descriptor_ptr = desc.as_ref() as *const UniversalJniDescriptor as usize;
+        self.jni_descriptors.push(desc);
+
+        let thunk = JniThunkGenerator::generate_ffi_thunk(
+            method_name,
+            signature,
+            guest_fn_ptr,
+            descriptor_ptr,
+            walzer32_universal_jni_dispatcher as *const () as usize,
+        );
+        let block = self.jni_thunk_pool.commit_block(&thunk.code_bytes).ok()?;
+        let _ = self.jni_thunk_pool.flush_current();
+
+        let compiled = CompiledJniThunk {
+            class_name: key.0.clone(),
+            method_name: key.1.clone(),
+            signature: key.2.clone(),
+            guest_fn_ptr,
+            host_fn_ptr: block.code_ptr.0 as usize,
+            descriptor_ptr,
+        };
+        self.compiled_jni_thunks.insert(key, compiled.clone());
+        Some(compiled)
+    }
+
+    /// Compiles pending guest `RegisterNatives` calls into executable AArch64 thunks and
+    /// registers them with host ART when `host_jni_env` is bound.
+    pub fn flush_pending_jni_registrations(&mut self) -> usize {
+        let pending = self.jni.take_pending_registrations();
+        if pending.is_empty() {
+            return 0;
+        }
+        let mut by_class: HashMap<String, Vec<(std::ffi::CString, std::ffi::CString, usize)>> =
+            HashMap::new();
+        let mut total = 0usize;
+        for reg in pending {
+            if let Some(compiled) = self.compile_jni_thunk(
+                &reg.class_name,
+                &reg.method.name,
+                &reg.method.signature,
+                reg.method.fn_ptr,
+            ) {
+                if let (Ok(c_name), Ok(c_sig)) = (
+                    std::ffi::CString::new(reg.method.name.as_str()),
+                    std::ffi::CString::new(reg.method.signature.as_str()),
+                ) {
+                    by_class
+                        .entry(reg.class_name)
+                        .or_default()
+                        .push((c_name, c_sig, compiled.host_fn_ptr));
+                }
+                total += 1;
+            }
+        }
+        if self.host_jni_env != 0 {
+            for (class_name, host_methods) in by_class {
+                if !host_methods.is_empty() {
+                    let rc = unsafe {
+                        register_natives_on_host_env(self.host_jni_env, &class_name, &host_methods)
+                    };
+                    log_i!(
+                        "Walzer32: ART RegisterNatives({}) for {} method(s) -> {}",
+                        class_name,
+                        host_methods.len(),
+                        rc
+                    );
+                }
+            }
+        }
+        total
     }
 
     /// Synchronizes fast non-blocking UI/Audio/Telemetry channels with current session state.
@@ -632,6 +929,27 @@ impl Walzer32Session {
                             &mut Some(&mut self.hardware_buffer),
                             &mut Some(&mut self.vulkan),
                         )?;
+                    }
+                    let _ = self.flush_pending_jni_registrations();
+                    if let Some(req) = self.bionic.take_pending_dlopen() {
+                        let saved_cpu = self.engine.cpu.clone();
+                        let handle = match self.load_library_bytes(&req.filename, &req.elf_bytes) {
+                            Ok(_) => self
+                                .bionic
+                                .dso_registry
+                                .find_by_soname(&req.filename)
+                                .map(|(h, _)| h)
+                                .unwrap_or(0),
+                            Err(e) => {
+                                self.bionic.last_dlerror = Some(format!(
+                                    "dlopen failed loading \"{}\": {:?}",
+                                    req.filename, e
+                                ));
+                                0
+                            }
+                        };
+                        self.engine.cpu = saved_cpu;
+                        self.engine.cpu.set_reg(Reg::R0, handle);
                     }
                     if !self.bionic.pending_spawns.is_empty()
                         || self.bionic.pending_blocking_op.is_some()
@@ -881,6 +1199,56 @@ impl Walzer32Session {
             }
         }
         Ok(true)
+    }
+
+    /// Invokes guest ANativeActivityCallbacks32::onSaveInstanceState (slot 2) and reads saved bytes.
+    pub fn invoke_native_activity_save_state(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
+        if self.guest_native_activity_ptr == 0 || self.guest_native_callbacks_ptr == 0 {
+            return Ok(None);
+        }
+        let slot_addr = GuestAddr::new(self.guest_native_callbacks_ptr).add(2 * 4);
+        let fn_ptr = self.engine.mem.read_u32(slot_addr)?;
+        if fn_ptr == 0 {
+            return Ok(None);
+        }
+        let out_size_ptr = self.alloc_guest_bytes(&[0u8; 4])?;
+        if out_size_ptr == 0 {
+            return Ok(None);
+        }
+        let data_ptr = self.call_native(
+            GuestAddr::new(fn_ptr),
+            &[self.guest_native_activity_ptr, out_size_ptr],
+        )?;
+        let out_size = self.engine.mem.read_u32(GuestAddr::new(out_size_ptr))?;
+        if data_ptr == 0 || out_size == 0 || out_size > 16 * 1024 * 1024 {
+            return Ok(None);
+        }
+        let mut buf = vec![0u8; out_size as usize];
+        self.engine.mem.read_bytes(GuestAddr::new(data_ptr), &mut buf)?;
+        Ok(Some(buf))
+    }
+
+    /// Invokes guest ANativeActivityCallbacks32::onContentRectChanged (slot 13) with a marshaled 32-bit ARect.
+    pub fn invoke_native_activity_content_rect(
+        &mut self,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    ) -> Result<bool, SessionError> {
+        if self.guest_native_activity_ptr == 0 || self.guest_native_callbacks_ptr == 0 {
+            return Ok(false);
+        }
+        let mut rect_bytes = Vec::with_capacity(16);
+        rect_bytes.extend_from_slice(&left.to_le_bytes());
+        rect_bytes.extend_from_slice(&top.to_le_bytes());
+        rect_bytes.extend_from_slice(&right.to_le_bytes());
+        rect_bytes.extend_from_slice(&bottom.to_le_bytes());
+        let rect_guest = self.alloc_guest_bytes(&rect_bytes)?;
+        if rect_guest == 0 {
+            return Ok(false);
+        }
+        self.invoke_native_activity_callback(13, Some(rect_guest))
     }
 
     /// Marshals a 32-bit ANativeActivity struct and executes guest ANativeActivity_onCreate
@@ -1152,64 +1520,60 @@ impl Walzer32Session {
             }
         }
 
-        let mut arm32_libs = apk.arm32_libraries();
+        let arm32_libs = apk.arm32_libraries();
         if arm32_libs.is_empty() {
             log_i!("Walzer32: No 32-bit ARM libraries found in APK!");
             return Ok(0);
         }
 
-        arm32_libs.sort_by_key(|lib| {
-            let name = lib.filename.as_str();
-            if name.contains("gnustl") || name.contains("c++_shared") {
-                0
-            } else if name.contains("objc") || name.contains("dispatch") {
-                1
-            } else if name.contains("ogg") || name.contains("vorbis") || name.contains("openal") {
-                2
-            } else if name.contains("foundation") || name.contains("coregraphics") {
-                3
-            } else if name.contains("quartzcore") || name.contains("uikit") {
-                4
-            } else if name.contains("cocos") || name.contains("noodle") || name.contains("box2d") {
-                5
-            } else if primary_lib.as_deref() == Some(name) {
-                10
-            } else {
-                6
-            }
-        });
-
-        let total_count = arm32_libs.len();
-        log_i!("Walzer32: Loading {} bundled 32-bit libraries (primary: {:?})...", total_count, primary_lib);
-
+        let mut extracted: Vec<(String, Vec<u8>, Vec<String>)> = Vec::with_capacity(arm32_libs.len());
         for lib in &arm32_libs {
-            let lib_data = match apk.extract_library(&lib.filename) {
-                Ok(data) => data,
+            match apk.extract_library(&lib.filename) {
+                Ok(data) => {
+                    let needed = ElfParser::parse(&data)
+                        .map(|p| p.needed_libraries())
+                        .unwrap_or_default();
+                    extracted.push((lib.filename.clone(), data, needed));
+                }
                 Err(e) => {
                     log_e!("Walzer32: Failed to extract {}: {:?}", lib.filename, e);
-                    continue;
                 }
-            };
-            log_i!("Walzer32: Loading {} ({} bytes)...", lib.filename, lib_data.len());
-            match self.load_library_bytes(&lib.filename, &lib_data) {
+            }
+        }
+
+        let lib_names: Vec<String> = extracted.iter().map(|(n, _, _)| n.clone()).collect();
+        let topo_order = topological_sort_libs(
+            &lib_names,
+            |idx| extracted[idx].2.clone(),
+            primary_lib.as_deref(),
+        );
+
+        let total_count = topo_order.len();
+        log_i!(
+            "Walzer32: Topologically loading {} bundled 32-bit libraries (primary: {:?})...",
+            total_count,
+            primary_lib
+        );
+
+        for idx in topo_order {
+            let (ref filename, ref lib_data, ref needed) = extracted[idx];
+            log_i!(
+                "Walzer32: Loading {} ({} bytes, DT_NEEDED={:?})...",
+                filename,
+                lib_data.len(),
+                needed
+            );
+            match self.load_library_bytes(filename, lib_data) {
                 Ok(loaded) => {
                     log_i!(
                         "Walzer32: Successfully loaded {} at 0x{:08x} ({} symbols)",
-                        lib.filename,
+                        filename,
                         loaded.load_base.as_u32(),
                         loaded.symbols.len()
                     );
-                    if let Some(onload_addr) = loaded.find_symbol("JNI_OnLoad") {
-                        log_i!("Walzer32: Invoking JNI_OnLoad in {} at 0x{:08x}...", lib.filename, onload_addr.as_u32());
-                        let vm_ptr = self.jni.vm_ptr.as_u32();
-                        match self.call_native(onload_addr, &[vm_ptr, 0]) {
-                            Ok(ret) => log_i!("Walzer32: JNI_OnLoad in {} returned 0x{:08x}", lib.filename, ret),
-                            Err(e) => log_e!("Walzer32: JNI_OnLoad in {} error: {:?}", lib.filename, e),
-                        }
-                    }
                 }
                 Err(e) => {
-                    log_e!("Walzer32: Failed to load {}: {:?}", lib.filename, e);
+                    log_e!("Walzer32: Failed to load {}: {:?}", filename, e);
                 }
             }
         }

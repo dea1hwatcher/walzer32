@@ -418,7 +418,7 @@ fn main() {
         "package" | "repackage" => {
             if args.len() < 3 {
                 eprintln!("Error: missing file path for 'package' command");
-                eprintln!("Usage: walzer32-cli package <file.apk> [-o output.apk] [--bridge libwalzer32.so] [--primary-lib name.so] [--align 4096]");
+                eprintln!("Usage: walzer32-cli package <file.apk> [-o output.apk] [--bridge libwalzer32.so] [--primary-lib name.so] [--align 4096] [--sign] [--no-patch-manifest] [--no-inject-dex] [--no-dynamic-stubs]");
                 process::exit(1);
             }
             let input_path = &args[2];
@@ -427,6 +427,10 @@ fn main() {
             let mut primary_lib = None;
             let mut align = None;
             let mut config_props = Vec::new();
+            let mut sign = false;
+            let mut patch_manifest = true;
+            let mut inject_dex = true;
+            let mut dynamic_stubs = true;
 
             let mut idx = 3;
             while idx < args.len() {
@@ -487,6 +491,22 @@ fn main() {
                             process::exit(1);
                         }
                     }
+                    "--sign" => {
+                        sign = true;
+                        idx += 1;
+                    }
+                    "--no-patch-manifest" => {
+                        patch_manifest = false;
+                        idx += 1;
+                    }
+                    "--no-inject-dex" => {
+                        inject_dex = false;
+                        idx += 1;
+                    }
+                    "--no-dynamic-stubs" => {
+                        dynamic_stubs = false;
+                        idx += 1;
+                    }
                     unknown => {
                         eprintln!("Error: unknown option '{}'", unknown);
                         print_usage();
@@ -502,6 +522,10 @@ fn main() {
                 primary_lib,
                 align,
                 &config_props,
+                sign,
+                patch_manifest,
+                inject_dex,
+                dynamic_stubs,
             ) {
                 eprintln!("Repackage Error: {}", e);
                 process::exit(1);

@@ -207,6 +207,12 @@ pub struct FieldDescriptor {
 }
 
 #[derive(Debug, Clone)]
+pub struct PendingNativeRegistration {
+    pub class_name: String,
+    pub method: RegisteredNativeMethod,
+}
+
+#[derive(Debug, Clone)]
 pub struct DirectBufferInfo {
     pub addr: GuestAddr,
     pub capacity: usize,
@@ -232,6 +238,9 @@ pub struct JniBridge {
     pub field_values: HashMap<(u32, u32), JniValue>,
     pub global_refs: HashMap<u32, u32>,
     pub registered_natives: Vec<RegisteredNativeMethod>,
+    pub pending_registrations: Vec<PendingNativeRegistration>,
+    pub host_objects: HashMap<u32, usize>,
+    pub host_object_to_guest: HashMap<usize, u32>,
     pub string_heap_cur: GuestAddr,
     pub pending_exception: u32,
     /// Byte/Primitive arrays: handle -> (GuestAddr, element_count, element_size)
@@ -273,6 +282,9 @@ impl JniBridge {
             local_frames: vec![Vec::new()],
             weak_global_refs: HashMap::new(),
             registered_natives: Vec::new(),
+            pending_registrations: Vec::new(),
+            host_objects: HashMap::new(),
+            host_object_to_guest: HashMap::new(),
             string_heap_cur,
             pending_exception: 0,
             arrays: HashMap::new(),
@@ -932,8 +944,13 @@ impl JniBridge {
 
             // ── RegisterNatives ────────────────────────────────────────────────
             jni_idx::REGISTER_NATIVES => {
+                let class_handle = cpu.reg(Reg::R1);
                 let methods_addr = GuestAddr::new(cpu.reg(Reg::R2));
                 let n_methods = cpu.reg(Reg::R3);
+                let class_name = self
+                    .class_name_for_handle(class_handle)
+                    .unwrap_or("com/walzer32/loader/Walzer32Engine")
+                    .to_string();
 
                 for i in 0..n_methods {
                     let entry_addr = methods_addr.add(i * 12);
@@ -944,10 +961,15 @@ impl JniBridge {
                     let name = Self::read_c_string(mem, name_addr)?;
                     let signature = Self::read_c_string(mem, sig_addr)?;
 
-                    self.registered_natives.push(RegisteredNativeMethod {
+                    let method = RegisteredNativeMethod {
                         name,
                         signature,
                         fn_ptr,
+                    };
+                    self.registered_natives.push(method.clone());
+                    self.pending_registrations.push(PendingNativeRegistration {
+                        class_name: class_name.clone(),
+                        method,
                     });
                 }
 
@@ -974,6 +996,41 @@ impl JniBridge {
         self.next_handle += 1;
         self.classes.insert(name, h);
         h
+    }
+
+    /// Maps a 64-bit host JNI reference (`jobject`/`jclass`/`jstring`/`jarray`) into a 32-bit guest handle.
+    pub fn intern_host_object(&mut self, host_ptr: usize) -> u32 {
+        if host_ptr == 0 {
+            return 0;
+        }
+        if let Some(&h) = self.host_object_to_guest.get(&host_ptr) {
+            return h;
+        }
+        let h = self.next_handle;
+        self.next_handle += 1;
+        self.host_objects.insert(h, host_ptr);
+        self.host_object_to_guest.insert(host_ptr, h);
+        h
+    }
+
+    /// Resolves a 32-bit guest handle back to the original 64-bit host JNI pointer, if mapped.
+    pub fn resolve_host_object(&self, guest_handle: u32) -> Option<usize> {
+        if guest_handle == 0 {
+            return Some(0);
+        }
+        self.host_objects.get(&guest_handle).copied()
+    }
+
+    /// Returns the Java class path for a previously interned `jclass` handle.
+    pub fn class_name_for_handle(&self, class_handle: u32) -> Option<&str> {
+        self.classes
+            .iter()
+            .find_map(|(name, &h)| if h == class_handle { Some(name.as_str()) } else { None })
+    }
+
+    /// Drains newly registered native methods awaiting host ART `RegisterNatives` / FFI thunk creation.
+    pub fn take_pending_registrations(&mut self) -> Vec<PendingNativeRegistration> {
+        std::mem::take(&mut self.pending_registrations)
     }
 
     /// Intern a string and return its jstring handle

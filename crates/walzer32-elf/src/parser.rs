@@ -241,4 +241,111 @@ impl<'a> ElfParser<'a> {
     pub fn find_dynamic_symbol(&self, name: &str) -> Option<String> {
         self.dynamic_symbol_names().into_iter().find(|n| n == name)
     }
+
+    /// Extracts `DT_NEEDED` shared library dependency names from the ELF dynamic section.
+    pub fn needed_libraries(&self) -> Vec<String> {
+        let mut needed = Vec::new();
+        let dyn_entries = match self.parse_dynamic_table() {
+            Ok(e) => e,
+            Err(_) => return needed,
+        };
+
+        let mut strtab_vaddr = None;
+        let mut needed_offsets = Vec::new();
+        for d in &dyn_entries {
+            match d.d_tag {
+                DT_STRTAB => strtab_vaddr = Some(d.d_val),
+                DT_NEEDED => needed_offsets.push(d.d_val as usize),
+                _ => {}
+            }
+        }
+
+        if let Some(str_va) = strtab_vaddr
+            && let Some(str_off) = self.vaddr_to_offset(str_va)
+        {
+            for off in needed_offsets {
+                if let Ok(name) = self.read_string_at(str_off + off)
+                    && !name.is_empty()
+                {
+                    needed.push(name.to_string());
+                }
+            }
+        }
+        needed
+    }
+}
+
+/// Topologically orders libraries (dependencies/leaves first, roots/dependents last)
+/// using their `DT_NEEDED` edges, breaking cycles cleanly and keeping `primary` last.
+pub fn topological_sort_libs<F>(names: &[String], get_needed: F, primary: Option<&str>) -> Vec<usize>
+where
+    F: Fn(usize) -> Vec<String>,
+{
+    let n = names.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let basenames: Vec<&str> = names
+        .iter()
+        .map(|s| s.rsplit('/').next().unwrap_or(s.as_str()))
+        .collect();
+    let mut name_to_idx = std::collections::HashMap::with_capacity(n);
+    for (idx, base) in basenames.iter().enumerate() {
+        name_to_idx.entry(*base).or_insert(idx);
+    }
+
+    // deps[i] = set of internal library indices that library i depends on
+    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut in_degree: Vec<usize> = vec![0; n];
+
+    for i in 0..n {
+        for dep_name in get_needed(i) {
+            let dep_base = dep_name.rsplit('/').next().unwrap_or(dep_name.as_str());
+            if let Some(&dep_idx) = name_to_idx.get(dep_base) {
+                if dep_idx != i && !deps[i].contains(&dep_idx) {
+                    deps[i].push(dep_idx);
+                    dependents[dep_idx].push(i);
+                    in_degree[i] += 1;
+                }
+            }
+        }
+    }
+
+    let priority_key = |idx: usize| -> (u8, &str) {
+        let b = basenames[idx];
+        let tier = if primary == Some(b) {
+            3
+        } else if b.contains("c++_shared") || b.contains("gnustl") {
+            0
+        } else {
+            1
+        };
+        (tier, b)
+    };
+
+    let mut placed = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+
+    while order.len() < n {
+        // Pick an unplaced node with minimum unmet dependencies (0 for acyclic leaves),
+        // breaking ties with priority_key so C++ runtimes load early and `primary` last.
+        let best = (0..n)
+            .filter(|&i| !placed[i])
+            .min_by_key(|&i| (in_degree[i], priority_key(i)));
+
+        let Some(chosen) = best else {
+            break;
+        };
+        placed[chosen] = true;
+        order.push(chosen);
+        for &child in &dependents[chosen] {
+            if !placed[child] && in_degree[child] > 0 {
+                in_degree[child] -= 1;
+            }
+        }
+    }
+
+    order
 }

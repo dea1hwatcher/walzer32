@@ -10,6 +10,14 @@ use walzer32_rt::FutexManager;
 use crate::bionic_regex::{count_capture_groups, fnmatch_internal, regex_match_internal, CompiledRegex};
 pub use walzer32_elf::{RTLD_DEFAULT, RTLD_NEXT};
 
+/// Deferred dynamic library load request queued by `dlopen` when full session
+/// linking (bridges + DT_INIT + JNI_OnLoad) is handled by `Walzer32Session`.
+#[derive(Debug, Clone)]
+pub struct PendingDlopen {
+    pub filename: String,
+    pub elf_bytes: Vec<u8>,
+}
+
 /// Spawn request recorded by `pthread_create` when multi-threaded runtime execution is enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingThreadSpawn {
@@ -2126,6 +2134,8 @@ pub struct BionicBridge {
     pub pending_spawns: Vec<PendingThreadSpawn>,
     pub pending_blocking_op: Option<BlockingBionicOp>,
     pub thread_coordinator: ThreadExitCoordinator,
+    pub deferred_dlopen: bool,
+    pub pending_dlopen: Option<PendingDlopen>,
 }
 
 impl BionicBridge {
@@ -2303,10 +2313,20 @@ impl BionicBridge {
             pending_spawns: Vec::new(),
             pending_blocking_op: None,
             thread_coordinator: ThreadExitCoordinator::new(),
+            deferred_dlopen: false,
+            pending_dlopen: None,
         };
 
         bridge.register_known_symbols();
         bridge
+    }
+
+    pub fn enable_deferred_dlopen(&mut self) {
+        self.deferred_dlopen = true;
+    }
+
+    pub fn take_pending_dlopen(&mut self) -> Option<PendingDlopen> {
+        self.pending_dlopen.take()
     }
 
     pub fn enable_multithreading(&mut self, futex: FutexManager) {
@@ -4579,20 +4599,77 @@ impl BionicBridge {
                     };
                     let basename = filename.rsplit('/').next().unwrap_or(&filename);
 
-                    if basename == "libc.so"
-                        || basename == "libm.so"
-                        || basename == "libdl.so"
-                        || basename == "liblog.so"
-                    {
+                    if matches!(
+                        basename,
+                        "libc.so"
+                            | "libm.so"
+                            | "libdl.so"
+                            | "liblog.so"
+                            | "libz.so"
+                            | "libstdc++.so"
+                            | "libGLESv2.so"
+                            | "libGLESv1_CM.so"
+                            | "libGLESv3.so"
+                            | "libEGL.so"
+                            | "libOpenSLES.so"
+                            | "libaaudio.so"
+                            | "libandroid.so"
+                            | "libvulkan.so"
+                            | "libjnigraphics.so"
+                            | "libnativewindow.so"
+                    ) {
                         cpu.set_reg(Reg::R0, 0xB100_0001);
                     } else if let Some((h, _)) = self.dso_registry.find_by_soname(basename) {
                         cpu.set_reg(Reg::R0, h);
                     } else if let Some((h, _)) = self.dso_registry.find_by_soname(&filename) {
                         cpu.set_reg(Reg::R0, h);
                     } else {
-                        self.last_dlerror =
-                            Some(format!("dlopen failed: library \"{}\" not found", filename));
-                        cpu.set_reg(Reg::R0, 0);
+                        let candidates = [
+                            filename.clone(),
+                            format!("/lib/armeabi-v7a/{}", basename),
+                            format!("/data/app/lib/arm/{}", basename),
+                            format!("/system/lib/{}", basename),
+                            format!("/vendor/lib/{}", basename),
+                            format!("/data/local/tmp/{}", basename),
+                        ];
+                        let found_bytes = candidates
+                            .iter()
+                            .find_map(|p| self.vfs.get_file(p))
+                            .map(|arc| (*arc).clone());
+
+                        if let Some(elf_bytes) = found_bytes {
+                            if self.deferred_dlopen {
+                                self.pending_dlopen = Some(PendingDlopen {
+                                    filename: basename.to_string(),
+                                    elf_bytes,
+                                });
+                                cpu.set_reg(Reg::R0, 0);
+                            } else {
+                                let base = GuestAddr::new(
+                                    (self.mmap_current.as_u32() + 0xFFFF) & !0xFFFF,
+                                );
+                                match walzer32_elf::ElfLoader::load(&elf_bytes, base, mem, self) {
+                                    Ok(loaded) => {
+                                        let aligned_end =
+                                            base.as_u32() + ((loaded.total_size as u32 + 0xFFFF) & !0xFFFF);
+                                        self.mmap_current = GuestAddr::new(aligned_end);
+                                        let handle = self.dso_registry.register(loaded);
+                                        cpu.set_reg(Reg::R0, handle);
+                                    }
+                                    Err(e) => {
+                                        self.last_dlerror = Some(format!(
+                                            "dlopen failed loading \"{}\": {}",
+                                            filename, e
+                                        ));
+                                        cpu.set_reg(Reg::R0, 0);
+                                    }
+                                }
+                            }
+                        } else {
+                            self.last_dlerror =
+                                Some(format!("dlopen failed: library \"{}\" not found", filename));
+                            cpu.set_reg(Reg::R0, 0);
+                        }
                     }
                 }
             }

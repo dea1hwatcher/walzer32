@@ -34,14 +34,39 @@ pub const JNI_ERR_LOAD_FAIL: JInt = -3;
 
 /// Standard JNI lifecycle entrypoint
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn JNI_OnLoad(_vm: *mut c_void, _reserved: *mut c_void) -> JInt {
+pub unsafe extern "C" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> JInt {
     log_i!("Walzer32: JNI_OnLoad called by ART");
     if let Ok(mut guard) = get_or_init_session() {
         if let Some(session) = guard.as_mut() {
+            session.host_java_vm = vm as usize;
+            #[cfg(target_os = "android")]
+            if !vm.is_null() {
+                let vm_table = unsafe { *(vm as *const *const usize) };
+                if !vm_table.is_null() {
+                    let get_env: unsafe extern "C" fn(
+                        *mut c_void,
+                        *mut *mut c_void,
+                        JInt,
+                    ) -> JInt = unsafe { std::mem::transmute(*vm_table.add(6)) };
+                    let mut env_out: *mut c_void = std::ptr::null_mut();
+                    if unsafe { get_env(vm, &mut env_out, 0x0001_0006) } == 0
+                        && !env_out.is_null()
+                    {
+                        session.host_jni_env = env_out as usize;
+                    }
+                }
+            }
             let _ = session.ensure_bundled_apk_loaded();
+            let _ = session.flush_pending_jni_registrations();
         }
     }
     0x0001_0006 // JNI_VERSION_1_6
+}
+
+/// Entrypoint invoked by synthesized ARM64 proxy `.so` `JNI_OnLoad` stubs (`DT_NEEDED: libwalzer32.so`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn walzer32_proxy_jni_onload(vm: *mut c_void, reserved: *mut c_void) -> JInt {
+    unsafe { JNI_OnLoad(vm, reserved) }
 }
 
 /// JNI Export: Initialize Walzer32 DBT Engine from Android Application
@@ -50,7 +75,7 @@ pub unsafe extern "C" fn JNI_OnLoad(_vm: *mut c_void, _reserved: *mut c_void) ->
 ///   public static native int nativeInit(String apkPath);
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeInit(
-    _env: JNIEnv,
+    env: JNIEnv,
     _clazz: JClass,
     _apk_path: JString,
 ) -> JInt {
@@ -58,7 +83,9 @@ pub unsafe extern "C" fn Java_com_walzer32_loader_Walzer32Engine_nativeInit(
     match get_or_init_session() {
         Ok(mut guard) => {
             if let Some(session) = guard.as_mut() {
+                session.host_jni_env = env as usize;
                 let _ = session.ensure_bundled_apk_loaded();
+                let _ = session.flush_pending_jni_registrations();
             }
             JNI_OK
         }
@@ -1286,6 +1313,50 @@ unsafe extern "C" fn host_cb_on_start(_act: *mut c_void) {
 unsafe extern "C" fn host_cb_on_resume(_act: *mut c_void) {
     dispatch_guest_activity_cb(1, None);
 }
+#[cfg(target_os = "android")]
+unsafe extern "C" fn host_cb_on_save_instance_state(
+    _act: *mut c_void,
+    out_size: *mut usize,
+) -> *mut c_void {
+    unsafe extern "C" {
+        fn malloc(size: usize) -> *mut c_void;
+    }
+    if !out_size.is_null() {
+        unsafe { *out_size = 0 };
+    }
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            if let Ok(Some(bytes)) = session.invoke_native_activity_save_state() {
+                let ptr = unsafe { malloc(bytes.len()) };
+                if !ptr.is_null() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+                    }
+                    if !out_size.is_null() {
+                        unsafe { *out_size = bytes.len() };
+                    }
+                    return ptr;
+                }
+            }
+        }
+    }
+    std::ptr::null_mut()
+}
+#[cfg(not(target_os = "android"))]
+unsafe extern "C" fn host_cb_on_save_instance_state(
+    _act: *mut c_void,
+    out_size: *mut usize,
+) -> *mut c_void {
+    if !out_size.is_null() {
+        unsafe { *out_size = 0 };
+    }
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let _ = session.invoke_native_activity_save_state();
+        }
+    }
+    std::ptr::null_mut()
+}
 unsafe extern "C" fn host_cb_on_pause(_act: *mut c_void) {
     dispatch_guest_activity_cb(3, None);
 }
@@ -1325,6 +1396,23 @@ unsafe extern "C" fn host_cb_on_native_window_destroyed(_act: *mut c_void, _wind
                 Some(walzer32_bridge::GUEST_SURFACE_HANDLE),
             );
             session.on_surface_destroyed();
+        }
+    }
+}
+unsafe extern "C" fn host_cb_on_input_queue_created(_act: *mut c_void, _queue: *mut c_void) {
+    dispatch_guest_activity_cb(11, Some(0x3200_0001));
+}
+unsafe extern "C" fn host_cb_on_input_queue_destroyed(_act: *mut c_void, _queue: *mut c_void) {
+    dispatch_guest_activity_cb(12, Some(0x3200_0001));
+}
+unsafe extern "C" fn host_cb_on_content_rect_changed(_act: *mut c_void, rect: *const c_void) {
+    if rect.is_null() {
+        return;
+    }
+    let vals = unsafe { std::slice::from_raw_parts(rect as *const i32, 4) };
+    if let Ok(mut guard) = get_or_init_session() {
+        if let Some(session) = guard.as_mut() {
+            let _ = session.invoke_native_activity_content_rect(vals[0], vals[1], vals[2], vals[3]);
         }
     }
 }
@@ -1396,6 +1484,7 @@ pub unsafe extern "C" fn ANativeActivity_onCreate(
         let host_cbs = unsafe { &mut *host_cb_ptr };
         host_cbs.on_start = Some(host_cb_on_start);
         host_cbs.on_resume = Some(host_cb_on_resume);
+        host_cbs.on_save_instance_state = Some(host_cb_on_save_instance_state);
         host_cbs.on_pause = Some(host_cb_on_pause);
         host_cbs.on_stop = Some(host_cb_on_stop);
         host_cbs.on_destroy = Some(host_cb_on_destroy);
@@ -1404,6 +1493,9 @@ pub unsafe extern "C" fn ANativeActivity_onCreate(
         host_cbs.on_native_window_resized = Some(host_cb_on_native_window_resized);
         host_cbs.on_native_window_redraw_needed = Some(host_cb_on_native_window_redraw_needed);
         host_cbs.on_native_window_destroyed = Some(host_cb_on_native_window_destroyed);
+        host_cbs.on_input_queue_created = Some(host_cb_on_input_queue_created);
+        host_cbs.on_input_queue_destroyed = Some(host_cb_on_input_queue_destroyed);
+        host_cbs.on_content_rect_changed = Some(host_cb_on_content_rect_changed);
         host_cbs.on_configuration_changed = Some(host_cb_on_configuration_changed);
         host_cbs.on_low_memory = Some(host_cb_on_low_memory);
     }

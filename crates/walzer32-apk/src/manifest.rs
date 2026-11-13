@@ -253,4 +253,352 @@ impl<'a> ManifestParser<'a> {
             ""
         }
     }
+
+}
+
+const ATTR_EXTRACT_NATIVE_LIBS: u32 = 0x0101_04EA;
+const ANDROID_NS_URI: &str = "http://schemas.android.com/apk/res/android";
+
+/// Reads `<application android:extractNativeLibs="...">` from an AXML buffer, if present.
+pub fn has_extract_native_libs(data: &[u8]) -> Result<Option<bool>, ManifestError> {
+    // Extract strings into owned vec, then drop the parser to release the borrow on `data`.
+    let strings: Vec<String> = {
+        let mut p = ManifestParser { data, strings: Vec::new() };
+        p.read_header_and_strings()?;
+        p.strings
+    };
+    let res_map = read_resource_map_free(data);
+    let get_str = |idx: usize| -> &str {
+        strings.get(idx).map(|s| s.as_str()).unwrap_or("")
+    };
+    let mut cur = LittleEndian::read_u16(&data[2..4]) as usize;
+    while cur + 8 <= data.len() {
+        let chunk_type = LittleEndian::read_u16(&data[cur..cur + 2]);
+        let chunk_size = LittleEndian::read_u32(&data[cur + 4..cur + 8]) as usize;
+        if chunk_size == 0 || cur + chunk_size > data.len() {
+            break;
+        }
+        if chunk_type == 0x0102 && cur + 36 <= data.len() {
+            let name_idx = LittleEndian::read_u32(&data[cur + 20..cur + 24]) as usize;
+            if get_str(name_idx) == "application" {
+                let attr_count = LittleEndian::read_u16(&data[cur + 28..cur + 30]) as usize;
+                for i in 0..attr_count {
+                    let a_pos = cur + 36 + i * 20;
+                    if a_pos + 20 > cur + chunk_size {
+                        break;
+                    }
+                    let attr_name_idx = LittleEndian::read_u32(&data[a_pos + 4..a_pos + 8]) as usize;
+                    let is_extract = get_str(attr_name_idx) == "extractNativeLibs"
+                        || res_map.get(attr_name_idx).copied() == Some(ATTR_EXTRACT_NATIVE_LIBS);
+                    if is_extract {
+                        let val_type = data[a_pos + 15];
+                        let typed_data = LittleEndian::read_u32(&data[a_pos + 16..a_pos + 20]);
+                        if val_type == 0x12 {
+                            return Ok(Some(typed_data != 0));
+                        } else {
+                            return Ok(Some(get_str(typed_data as usize) == "true"));
+                        }
+                    }
+                }
+                return Ok(None);
+            }
+        }
+        cur += chunk_size;
+    }
+    Ok(None)
+}
+
+fn read_resource_map_free(data: &[u8]) -> Vec<u32> {
+    if data.len() < 8 {
+        return Vec::new();
+    }
+    let mut cur = LittleEndian::read_u16(&data[2..4]) as usize;
+    while cur + 8 <= data.len() {
+        let c_type = LittleEndian::read_u16(&data[cur..cur + 2]);
+        let c_size = LittleEndian::read_u32(&data[cur + 4..cur + 8]) as usize;
+        if c_size == 0 || cur + c_size > data.len() {
+            break;
+        }
+        if c_type == 0x0180 {
+            let mut map = Vec::with_capacity((c_size - 8) / 4);
+            for off in (cur + 8..cur + c_size).step_by(4) {
+                map.push(LittleEndian::read_u32(&data[off..off + 4]));
+            }
+            return map;
+        }
+        cur += c_size;
+    }
+    Vec::new()
+}
+
+fn encode_string_pool(strings: &[String], flags: u32, styles_data: &[u8], style_count: u32, style_offsets: &[u32]) -> Vec<u8> {
+    let is_utf8 = (flags & (1 << 8)) != 0;
+    let mut offsets = Vec::with_capacity(strings.len());
+    let mut blob = Vec::new();
+    for s in strings {
+        offsets.push(blob.len() as u32);
+        if is_utf8 {
+            let char_len = s.chars().count();
+            let bytes = s.as_bytes();
+            let byte_len = bytes.len();
+            if char_len > 0x7F {
+                blob.push(((char_len >> 8) as u8) | 0x80);
+                blob.push((char_len & 0xFF) as u8);
+            } else {
+                blob.push(char_len as u8);
+            }
+            if byte_len > 0x7F {
+                blob.push(((byte_len >> 8) as u8) | 0x80);
+                blob.push((byte_len & 0xFF) as u8);
+            } else {
+                blob.push(byte_len as u8);
+            }
+            blob.extend_from_slice(bytes);
+            blob.push(0);
+        } else {
+            let u16s: Vec<u16> = s.encode_utf16().collect();
+            let len = u16s.len();
+            if len > 0x7FFF {
+                let hi = ((len >> 16) as u16) | 0x8000;
+                let lo = (len & 0xFFFF) as u16;
+                blob.extend_from_slice(&hi.to_le_bytes());
+                blob.extend_from_slice(&lo.to_le_bytes());
+            } else {
+                blob.extend_from_slice(&(len as u16).to_le_bytes());
+            }
+            for ch in u16s {
+                blob.extend_from_slice(&ch.to_le_bytes());
+            }
+            blob.extend_from_slice(&0u16.to_le_bytes());
+        }
+    }
+    while blob.len() % 4 != 0 {
+        blob.push(0);
+    }
+
+    let hdr_size = 28usize;
+    let offsets_bytes = (strings.len() + style_offsets.len()) * 4;
+    let strings_start = hdr_size + offsets_bytes;
+    let styles_start = if style_count > 0 {
+        strings_start + blob.len()
+    } else {
+        0
+    };
+    let mut total_size = strings_start + blob.len() + styles_data.len();
+    while total_size % 4 != 0 {
+        total_size += 1;
+    }
+
+    let mut out = vec![0u8; total_size];
+    LittleEndian::write_u16(&mut out[0..2], 0x0001);
+    LittleEndian::write_u16(&mut out[2..4], hdr_size as u16);
+    LittleEndian::write_u32(&mut out[4..8], total_size as u32);
+    LittleEndian::write_u32(&mut out[8..12], strings.len() as u32);
+    LittleEndian::write_u32(&mut out[12..16], style_count);
+    LittleEndian::write_u32(&mut out[16..20], flags);
+    LittleEndian::write_u32(&mut out[20..24], strings_start as u32);
+    LittleEndian::write_u32(&mut out[24..28], styles_start as u32);
+
+    for (i, &off) in offsets.iter().enumerate() {
+        let p = hdr_size + i * 4;
+        LittleEndian::write_u32(&mut out[p..p + 4], off);
+    }
+    for (i, &off) in style_offsets.iter().enumerate() {
+        let p = hdr_size + (strings.len() + i) * 4;
+        LittleEndian::write_u32(&mut out[p..p + 4], off);
+    }
+    out[strings_start..strings_start + blob.len()].copy_from_slice(&blob);
+    if !styles_data.is_empty() {
+        out[strings_start + blob.len()..strings_start + blob.len() + styles_data.len()]
+            .copy_from_slice(styles_data);
+    }
+    out
+}
+
+fn remap_idx_u32(slice: &mut [u8], insert_at: u32) {
+    let v = LittleEndian::read_u32(slice);
+    if v != 0xFFFF_FFFF && v >= insert_at {
+        LittleEndian::write_u32(slice, v + 1);
+    }
+}
+
+/// Patches an Android binary `AndroidManifest.xml` (AXML) so `<application android:extractNativeLibs="...">`
+/// matches `enable` (`true` allows Bionic to extract bundled ARM64 proxies cleanly from the APK).
+pub fn patch_manifest_extract_native_libs(data: &[u8], enable: bool) -> Result<Vec<u8>, ManifestError> {
+    let mut parser = ManifestParser {
+        data,
+        strings: Vec::new(),
+    };
+    parser.read_header_and_strings()?;
+    let bool_data = if enable { 0xFFFF_FFFFu32 } else { 0u32 };
+
+    // Locate chunks
+    let hdr_size = LittleEndian::read_u16(&data[2..4]) as usize;
+    let mut sp_range = None;
+    let mut rm_range = None;
+    let mut xml_chunks: Vec<(usize, usize)> = Vec::new();
+    let mut cur = hdr_size;
+    while cur + 8 <= data.len() {
+        let c_type = LittleEndian::read_u16(&data[cur..cur + 2]);
+        let c_size = LittleEndian::read_u32(&data[cur + 4..cur + 8]) as usize;
+        if c_size == 0 || cur + c_size > data.len() {
+            return Err(ManifestError::Truncated(cur));
+        }
+        match c_type {
+            0x0001 if sp_range.is_none() => sp_range = Some((cur, cur + c_size)),
+            0x0180 if rm_range.is_none() => rm_range = Some((cur, cur + c_size)),
+            _ => xml_chunks.push((cur, cur + c_size)),
+        }
+        cur += c_size;
+    }
+    let (sp_start, sp_end) = sp_range.ok_or(ManifestError::StringPoolNotFound)?;
+    let res_map = rm_range
+        .map(|(s, e)| {
+            (s + 8..e)
+                .step_by(4)
+                .map(|p| LittleEndian::read_u32(&data[p..p + 4]))
+                .collect::<Vec<u32>>()
+        })
+        .unwrap_or_default();
+
+    // Fast path: attribute already present on <application> -> patch in place
+    for &(c_s, c_e) in &xml_chunks {
+        let c_type = LittleEndian::read_u16(&data[c_s..c_s + 2]);
+        if c_type == 0x0102 && c_s + 36 <= c_e {
+            let name_idx = LittleEndian::read_u32(&data[c_s + 20..c_s + 24]) as usize;
+            if parser.get_string(name_idx) == "application" {
+                let attr_count = LittleEndian::read_u16(&data[c_s + 28..c_s + 30]) as usize;
+                for i in 0..attr_count {
+                    let a = c_s + 36 + i * 20;
+                    if a + 20 > c_e {
+                        break;
+                    }
+                    let attr_name_idx = LittleEndian::read_u32(&data[a + 4..a + 8]) as usize;
+                    let is_extract = parser.get_string(attr_name_idx) == "extractNativeLibs"
+                        || res_map.get(attr_name_idx).copied() == Some(ATTR_EXTRACT_NATIVE_LIBS);
+                    if is_extract {
+                        let mut out = data.to_vec();
+                        LittleEndian::write_u32(&mut out[a + 8..a + 12], 0xFFFF_FFFF);
+                        LittleEndian::write_u16(&mut out[a + 12..a + 14], 8);
+                        out[a + 14] = 0;
+                        out[a + 15] = 0x12; // TYPE_INT_BOOLEAN
+                        LittleEndian::write_u32(&mut out[a + 16..a + 20], bool_data);
+                        return Ok(out);
+                    }
+                }
+            }
+        }
+    }
+
+    // Slow path: insert "extractNativeLibs" into StringPool (+ ResourceMap entry 0x010104EA) and add attribute to <application>
+    let mut strings = parser.strings;
+    let mut new_res_map = res_map;
+    let insert_at = new_res_map.len().min(strings.len());
+    strings.insert(insert_at, "extractNativeLibs".to_string());
+    new_res_map.insert(insert_at, ATTR_EXTRACT_NATIVE_LIBS);
+    let insert_at_u32 = insert_at as u32;
+
+    let orig_str_count = LittleEndian::read_u32(&data[sp_start + 8..sp_start + 12]) as usize;
+    let orig_style_count = LittleEndian::read_u32(&data[sp_start + 12..sp_start + 16]);
+    let sp_flags = LittleEndian::read_u32(&data[sp_start + 16..sp_start + 20]);
+    let orig_styles_start = LittleEndian::read_u32(&data[sp_start + 24..sp_start + 28]) as usize;
+    let mut style_offsets = Vec::with_capacity(orig_style_count as usize);
+    for i in 0..orig_style_count as usize {
+        let p = sp_start + 28 + (orig_str_count + i) * 4;
+        if p + 4 <= sp_end {
+            style_offsets.push(LittleEndian::read_u32(&data[p..p + 4]));
+        }
+    }
+    let styles_blob = if orig_style_count > 0 && orig_styles_start > 0 && sp_start + orig_styles_start < sp_end {
+        &data[sp_start + orig_styles_start..sp_end]
+    } else {
+        &[]
+    };
+    let sp_bytes = encode_string_pool(&strings, sp_flags, styles_blob, orig_style_count, &style_offsets);
+
+    let mut rm_bytes = vec![0u8; 8 + new_res_map.len() * 4];
+    LittleEndian::write_u16(&mut rm_bytes[0..2], 0x0180);
+    LittleEndian::write_u16(&mut rm_bytes[2..4], 8);
+    let rm_total = rm_bytes.len() as u32;
+    LittleEndian::write_u32(&mut rm_bytes[4..8], rm_total);
+    for (i, &id) in new_res_map.iter().enumerate() {
+        LittleEndian::write_u32(&mut rm_bytes[8 + i * 4..12 + i * 4], id);
+    }
+
+    // Find android namespace URI string index after shift
+    let android_ns_idx = strings
+        .iter()
+        .position(|s| s == ANDROID_NS_URI)
+        .map(|i| i as u32)
+        .unwrap_or(0xFFFF_FFFF);
+
+    let mut rebuilt_xml = Vec::new();
+    let mut patched_app = false;
+    for &(c_s, c_e) in &xml_chunks {
+        let mut chunk = data[c_s..c_e].to_vec();
+        let c_type = LittleEndian::read_u16(&chunk[0..2]);
+        // Common ResXMLTree_node header comment at +12
+        if chunk.len() >= 16 {
+            remap_idx_u32(&mut chunk[12..16], insert_at_u32);
+        }
+        match c_type {
+            0x0100 | 0x0101 if chunk.len() >= 24 => {
+                remap_idx_u32(&mut chunk[16..20], insert_at_u32);
+                remap_idx_u32(&mut chunk[20..24], insert_at_u32);
+            }
+            0x0102 if chunk.len() >= 36 => {
+                remap_idx_u32(&mut chunk[16..20], insert_at_u32);
+                remap_idx_u32(&mut chunk[20..24], insert_at_u32);
+                let elem_name_idx = LittleEndian::read_u32(&chunk[20..24]) as usize;
+                let attr_count = LittleEndian::read_u16(&chunk[28..30]) as usize;
+                for i in 0..attr_count {
+                    let a = 36 + i * 20;
+                    if a + 20 > chunk.len() {
+                        break;
+                    }
+                    remap_idx_u32(&mut chunk[a..a + 4], insert_at_u32);
+                    remap_idx_u32(&mut chunk[a + 4..a + 8], insert_at_u32);
+                    remap_idx_u32(&mut chunk[a + 8..a + 12], insert_at_u32);
+                    if chunk[a + 15] == 0x03 {
+                        remap_idx_u32(&mut chunk[a + 16..a + 20], insert_at_u32);
+                    }
+                }
+                if !patched_app && strings.get(elem_name_idx).map(|s| s.as_str()) == Some("application") {
+                    patched_app = true;
+                    let mut attr = [0u8; 20];
+                    LittleEndian::write_u32(&mut attr[0..4], android_ns_idx);
+                    LittleEndian::write_u32(&mut attr[4..8], insert_at_u32);
+                    LittleEndian::write_u32(&mut attr[8..12], 0xFFFF_FFFF);
+                    LittleEndian::write_u16(&mut attr[12..14], 8);
+                    attr[14] = 0;
+                    attr[15] = 0x12;
+                    LittleEndian::write_u32(&mut attr[16..20], bool_data);
+                    chunk.extend_from_slice(&attr);
+                    let new_count = (attr_count + 1) as u16;
+                    LittleEndian::write_u16(&mut chunk[28..30], new_count);
+                    let new_size = chunk.len() as u32;
+                    LittleEndian::write_u32(&mut chunk[4..8], new_size);
+                }
+            }
+            0x0103 if chunk.len() >= 24 => {
+                remap_idx_u32(&mut chunk[16..20], insert_at_u32);
+                remap_idx_u32(&mut chunk[20..24], insert_at_u32);
+            }
+            0x0104 if chunk.len() >= 28 => {
+                remap_idx_u32(&mut chunk[16..20], insert_at_u32);
+            }
+            _ => {}
+        }
+        rebuilt_xml.extend_from_slice(&chunk);
+    }
+
+    let total_size = 8 + sp_bytes.len() + rm_bytes.len() + rebuilt_xml.len();
+    let mut out = Vec::with_capacity(total_size);
+    out.extend_from_slice(&0x0003u16.to_le_bytes());
+    out.extend_from_slice(&8u16.to_le_bytes());
+    out.extend_from_slice(&(total_size as u32).to_le_bytes());
+    out.extend_from_slice(&sp_bytes);
+    out.extend_from_slice(&rm_bytes);
+    out.extend_from_slice(&rebuilt_xml);
+    Ok(out)
 }

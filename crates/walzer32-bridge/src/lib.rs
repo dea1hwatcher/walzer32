@@ -37,8 +37,8 @@ pub use audio_resample::AudioResampler;
 pub use audio_ring::AudioRingBuffer;
 pub use bionic::{
     atomic_rmw_u32, futex_cond_signal, futex_mutex_lock, futex_mutex_unlock, BionicBridge,
-    BionicFuncId, BlockingBionicOp, LogMessage, PendingThreadSpawn, ThreadDescriptor,
-    ThreadExitCoordinator, BIONIC_SVC_MAGIC,
+    BionicFuncId, BlockingBionicOp, LogMessage, PendingDlopen, PendingThreadSpawn,
+    ThreadDescriptor, ThreadExitCoordinator, BIONIC_SVC_MAGIC,
 };
 pub use gles::{
     BufferState, DrawCallRecord, EglContextState, EglSurfaceState, GlesBridge, GlesFuncId,
@@ -55,10 +55,13 @@ pub use gles::{
 pub use host::{ArgMarshaller, HostBridge, RawFnPtr};
 pub use jni::{
     jni_idx, vm_idx, DirectBufferInfo, FieldDescriptor, JniBridge, JniValue, MethodDescriptor,
-    RegisteredNativeMethod, JNI_ERR, JNI_FALSE, JNI_OK, JNI_SVC_MAGIC, JNI_TRUE,
-    JNI_VERSION_1_1, JNI_VERSION_1_2, JNI_VERSION_1_4, JNI_VERSION_1_6,
+    PendingNativeRegistration, RegisteredNativeMethod, JNI_ERR, JNI_FALSE, JNI_OK, JNI_SVC_MAGIC,
+    JNI_TRUE, JNI_VERSION_1_1, JNI_VERSION_1_2, JNI_VERSION_1_4, JNI_VERSION_1_6,
 };
-pub use jni_thunk::{JniThunk, JniThunkGenerator};
+pub use jni_thunk::{
+    marshal_host_jni_frame_to_aapcs32, unpack_guest_return_to_host_u64, HostJniCallFrame,
+    JniSignature, JniThunk, JniThunkGenerator, JniType,
+};
 pub use surface::{KeyEvent, SurfaceBridge, TouchEvent, GUEST_SURFACE_HANDLE};
 pub use trampoline::{
     check_fastmem_fault, dispatch_bridge_svc, flush_pending_mt_actions,
