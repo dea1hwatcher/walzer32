@@ -108,6 +108,16 @@ pub fn adb_binary() -> std::ffi::OsString {
             return path.into();
         }
     }
+    if let Ok(home) = std::env::var("ANDROID_HOME") {
+        let sdk_adb = std::path::Path::new(&home).join(r"platform-tools\adb.exe");
+        if sdk_adb.exists() {
+            return sdk_adb.into_os_string();
+        }
+        let sdk_adb_unix = std::path::Path::new(&home).join("platform-tools/adb");
+        if sdk_adb_unix.exists() {
+            return sdk_adb_unix.into_os_string();
+        }
+    }
     if Command::new("adb").arg("version").output().is_ok() {
         return "adb".into();
     }
