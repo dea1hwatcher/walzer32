@@ -49,7 +49,23 @@ pub mod nr {
     pub const FACCESSAT: u32 = 334;
     pub const ARM_CACHE_FLUSH: u32 = 0xF0002;
     pub const ARM_SET_TLS: u32 = 0xF0005;
+    pub const SCHED_YIELD: u32 = 158;
+    pub const PRCTL: u32 = 172;
+    pub const MADVISE: u32 = 220;
+    pub const SCHED_SETAFFINITY: u32 = 241;
+    pub const SCHED_GETAFFINITY: u32 = 242;
+    pub const EPOLL_CTL: u32 = 251;
+    pub const EPOLL_WAIT: u32 = 252;
+    pub const EPOLL_PWAIT: u32 = 346;
+    pub const EPOLL_CREATE1: u32 = 357;
+    pub const TIMERFD_CREATE: u32 = 358;
+    pub const PIPE2: u32 = 359;
+    pub const TIMERFD_SETTIME: u32 = 360;
+    pub const TIMERFD_GETTIME: u32 = 361;
+    pub const GETRANDOM: u32 = 384;
     pub const MEMFD_CREATE: u32 = 385;
+    pub const STATX: u32 = 397;
+    pub const CLOCK_GETTIME64: u32 = 403;
 }
 
 /// Linux Android Ashmem ioctl commands

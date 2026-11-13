@@ -993,6 +993,18 @@ pub enum BionicFuncId {
     ANativeActivityShowSoftInput            = 1283,
     ANativeActivityHideSoftInput            = 1284,
 
+    // Stage 102: Non-local jumps, random generation, process control, modern 64-bit time & statx
+    Setjmp                  = 1290,
+    Longjmp                 = 1291,
+    SetjmpUnderscore        = 1292,
+    LongjmpUnderscore       = 1293,
+    Sigsetjmp               = 1294,
+    Siglongjmp              = 1295,
+    Getrandom               = 1296,
+    Prctl                   = 1297,
+    Statx                   = 1298,
+    ClockGettime64          = 1299,
+
     // Threading & Mutexes
     PthreadCreate = 20,
     PthreadJoin = 21,
@@ -1797,6 +1809,16 @@ impl BionicFuncId {
             1282 => Some(Self::ANativeActivitySetWindowFlags),
             1283 => Some(Self::ANativeActivityShowSoftInput),
             1284 => Some(Self::ANativeActivityHideSoftInput),
+            1290 => Some(Self::Setjmp),
+            1291 => Some(Self::Longjmp),
+            1292 => Some(Self::SetjmpUnderscore),
+            1293 => Some(Self::LongjmpUnderscore),
+            1294 => Some(Self::Sigsetjmp),
+            1295 => Some(Self::Siglongjmp),
+            1296 => Some(Self::Getrandom),
+            1297 => Some(Self::Prctl),
+            1298 => Some(Self::Statx),
+            1299 => Some(Self::ClockGettime64),
             _ => None,
         }
     }
@@ -3203,6 +3225,17 @@ impl BionicBridge {
             ("ANativeActivity_setWindowFlags",       BionicFuncId::ANativeActivitySetWindowFlags),
             ("ANativeActivity_showSoftInput",        BionicFuncId::ANativeActivityShowSoftInput),
             ("ANativeActivity_hideSoftInput",        BionicFuncId::ANativeActivityHideSoftInput),
+            ("setjmp",                               BionicFuncId::Setjmp),
+            ("longjmp",                              BionicFuncId::Longjmp),
+            ("_setjmp",                              BionicFuncId::SetjmpUnderscore),
+            ("_longjmp",                             BionicFuncId::LongjmpUnderscore),
+            ("sigsetjmp",                            BionicFuncId::Sigsetjmp),
+            ("__sigsetjmp",                          BionicFuncId::Sigsetjmp),
+            ("siglongjmp",                           BionicFuncId::Siglongjmp),
+            ("getrandom",                            BionicFuncId::Getrandom),
+            ("prctl",                                BionicFuncId::Prctl),
+            ("statx",                                BionicFuncId::Statx),
+            ("clock_gettime64",                      BionicFuncId::ClockGettime64),
         ];
 
         for (name, id) in funcs {
@@ -3959,6 +3992,16 @@ impl BionicBridge {
             BionicFuncId::ANativeActivitySetWindowFlags,
             BionicFuncId::ANativeActivityShowSoftInput,
             BionicFuncId::ANativeActivityHideSoftInput,
+            BionicFuncId::Setjmp,
+            BionicFuncId::Longjmp,
+            BionicFuncId::SetjmpUnderscore,
+            BionicFuncId::LongjmpUnderscore,
+            BionicFuncId::Sigsetjmp,
+            BionicFuncId::Siglongjmp,
+            BionicFuncId::Getrandom,
+            BionicFuncId::Prctl,
+            BionicFuncId::Statx,
+            BionicFuncId::ClockGettime64,
         ] {
             let addr = self.stub_base.add((id as u32) * 8);
             let svc_code = 0xEF00_0000 | (BIONIC_SVC_MAGIC | (id as u32)); // SVC #(BIONIC_SVC_MAGIC | id)
@@ -10063,6 +10106,142 @@ impl BionicBridge {
             BionicFuncId::ANativeActivitySetWindowFlags |
             BionicFuncId::ANativeActivityShowSoftInput |
             BionicFuncId::ANativeActivityHideSoftInput => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Setjmp | BionicFuncId::SetjmpUnderscore | BionicFuncId::Sigsetjmp => {
+                let env = GuestAddr::new(cpu.reg(Reg::R0));
+                // AAPCS32 Callee-saved core registers: R4..R11
+                mem.write_u32(env, cpu.reg(Reg::R4))?;
+                mem.write_u32(env.add(4), cpu.reg(Reg::R5))?;
+                mem.write_u32(env.add(8), cpu.reg(Reg::R6))?;
+                mem.write_u32(env.add(12), cpu.reg(Reg::R7))?;
+                mem.write_u32(env.add(16), cpu.reg(Reg::R8))?;
+                mem.write_u32(env.add(20), cpu.reg(Reg::R9))?;
+                mem.write_u32(env.add(24), cpu.reg(Reg::R10))?;
+                mem.write_u32(env.add(28), cpu.reg(Reg::R11))?;
+                // Stack pointer and return address (LR)
+                mem.write_u32(env.add(32), cpu.sp())?;
+                mem.write_u32(env.add(36), cpu.reg(Reg::LR))?;
+                // VFP callee-saved registers D8..D15
+                for i in 8..=15u8 {
+                    let dval = cpu.d_reg_u64(i);
+                    let off = 40 + (i as u32 - 8) * 8;
+                    mem.write_u32(env.add(off), dval as u32)?;
+                    mem.write_u32(env.add(off + 4), (dval >> 32) as u32)?;
+                }
+                // Save signal mask (words 26-28)
+                mem.write_u32(env.add(104), 1)?; // flag: sigmask saved
+                mem.write_u32(env.add(108), self.signal_state.blocked_mask as u32)?;
+                mem.write_u32(env.add(112), (self.signal_state.blocked_mask >> 32) as u32)?;
+
+                // Direct return from setjmp is always 0
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::Longjmp | BionicFuncId::LongjmpUnderscore | BionicFuncId::Siglongjmp => {
+                let env = GuestAddr::new(cpu.reg(Reg::R0));
+                let val = cpu.reg(Reg::R1);
+                let ret_val = if val == 0 { 1 } else { val };
+
+                // Restore R4..R11
+                cpu.set_reg(Reg::R4, mem.read_u32(env)?);
+                cpu.set_reg(Reg::R5, mem.read_u32(env.add(4))?);
+                cpu.set_reg(Reg::R6, mem.read_u32(env.add(8))?);
+                cpu.set_reg(Reg::R7, mem.read_u32(env.add(12))?);
+                cpu.set_reg(Reg::R8, mem.read_u32(env.add(16))?);
+                cpu.set_reg(Reg::R9, mem.read_u32(env.add(20))?);
+                cpu.set_reg(Reg::R10, mem.read_u32(env.add(24))?);
+                cpu.set_reg(Reg::R11, mem.read_u32(env.add(28))?);
+
+                // Restore SP and LR (the caller's return PC at setjmp)
+                let sp = mem.read_u32(env.add(32))?;
+                let lr = mem.read_u32(env.add(36))?;
+                cpu.set_sp(sp);
+                cpu.set_reg(Reg::LR, lr);
+
+                // Restore VFP D8..D15
+                for i in 8..=15u8 {
+                    let off = 40 + (i as u32 - 8) * 8;
+                    let low = mem.read_u32(env.add(off))? as u64;
+                    let high = mem.read_u32(env.add(off + 4))? as u64;
+                    cpu.set_d_reg_u64(i, (high << 32) | low);
+                }
+
+                // Restore signal mask if saved
+                if mem.read_u32(env.add(104))? != 0 {
+                    let low = mem.read_u32(env.add(108))? as u64;
+                    let high = mem.read_u32(env.add(112))? as u64;
+                    self.signal_state.blocked_mask = (high << 32) | low;
+                }
+
+                // Return value in R0
+                cpu.set_reg(Reg::R0, ret_val);
+            }
+            BionicFuncId::Getrandom => {
+                let buf_ptr = GuestAddr::new(cpu.reg(Reg::R0));
+                let len = cpu.reg(Reg::R1) as usize;
+                let mut bytes = vec![0u8; len];
+                let mut seed = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64)
+                    ^ (buf_ptr.as_u32() as u64);
+                for b in &mut bytes {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    *b = (seed >> 33) as u8;
+                }
+                if buf_ptr.as_u32() != 0 && len > 0 {
+                    mem.write_bytes(buf_ptr, &bytes)?;
+                }
+                cpu.set_reg(Reg::R0, len as u32);
+            }
+            BionicFuncId::Prctl => {
+                let opt = cpu.reg(Reg::R0);
+                match opt {
+                    15 => { // PR_SET_NAME
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    16 => { // PR_GET_NAME
+                        let name_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                        if name_ptr.as_u32() != 0 {
+                            let _ = mem.write_bytes(name_ptr, b"walzer32-worker\0");
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    _ => {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                }
+            }
+            BionicFuncId::Statx => {
+                let sp = GuestAddr::new(cpu.sp());
+                let buf_addr = if let Ok(stack_arg) = mem.read_u32(sp) {
+                    GuestAddr::new(stack_arg)
+                } else {
+                    GuestAddr::new(cpu.reg(Reg::R4))
+                };
+                if buf_addr.as_u32() != 0 {
+                    let mut zeroes = [0u8; 256];
+                    let mode = 0o100644u16;
+                    zeroes[0x1C..0x1E].copy_from_slice(&mode.to_le_bytes());
+                    let sz = 4096u64;
+                    zeroes[0x38..0x40].copy_from_slice(&sz.to_le_bytes());
+                    let _ = mem.write_bytes(buf_addr, &zeroes);
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            BionicFuncId::ClockGettime64 => {
+                let tp_ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if tp_ptr.as_u32() != 0 {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let sec = now.as_secs();
+                    let nsec = now.subsec_nanos() as u64;
+                    mem.write_u32(tp_ptr, sec as u32)?;
+                    mem.write_u32(tp_ptr.add(4), (sec >> 32) as u32)?;
+                    mem.write_u32(tp_ptr.add(8), nsec as u32)?;
+                    mem.write_u32(tp_ptr.add(12), (nsec >> 32) as u32)?;
+                }
                 cpu.set_reg(Reg::R0, 0);
             }
             BionicFuncId::Memmove => {

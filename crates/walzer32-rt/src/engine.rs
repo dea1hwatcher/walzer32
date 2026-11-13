@@ -757,6 +757,158 @@ impl SyscallHandler for DefaultSyscallHandler {
                 }
                 Ok(None)
             }
+            nr::GETTIMEOFDAY => {
+                let tv_ptr = GuestAddr::new(args.arg0);
+                if tv_ptr.as_u32() != 0 {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let sec = now.as_secs() as u32;
+                    let usec = now.subsec_micros() as u32;
+                    if mem.write_u32(tv_ptr, sec).is_err() || mem.write_u32(tv_ptr.add(4), usec).is_err() {
+                        cpu.set_reg(Reg::R0, (-14i32) as u32);
+                        return Ok(None);
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
+            nr::CLOCK_GETTIME => {
+                let tp_ptr = GuestAddr::new(args.arg1);
+                if tp_ptr.as_u32() != 0 {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let sec = now.as_secs() as u32;
+                    let nsec = now.subsec_nanos();
+                    if mem.write_u32(tp_ptr, sec).is_err() || mem.write_u32(tp_ptr.add(4), nsec).is_err() {
+                        cpu.set_reg(Reg::R0, (-14i32) as u32);
+                        return Ok(None);
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
+            nr::CLOCK_GETTIME64 => {
+                let tp_ptr = GuestAddr::new(args.arg1);
+                if tp_ptr.as_u32() != 0 {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let sec = now.as_secs();
+                    let nsec = now.subsec_nanos() as u64;
+                    if mem.write_u32(tp_ptr, sec as u32).is_err()
+                        || mem.write_u32(tp_ptr.add(4), (sec >> 32) as u32).is_err()
+                        || mem.write_u32(tp_ptr.add(8), nsec as u32).is_err()
+                        || mem.write_u32(tp_ptr.add(12), (nsec >> 32) as u32).is_err()
+                    {
+                        cpu.set_reg(Reg::R0, (-14i32) as u32);
+                        return Ok(None);
+                    }
+                }
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
+            nr::NANOSLEEP => {
+                let req_ptr = GuestAddr::new(args.arg0);
+                if req_ptr.as_u32() != 0 {
+                    let sec = mem.read_u32(req_ptr).unwrap_or(0);
+                    let nsec = mem.read_u32(req_ptr.add(4)).unwrap_or(0);
+                    let dur = std::time::Duration::new(sec as u64, nsec);
+                    std::thread::sleep(dur);
+                }
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
+            nr::SCHED_YIELD => {
+                std::thread::yield_now();
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
+            nr::PRCTL => {
+                let opt = args.arg0;
+                match opt {
+                    15 => { // PR_SET_NAME
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    16 => { // PR_GET_NAME
+                        let name_ptr = GuestAddr::new(args.arg1);
+                        if name_ptr.as_u32() != 0 {
+                            let _ = mem.write_bytes(name_ptr, b"walzer32-app\0");
+                        }
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                    _ => {
+                        cpu.set_reg(Reg::R0, 0);
+                    }
+                }
+                Ok(None)
+            }
+            nr::MADVISE => {
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
+            nr::SCHED_GETAFFINITY | nr::SCHED_SETAFFINITY => {
+                let mask_ptr = GuestAddr::new(args.arg2);
+                if args.nr == nr::SCHED_GETAFFINITY && mask_ptr.as_u32() != 0 {
+                    let _ = mem.write_u32(mask_ptr, 0xFF); // 8 cores
+                }
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
+            nr::GETRANDOM => {
+                let buf_ptr = GuestAddr::new(args.arg0);
+                let len = args.arg1 as usize;
+                let mut bytes = vec![0u8; len];
+                let mut seed = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64)
+                    ^ (buf_ptr.as_u32() as u64);
+                for b in &mut bytes {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    *b = (seed >> 33) as u8;
+                }
+                if buf_ptr.as_u32() != 0 && len > 0 {
+                    let _ = mem.write_bytes(buf_ptr, &bytes);
+                }
+                cpu.set_reg(Reg::R0, len as u32);
+                Ok(None)
+            }
+            nr::STATX => {
+                let buf_addr = GuestAddr::new(args.arg4);
+                if buf_addr.as_u32() != 0 {
+                    let mut zeroes = [0u8; 256];
+                    let mode = 0o100644u16;
+                    zeroes[0x1C..0x1E].copy_from_slice(&mode.to_le_bytes());
+                    let sz = 4096u64;
+                    zeroes[0x38..0x40].copy_from_slice(&sz.to_le_bytes());
+                    let _ = mem.write_bytes(buf_addr, &zeroes);
+                }
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
+            nr::PIPE2 => {
+                let fds_ptr = GuestAddr::new(args.arg0);
+                if fds_ptr.as_u32() != 0 {
+                    let _ = mem.write_u32(fds_ptr, 3);
+                    let _ = mem.write_u32(fds_ptr.add(4), 4);
+                }
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
+            nr::EPOLL_CREATE1 | nr::TIMERFD_CREATE => {
+                cpu.set_reg(Reg::R0, 10);
+                Ok(None)
+            }
+            nr::EPOLL_CTL | nr::TIMERFD_SETTIME => {
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
+            nr::EPOLL_WAIT | nr::EPOLL_PWAIT | nr::TIMERFD_GETTIME => {
+                cpu.set_reg(Reg::R0, 0);
+                Ok(None)
+            }
             _ => {
                 // Return -ENOSYS (-38) for unhandled syscalls
                 cpu.set_reg(Reg::R0, (-38i32) as u32);
