@@ -41,6 +41,10 @@ COMMANDS:
             --primary-lib <name.so>   Specify primary 32-bit native library
             --align <bytes>           Alignment for .so files (default: 4096)
             --config <k=v>            Extra properties for walzer32_config.prop
+            --sign                    Sign APK with debug key via apksigner (v2/v3)
+            --no-patch-manifest       Skip AndroidManifest extractNativeLibs patching
+            --no-inject-dex           Skip injecting Walzer32 DEX bootstrap (classes2.dex)
+            --no-dynamic-stubs        Use static template instead of dynamic ARM64 stubs
 
     test-device [OPTIONS]
         Test connected Android device capabilities and APK compatibility
