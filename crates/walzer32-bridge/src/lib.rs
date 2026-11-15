@@ -36,9 +36,10 @@ pub use audio::{
 pub use audio_resample::AudioResampler;
 pub use audio_ring::AudioRingBuffer;
 pub use bionic::{
-    atomic_rmw_u32, futex_cond_signal, futex_mutex_lock, futex_mutex_unlock, BionicBridge,
-    BionicFuncId, BlockingBionicOp, LogMessage, PendingDlopen, PendingThreadSpawn,
-    ThreadDescriptor, ThreadExitCoordinator, BIONIC_SVC_MAGIC,
+    atomic_rmw_u32, force_lock_bionic_mutex, futex_cond_signal, futex_mutex_lock,
+    futex_mutex_unlock, try_lock_bionic_mutex, BionicBridge, BionicFuncId, BlockingBionicOp,
+    LogMessage, MutexLockState, PendingDlopen, PendingThreadSpawn, ThreadDescriptor,
+    ThreadExitCoordinator, BIONIC_SVC_MAGIC,
 };
 pub use gles::{
     BufferState, DrawCallRecord, EglContextState, EglSurfaceState, GlesBridge, GlesFuncId,

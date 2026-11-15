@@ -259,6 +259,11 @@ pub enum VfpOp {
     Fms,
     Mla,
     Mls,
+    Nmul,
+    Nmla,
+    Nmls,
+    Fnma,
+    Fnms,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,6 +425,7 @@ pub enum Op {
     },
     Branch {
         link: bool,
+        exchange: bool,
         target: BranchTarget,
     },
     BranchExchange {

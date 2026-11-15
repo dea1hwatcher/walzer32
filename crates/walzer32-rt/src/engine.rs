@@ -135,7 +135,7 @@ impl Default for DefaultSyscallHandler {
             shared_mmap: None,
             vfs: crate::vfs::VirtualFileSystem::new(),
             brk: 0x4000_0000,
-            mmap_current: GuestAddr::new(0x7100_0000),
+            mmap_current: GuestAddr::new(0x7800_0000),
             signal_state: crate::signals::SignalState::new(),
         }
     }
@@ -153,7 +153,7 @@ impl DefaultSyscallHandler {
             shared_mmap: None,
             vfs: crate::vfs::VirtualFileSystem::new(),
             brk: 0x4000_0000,
-            mmap_current: GuestAddr::new(0x7100_0000),
+            mmap_current: GuestAddr::new(0x7800_0000),
             signal_state: crate::signals::SignalState::new(),
         }
     }
@@ -169,7 +169,7 @@ impl DefaultSyscallHandler {
             shared_mmap: None,
             vfs,
             brk: 0x4000_0000,
-            mmap_current: GuestAddr::new(0x7100_0000),
+            mmap_current: GuestAddr::new(0x7800_0000),
             signal_state: crate::signals::SignalState::new(),
         }
     }
@@ -988,6 +988,8 @@ pub struct DbtEngine<M: Memory> {
     pub smc_guard_pages: bool,
     pub last_direct_exit: Option<(GuestAddr, GuestAddr)>,
     pub last_svc_imm: Option<u32>,
+    pub recent_blocks: [GuestAddr; 64],
+    pub recent_blocks_idx: usize,
 }
 
 impl<M: Memory> DbtEngine<M> {
@@ -1006,6 +1008,8 @@ impl<M: Memory> DbtEngine<M> {
             smc_guard_pages: false,
             last_direct_exit: None,
             last_svc_imm: None,
+            recent_blocks: [GuestAddr::new(0); 64],
+            recent_blocks_idx: 0,
         }
     }
 
@@ -1079,7 +1083,10 @@ impl<M: Memory> DbtEngine<M> {
         dst_addr: GuestAddr,
     ) -> bool {
         if let (Some(src_ptr), Some(dst_ptr)) = (cache.peek_ptr(src_addr), cache.peek_ptr(dst_addr)) {
-            if let Some(src_block) = cache.peek(src_addr) {
+            if let (Some(src_block), Some(dst_block)) = (cache.peek(src_addr), cache.peek(dst_addr)) {
+                if src_block.is_thumb != dst_block.is_thumb {
+                    return false;
+                }
                 let mut patched = false;
                 for site in &src_block.patch_sites {
                     let target = match site.target {
@@ -1087,7 +1094,7 @@ impl<M: Memory> DbtEngine<M> {
                         PatchTarget::BranchTaken { target, .. } => target,
                         PatchTarget::BranchFallthrough(t) => t,
                     };
-                    if target == dst_addr {
+                    if (target.as_u32() & !1) == (dst_addr.as_u32() & !1) {
                         let src_code = src_ptr.0 as usize + site.byte_offset;
                         let dst_code = dst_ptr.0 as usize + walzer32_emitter_a64::PROLOGUE_BYTE_SIZE;
                         if let Some(offset_words) = Self::branch_offset_words_in_range(&site.target, src_code, dst_code) {
@@ -1414,6 +1421,8 @@ impl<M: Memory> DbtEngine<M> {
         self.last_svc_imm = None;
         let pc = self.cpu.pc();
         let is_thumb = self.cpu.is_thumb();
+        self.recent_blocks[self.recent_blocks_idx % 64] = pc;
+        self.recent_blocks_idx += 1;
 
         // 0. Poll background JIT results and promote completed superblocks
         self.poll_background_jit();
@@ -1484,7 +1493,7 @@ impl<M: Memory> DbtEngine<M> {
                 } else {
                     // Synchronous Tier-2 fallback when async JIT is not enabled
                     if let Ok(mut sb) = TraceBuilder::build_trace(&self.mem, pc, is_thumb) {
-                        if (sb.block_count > 1 || sb.is_loop) && !sb.insts.is_empty() {
+                        if (sb.block_count > 1 || sb.is_loop) && !sb.insts.is_empty() && !matches!(sb.exit, walzer32_ir::BlockExit::Invalid(_)) {
                             SuperblockOptimizer::optimize(&mut sb);
                             if !sb.insts.is_empty() {
                                 let compiled = A64Compiler::compile_superblock(&sb);
@@ -1554,7 +1563,7 @@ impl<M: Memory> DbtEngine<M> {
                     crate::signals::invoke_jit_guarded(jit_fn, &mut self.cpu as *mut _, mem_base)
                 } {
                     Ok(v) => v,
-                    Err((sig, guest_fault_addr)) => {
+                    Err((sig, guest_fault_addr, host_pc)) => {
                         self.last_direct_exit = None;
                         let guest_addr = GuestAddr::new(guest_fault_addr as u32);
                         if self.handle_write_fault(guest_addr) {
@@ -1563,9 +1572,12 @@ impl<M: Memory> DbtEngine<M> {
                         if let Ok(true) = self.handle_guest_fault(sig, Some(guest_fault_addr as u32)) {
                             return Ok(EngineStepResult::Continue);
                         }
+                        let block_offset = host_pc.saturating_sub(host_ptr.0 as u64);
                         return Err(EngineError::Trap(format!(
-                            "Unhandled guest JIT signal {} at guest 0x{:08x}",
-                            sig, guest_fault_addr
+                            "Unhandled guest JIT signal {} at guest 0x{:08x} (block_pc=0x{:08x}, host_pc=0x{:08x} [block+{:#x}], sp=0x{:08x}, lr=0x{:08x}, r0=0x{:08x}, r1=0x{:08x}, r2=0x{:08x}, r3=0x{:08x}, r4=0x{:08x}, r5=0x{:08x}, r6=0x{:08x})",
+                            sig, guest_fault_addr, self.cpu.pc().as_u32(), host_pc, block_offset, self.cpu.sp(), self.cpu.lr(),
+                            self.cpu.reg(Reg::R0), self.cpu.reg(Reg::R1), self.cpu.reg(Reg::R2), self.cpu.reg(Reg::R3),
+                            self.cpu.reg(Reg::R4), self.cpu.reg(Reg::R5), self.cpu.reg(Reg::R6)
                         )));
                     }
                 };
@@ -1575,7 +1587,9 @@ impl<M: Memory> DbtEngine<M> {
 
                 match exit_reason {
                     walzer32_emitter_a64::EXIT_REASON_DIRECT => {
-                        let next_pc = GuestAddr::new(exit_payload);
+                        let is_thumb = (exit_payload & 1) != 0;
+                        self.cpu.set_thumb(is_thumb);
+                        let next_pc = GuestAddr::new(exit_payload & !1);
                         self.cpu.set_pc(next_pc);
                         self.total_insts_executed += inst_count;
                         if !self.chain_blocks(pc, next_pc) {
@@ -1587,7 +1601,9 @@ impl<M: Memory> DbtEngine<M> {
                     }
                     walzer32_emitter_a64::EXIT_REASON_INDIRECT => {
                         self.last_direct_exit = None;
-                        self.cpu.set_pc(GuestAddr::new(exit_payload));
+                        let is_thumb = (exit_payload & 1) != 0;
+                        self.cpu.set_thumb(is_thumb);
+                        self.cpu.set_pc(GuestAddr::new(exit_payload & !1));
                         self.total_insts_executed += inst_count;
                         return Ok(EngineStepResult::Continue);
                     }
@@ -1603,7 +1619,9 @@ impl<M: Memory> DbtEngine<M> {
                     }
                     walzer32_emitter_a64::EXIT_REASON_INVALID => {
                         self.last_direct_exit = None;
-                        self.cpu.set_pc(GuestAddr::new(exit_payload));
+                        let is_thumb = (exit_payload & 1) != 0;
+                        self.cpu.set_thumb(is_thumb);
+                        self.cpu.set_pc(GuestAddr::new(exit_payload & !1));
                     }
                     _ => {}
                 }
@@ -1611,15 +1629,28 @@ impl<M: Memory> DbtEngine<M> {
         }
 
         // 3. Fallback: Step execution using the verified interpreter engine
+        let cur_pc = self.cpu.pc();
+        let is_thumb = self.cpu.is_thumb();
         let step_res = match Interpreter::step(&mut self.cpu, &mut self.mem) {
             Err(InterpError::Memory(MemoryError::PermissionDenied { addr, write: true })) => {
                 if self.handle_write_fault(addr) {
                     Interpreter::step(&mut self.cpu, &mut self.mem)?
                 } else {
-                    return Err(EngineError::Memory(MemoryError::PermissionDenied { addr, write: true }));
+                    return Err(EngineError::Trap(format!(
+                        "Interpreter memory permission denied at pc=0x{:08x} (thumb={}) addr=0x{:08x}",
+                        cur_pc.as_u32(), is_thumb, addr.as_u32()
+                    )));
                 }
             }
-            res => res?,
+            Err(e) => {
+                return Err(EngineError::Trap(format!(
+                    "Interpreter error at pc=0x{:08x} (thumb={}) [r0=0x{:08x}, r1=0x{:08x}, r2=0x{:08x}, r3=0x{:08x}, r4=0x{:08x}, sp=0x{:08x}, lr=0x{:08x}]: {:?}",
+                    cur_pc.as_u32(), is_thumb,
+                    self.cpu.reg(Reg::R0), self.cpu.reg(Reg::R1), self.cpu.reg(Reg::R2), self.cpu.reg(Reg::R3),
+                    self.cpu.reg(Reg::R4), self.cpu.sp(), self.cpu.lr(), e
+                )));
+            }
+            Ok(res) => res,
         };
         self.total_insts_executed += 1;
         self.telemetry.record_instructions(1);
@@ -1829,6 +1860,8 @@ impl<M: Memory + Clone> DbtEngine<M> {
             smc_guard_pages: self.smc_guard_pages,
             last_direct_exit: None,
             last_svc_imm: None,
+            recent_blocks: [GuestAddr::new(0); 64],
+            recent_blocks_idx: 0,
         };
         child.cpu.set_reg(Reg::R0, 0);
         if clone.child_stack != 0 {
@@ -1892,6 +1925,8 @@ impl<M: Memory + Clone> DbtEngine<M> {
             smc_guard_pages: self.smc_guard_pages,
             last_direct_exit: None,
             last_svc_imm: None,
+            recent_blocks: [GuestAddr::new(0); 64],
+            recent_blocks_idx: 0,
         }
     }
 }

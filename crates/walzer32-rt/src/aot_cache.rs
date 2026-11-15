@@ -720,7 +720,7 @@ impl AotScanner {
 
                 // Try Tier-2 Superblock promotion if trace looks hot or is a loop
                 if let Ok(mut sb) = TraceBuilder::build_trace(&engine.mem, norm_addr, is_thumb) {
-                    if sb.block_count > 1 || sb.is_loop {
+                    if (sb.block_count > 1 || sb.is_loop) && !matches!(sb.exit, walzer32_ir::BlockExit::Invalid(_)) {
                         SuperblockOptimizer::optimize(&mut sb);
                         let sb_compiled = A64Compiler::compile_superblock(&sb);
                         if let Ok(sb_committed) = engine.pool.commit_block(&sb_compiled.code_bytes) {

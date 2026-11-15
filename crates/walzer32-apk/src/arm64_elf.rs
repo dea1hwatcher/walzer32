@@ -3,6 +3,7 @@ use walzer32_elf::ElfParser;
 
 const ELF64_EHDR_SIZE: usize = 64;
 const ELF64_PHDR_SIZE: usize = 56;
+const ELF64_SHDR_SIZE: usize = 64;
 const ELF64_SYM_SIZE: usize = 24;
 const ELF64_RELA_SIZE: usize = 24;
 const PAGE_SIZE: usize = 0x1000;
@@ -13,6 +14,18 @@ const PT_DYNAMIC: u32 = 2;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
+
+const SHT_NULL: u32 = 0;
+const SHT_PROGBITS: u32 = 1;
+const SHT_STRTAB: u32 = 3;
+const SHT_RELA: u32 = 4;
+const SHT_HASH: u32 = 5;
+const SHT_DYNAMIC: u32 = 6;
+const SHT_DYNSYM: u32 = 11;
+
+const SHF_WRITE: u64 = 0x1;
+const SHF_ALLOC: u64 = 0x2;
+const SHF_EXECINSTR: u64 = 0x4;
 
 const DT_NULL: u64 = 0;
 const DT_NEEDED: u64 = 1;
@@ -64,6 +77,7 @@ pub fn extract_arm32_jni_exports(arm32_elf: &[u8]) -> Vec<String> {
 }
 
 /// Encodes AArch64 `ADRP X16, target_page`, `LDR X16, [X16, #off]`, `BR X16`.
+#[allow(dead_code)]
 fn emit_got_tail_jump(buf: &mut Vec<u8>, code_vaddr: usize, got_vaddr: usize) {
     let page_diff = ((got_vaddr >> 12) as i64) - ((code_vaddr >> 12) as i64);
     let imm21 = (page_diff as u32) & 0x1F_FFFF;
@@ -176,7 +190,30 @@ pub fn generate_dynamic_arm64_stub(
     dyn_entries.push((DT_FLAGS, DF_BIND_NOW));
     dyn_entries.push((DT_NULL, 0));
     let dynamic_size = dyn_entries.len() * 16;
-    let total_size = dynamic_off + dynamic_size;
+
+    // Build .shstrtab
+    let mut shstrtab = Vec::new();
+    shstrtab.push(0); // 0 = empty string
+    let mut add_shstr = |s: &str| -> u32 {
+        let off = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(s.as_bytes());
+        shstrtab.push(0);
+        off
+    };
+    let dynstr_shname = add_shstr(".dynstr");
+    let dynsym_shname = add_shstr(".dynsym");
+    let hash_shname = add_shstr(".hash");
+    let rela_shname = add_shstr(".rela.dyn");
+    let text_shname = add_shstr(".text");
+    let got_shname = add_shstr(".got");
+    let dynamic_shname = add_shstr(".dynamic");
+    let shstrtab_shname = add_shstr(".shstrtab");
+
+    let rw_filesz = (dynamic_off + dynamic_size) - rw_off;
+    let shstrtab_off = align_up(dynamic_off + dynamic_size, 8);
+    let shnum = 9usize;
+    let shdr_off = align_up(shstrtab_off + shstrtab.len(), 8);
+    let total_size = shdr_off + shnum * ELF64_SHDR_SIZE;
 
     let mut img = vec![0u8; total_size];
 
@@ -189,9 +226,13 @@ pub fn generate_dynamic_arm64_stub(
     LittleEndian::write_u16(&mut img[18..20], 183); // EM_AARCH64
     LittleEndian::write_u32(&mut img[20..24], 1); // EV_CURRENT
     LittleEndian::write_u64(&mut img[32..40], ELF64_EHDR_SIZE as u64); // e_phoff
+    LittleEndian::write_u64(&mut img[40..48], shdr_off as u64); // e_shoff
     LittleEndian::write_u16(&mut img[52..54], ELF64_EHDR_SIZE as u16);
     LittleEndian::write_u16(&mut img[54..56], ELF64_PHDR_SIZE as u16);
     LittleEndian::write_u16(&mut img[56..58], 3); // e_phnum
+    LittleEndian::write_u16(&mut img[58..60], ELF64_SHDR_SIZE as u16); // e_shentsize = 0x40 (sizeof(Elf64_Shdr))
+    LittleEndian::write_u16(&mut img[60..62], shnum as u16); // e_shnum = 9
+    LittleEndian::write_u16(&mut img[62..64], 8); // e_shstrndx = 8 (.shstrtab)
 
     // 2. Elf64_Phdr table
     let write_phdr = |buf: &mut [u8],
@@ -229,7 +270,7 @@ pub fn generate_dynamic_arm64_stub(
         PF_R | PF_W,
         rw_off as u64,
         rw_vaddr as u64,
-        (total_size - rw_off) as u64,
+        rw_filesz as u64,
         PAGE_SIZE as u64,
     );
     write_phdr(
@@ -283,7 +324,7 @@ pub fn generate_dynamic_arm64_stub(
             sym_idx,
             export_name_offs[i],
             (1 << 4) | 2, // STB_GLOBAL | STT_FUNC
-            1,
+            5,            // Section 5 = .text
             export_vaddrs[i],
             code_len,
         );
@@ -308,9 +349,14 @@ pub fn generate_dynamic_arm64_stub(
 
     // 6. .text stubs
     let mut text_buf = Vec::new();
-    for (i, name) in exports.iter().enumerate() {
+    for (_i, name) in exports.iter().enumerate() {
         if name == "JNI_OnLoad" {
-            emit_got_tail_jump(&mut text_buf, export_vaddrs[i] as usize, got_vaddr);
+            // MOVZ W0, #6
+            text_buf.extend_from_slice(&0x5280_00C0u32.to_le_bytes());
+            // MOVK W0, #1, LSL #16 (0x00010006 = JNI_VERSION_1_6)
+            text_buf.extend_from_slice(&0x72A0_0020u32.to_le_bytes());
+            // RET
+            text_buf.extend_from_slice(&0xD65F_03C0u32.to_le_bytes());
         } else {
             text_buf.extend_from_slice(&0x5280_0000u32.to_le_bytes()); // MOV W0, #0
             text_buf.extend_from_slice(&0xD65F_03C0u32.to_le_bytes()); // RET
@@ -324,6 +370,54 @@ pub fn generate_dynamic_arm64_stub(
         LittleEndian::write_u64(&mut img[off..off + 8], tag);
         LittleEndian::write_u64(&mut img[off + 8..off + 16], val);
     }
+
+    // 8. .shstrtab
+    img[shstrtab_off..shstrtab_off + shstrtab.len()].copy_from_slice(&shstrtab);
+
+    // 9. Section header table (Elf64_Shdr)
+    let write_shdr = |buf: &mut [u8],
+                      idx: usize,
+                      sh_name: u32,
+                      sh_type: u32,
+                      sh_flags: u64,
+                      sh_addr: u64,
+                      sh_offset: u64,
+                      sh_size: u64,
+                      sh_link: u32,
+                      sh_info: u32,
+                      sh_addralign: u64,
+                      sh_entsize: u64| {
+        let base = shdr_off + idx * ELF64_SHDR_SIZE;
+        LittleEndian::write_u32(&mut buf[base..base + 4], sh_name);
+        LittleEndian::write_u32(&mut buf[base + 4..base + 8], sh_type);
+        LittleEndian::write_u64(&mut buf[base + 8..base + 16], sh_flags);
+        LittleEndian::write_u64(&mut buf[base + 16..base + 24], sh_addr);
+        LittleEndian::write_u64(&mut buf[base + 24..base + 32], sh_offset);
+        LittleEndian::write_u64(&mut buf[base + 32..base + 40], sh_size);
+        LittleEndian::write_u32(&mut buf[base + 40..base + 44], sh_link);
+        LittleEndian::write_u32(&mut buf[base + 44..base + 48], sh_info);
+        LittleEndian::write_u64(&mut buf[base + 48..base + 56], sh_addralign);
+        LittleEndian::write_u64(&mut buf[base + 56..base + 64], sh_entsize);
+    };
+
+    // [0] SHT_NULL
+    write_shdr(&mut img, 0, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
+    // [1] .dynstr
+    write_shdr(&mut img, 1, dynstr_shname, SHT_STRTAB, SHF_ALLOC, dynstr_off as u64, dynstr_off as u64, dynstr.len() as u64, 0, 0, 1, 0);
+    // [2] .dynsym
+    write_shdr(&mut img, 2, dynsym_shname, SHT_DYNSYM, SHF_ALLOC, dynsym_off as u64, dynsym_off as u64, (sym_count * ELF64_SYM_SIZE) as u64, 1, 1, 8, ELF64_SYM_SIZE as u64);
+    // [3] .hash
+    write_shdr(&mut img, 3, hash_shname, SHT_HASH, SHF_ALLOC, hash_off as u64, hash_off as u64, hash_size as u64, 2, 0, 4, 4);
+    // [4] .rela.dyn
+    write_shdr(&mut img, 4, rela_shname, SHT_RELA, SHF_ALLOC, rela_off as u64, rela_off as u64, rela_size as u64, 2, 0, 8, ELF64_RELA_SIZE as u64);
+    // [5] .text
+    write_shdr(&mut img, 5, text_shname, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, text_off as u64, text_off as u64, (rx_filesz - text_off) as u64, 0, 0, 16, 0);
+    // [6] .got
+    write_shdr(&mut img, 6, got_shname, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, got_vaddr as u64, rw_off as u64, 8, 0, 0, 8, 8);
+    // [7] .dynamic
+    write_shdr(&mut img, 7, dynamic_shname, SHT_DYNAMIC, SHF_ALLOC | SHF_WRITE, dynamic_vaddr as u64, dynamic_off as u64, dynamic_size as u64, 1, 0, 8, 16);
+    // [8] .shstrtab
+    write_shdr(&mut img, 8, shstrtab_shname, SHT_STRTAB, 0, 0, shstrtab_off as u64, shstrtab.len() as u64, 0, 0, 1, 0);
 
     img
 }
@@ -362,5 +456,13 @@ mod tests {
         assert!(text.contains("JNI_OnLoad"));
         assert!(text.contains("Java_com_example_Game_nativeTick"));
         assert!(text.contains("Java_com_example_Game_nativeInit"));
+
+        // Verify ELF64 section headers and .shstrtab satisfying Android 8+ (API 26+) Bionic requirements
+        assert_eq!(LittleEndian::read_u16(&elf[58..60]), 64); // e_shentsize == 64
+        assert_eq!(LittleEndian::read_u16(&elf[60..62]), 9); // e_shnum == 9
+        assert_eq!(LittleEndian::read_u16(&elf[62..64]), 8); // e_shstrndx == 8
+        assert!(LittleEndian::read_u64(&elf[40..48]) > 0); // e_shoff > 0
+        assert!(text.contains(".shstrtab"));
+        assert!(text.contains(".dynamic"));
     }
 }

@@ -15,9 +15,13 @@ pub fn sign_apk(apk_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     std::fs::write(&apk_in, &apk_bytes).map_err(|e| format!("write unsigned apk: {e}"))?;
 
     let java_home = std::env::var("JAVA_HOME")
-        .unwrap_or_else(|_| r"C:\Users\luna\.jdks\jdk-21.0.13.0.2+1".to_string());
+        .ok()
+        .filter(|p| std::path::Path::new(p).exists())
+        .unwrap_or_else(|| r"C:\Users\luna\.jdks\jdk-21.0.13.0.2+1".to_string());
     let android_home = std::env::var("ANDROID_HOME")
-        .unwrap_or_else(|_| r"D:\Android\Sdk".to_string());
+        .ok()
+        .filter(|p| std::path::Path::new(p).exists())
+        .unwrap_or_else(|| r"D:\Android\Sdk".to_string());
 
     // Generate debug keystore if not present
     if !ks_path.exists() {

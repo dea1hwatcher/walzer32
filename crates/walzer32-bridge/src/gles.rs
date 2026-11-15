@@ -217,6 +217,17 @@ pub enum GlesFuncId {
     GlScissor                               = 113,
     GlGetIntegerv                           = 114,
     GlPixelStorei                           = 115,
+    GlGetFloatv                             = 116,
+    GlIsEnabled                             = 117,
+    GlIsTexture                             = 118,
+    GlLineWidth                             = 119,
+    GlMultMatrixf                           = 120,
+    GlPointSize                             = 121,
+    GlPointSizePointerOES                   = 122,
+    GlReadPixels                            = 123,
+    GlBindAttribLocation                    = 124,
+    GlCompressedTexImage2D                  = 125,
+    GlGenerateMipmap                        = 126,
 }
 
 impl GlesFuncId {
@@ -344,6 +355,17 @@ impl GlesFuncId {
             113 => Some(Self::GlScissor),
             114 => Some(Self::GlGetIntegerv),
             115 => Some(Self::GlPixelStorei),
+            116 => Some(Self::GlGetFloatv),
+            117 => Some(Self::GlIsEnabled),
+            118 => Some(Self::GlIsTexture),
+            119 => Some(Self::GlLineWidth),
+            120 => Some(Self::GlMultMatrixf),
+            121 => Some(Self::GlPointSize),
+            122 => Some(Self::GlPointSizePointerOES),
+            123 => Some(Self::GlReadPixels),
+            124 => Some(Self::GlBindAttribLocation),
+            125 => Some(Self::GlCompressedTexImage2D),
+            126 => Some(Self::GlGenerateMipmap),
 
             _ => None,
         }
@@ -761,6 +783,23 @@ impl GlesBridge {
             ("glUniform4fv", GlesFuncId::GlUniform4fv),
             ("glUniformMatrix4fv", GlesFuncId::GlUniformMatrix4fv),
             ("glGetError", GlesFuncId::GlGetError),
+            ("glGetFloatv", GlesFuncId::GlGetFloatv),
+            ("glIsEnabled", GlesFuncId::GlIsEnabled),
+            ("glIsTexture", GlesFuncId::GlIsTexture),
+            ("glLineWidth", GlesFuncId::GlLineWidth),
+            ("glMultMatrixf", GlesFuncId::GlMultMatrixf),
+            ("glPointSize", GlesFuncId::GlPointSize),
+            ("glPointSizePointerOES", GlesFuncId::GlPointSizePointerOES),
+            ("glReadPixels", GlesFuncId::GlReadPixels),
+            ("glBindAttribLocation", GlesFuncId::GlBindAttribLocation),
+            ("glCompressedTexImage2D", GlesFuncId::GlCompressedTexImage2D),
+            ("glGenerateMipmap", GlesFuncId::GlGenerateMipmap),
+            ("glGenerateMipmapOES", GlesFuncId::GlGenerateMipmap),
+            ("glBindFramebufferOES", GlesFuncId::GlBindFramebuffer),
+            ("glDeleteFramebuffersOES", GlesFuncId::GlDeleteFramebuffers),
+            ("glGenFramebuffersOES", GlesFuncId::GlGenFramebuffers),
+            ("glFramebufferTexture2DOES", GlesFuncId::GlFramebufferTexture2D),
+            ("glCheckFramebufferStatusOES", GlesFuncId::GlCheckFramebufferStatus),
         ];
 
         for (name, id) in symbols {
@@ -887,6 +926,17 @@ impl GlesBridge {
             GlesFuncId::GlMaterialfv,
             GlesFuncId::GlFogf,
             GlesFuncId::GlFogfv,
+            GlesFuncId::GlGetFloatv,
+            GlesFuncId::GlIsEnabled,
+            GlesFuncId::GlIsTexture,
+            GlesFuncId::GlLineWidth,
+            GlesFuncId::GlMultMatrixf,
+            GlesFuncId::GlPointSize,
+            GlesFuncId::GlPointSizePointerOES,
+            GlesFuncId::GlReadPixels,
+            GlesFuncId::GlBindAttribLocation,
+            GlesFuncId::GlCompressedTexImage2D,
+            GlesFuncId::GlGenerateMipmap,
         ];
 
         for &id in &all_ids {
@@ -1607,7 +1657,23 @@ impl GlesBridge {
             GlesFuncId::GlTexCoordPointer |
             GlesFuncId::GlNormalPointer |
             GlesFuncId::GlAlphaFunc |
-            GlesFuncId::GlColor4f |
+            GlesFuncId::GlColor4f => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            GlesFuncId::GlGetFloatv => {
+                let ptr = GuestAddr::new(cpu.reg(Reg::R1));
+                if ptr.as_u32() != 0 {
+                    mem.write_u32(ptr, 1.0f32.to_bits())?;
+                }
+                cpu.set_reg(Reg::R0, 0);
+            }
+            GlesFuncId::GlIsEnabled => {
+                cpu.set_reg(Reg::R0, 0);
+            }
+            GlesFuncId::GlIsTexture => {
+                let id = cpu.reg(Reg::R0);
+                cpu.set_reg(Reg::R0, if id != 0 { 1 } else { 0 });
+            }
             GlesFuncId::GlColor4ub |
             GlesFuncId::GlShadeModel |
             GlesFuncId::GlTexEnvf |
@@ -2614,6 +2680,299 @@ impl GlesBridge {
             GlesFuncId::GlGetError => {
                 let f = resolve_host!("glGetError", extern "C" fn() -> u32);
                 cpu.set_reg(Reg::R0, f());
+                Ok(true)
+            }
+            GlesFuncId::GlGetFloatv => {
+                let f = resolve_host!("glGetFloatv", extern "C" fn(u32, *mut f32));
+                let pname = cpu.reg(Reg::R0);
+                let ptr = Self::guest_ptr(mem, cpu.reg(Reg::R1)) as *mut f32;
+                if !ptr.is_null() {
+                    f(pname, ptr);
+                }
+                Ok(true)
+            }
+            GlesFuncId::GlIsEnabled => {
+                let f = resolve_host!("glIsEnabled", extern "C" fn(u32) -> u32);
+                cpu.set_reg(Reg::R0, f(cpu.reg(Reg::R0)));
+                Ok(true)
+            }
+            GlesFuncId::GlIsTexture => {
+                let f = resolve_host!("glIsTexture", extern "C" fn(u32) -> u32);
+                cpu.set_reg(Reg::R0, f(cpu.reg(Reg::R0)));
+                Ok(true)
+            }
+            GlesFuncId::GlLineWidth => {
+                let f = resolve_host!("glLineWidth", extern "C" fn(f32));
+                let width = f32::from_bits(cpu.reg(Reg::R0));
+                f(width);
+                Ok(true)
+            }
+            GlesFuncId::GlMultMatrixf => {
+                let f = resolve_host!("glMultMatrixf", extern "C" fn(*const f32));
+                let ptr = Self::guest_ptr_const(mem, cpu.reg(Reg::R0)) as *const f32;
+                if !ptr.is_null() {
+                    f(ptr);
+                }
+                Ok(true)
+            }
+            GlesFuncId::GlPointSize => {
+                let f = resolve_host!("glPointSize", extern "C" fn(f32));
+                let size = f32::from_bits(cpu.reg(Reg::R0));
+                f(size);
+                Ok(true)
+            }
+            GlesFuncId::GlPointSizePointerOES => {
+                Ok(true)
+            }
+            GlesFuncId::GlMatrixMode => {
+                let f = resolve_host!("glMatrixMode", extern "C" fn(u32));
+                let mode = cpu.reg(Reg::R0);
+                self.matrix_mode = mode;
+                f(mode);
+                Ok(true)
+            }
+            GlesFuncId::GlLoadIdentity => {
+                let f = resolve_host!("glLoadIdentity", extern "C" fn());
+                f();
+                Ok(true)
+            }
+            GlesFuncId::GlLoadMatrixf => {
+                let f = resolve_host!("glLoadMatrixf", extern "C" fn(*const f32));
+                let ptr = Self::guest_ptr_const(mem, cpu.reg(Reg::R0)) as *const f32;
+                if !ptr.is_null() {
+                    f(ptr);
+                }
+                Ok(true)
+            }
+            GlesFuncId::GlPushMatrix => {
+                let f = resolve_host!("glPushMatrix", extern "C" fn());
+                f();
+                Ok(true)
+            }
+            GlesFuncId::GlPopMatrix => {
+                let f = resolve_host!("glPopMatrix", extern "C" fn());
+                f();
+                Ok(true)
+            }
+            GlesFuncId::GlOrthof => {
+                let f = resolve_host!("glOrthof", extern "C" fn(f32, f32, f32, f32, f32, f32));
+                let left = f32::from_bits(cpu.reg(Reg::R0));
+                let right = f32::from_bits(cpu.reg(Reg::R1));
+                let bottom = f32::from_bits(cpu.reg(Reg::R2));
+                let top = f32::from_bits(cpu.reg(Reg::R3));
+                let sp = GuestAddr::new(cpu.sp());
+                let znear = f32::from_bits(mem.read_u32(sp)?);
+                let zfar = f32::from_bits(mem.read_u32(sp.add(4))?);
+                f(left, right, bottom, top, znear, zfar);
+                Ok(true)
+            }
+            GlesFuncId::GlFrustumf => {
+                let f = resolve_host!("glFrustumf", extern "C" fn(f32, f32, f32, f32, f32, f32));
+                let left = f32::from_bits(cpu.reg(Reg::R0));
+                let right = f32::from_bits(cpu.reg(Reg::R1));
+                let bottom = f32::from_bits(cpu.reg(Reg::R2));
+                let top = f32::from_bits(cpu.reg(Reg::R3));
+                let sp = GuestAddr::new(cpu.sp());
+                let znear = f32::from_bits(mem.read_u32(sp)?);
+                let zfar = f32::from_bits(mem.read_u32(sp.add(4))?);
+                f(left, right, bottom, top, znear, zfar);
+                Ok(true)
+            }
+            GlesFuncId::GlTranslatef => {
+                let f = resolve_host!("glTranslatef", extern "C" fn(f32, f32, f32));
+                let x = f32::from_bits(cpu.reg(Reg::R0));
+                let y = f32::from_bits(cpu.reg(Reg::R1));
+                let z = f32::from_bits(cpu.reg(Reg::R2));
+                f(x, y, z);
+                Ok(true)
+            }
+            GlesFuncId::GlScalef => {
+                let f = resolve_host!("glScalef", extern "C" fn(f32, f32, f32));
+                let x = f32::from_bits(cpu.reg(Reg::R0));
+                let y = f32::from_bits(cpu.reg(Reg::R1));
+                let z = f32::from_bits(cpu.reg(Reg::R2));
+                f(x, y, z);
+                Ok(true)
+            }
+            GlesFuncId::GlRotatef => {
+                let f = resolve_host!("glRotatef", extern "C" fn(f32, f32, f32, f32));
+                let angle = f32::from_bits(cpu.reg(Reg::R0));
+                let x = f32::from_bits(cpu.reg(Reg::R1));
+                let y = f32::from_bits(cpu.reg(Reg::R2));
+                let z = f32::from_bits(cpu.reg(Reg::R3));
+                f(angle, x, y, z);
+                Ok(true)
+            }
+            GlesFuncId::GlEnableClientState => {
+                let f = resolve_host!("glEnableClientState", extern "C" fn(u32));
+                let array = cpu.reg(Reg::R0);
+                self.client_states |= 1 << (array & 0x1F);
+                f(array);
+                Ok(true)
+            }
+            GlesFuncId::GlDisableClientState => {
+                let f = resolve_host!("glDisableClientState", extern "C" fn(u32));
+                let array = cpu.reg(Reg::R0);
+                self.client_states &= !(1 << (array & 0x1F));
+                f(array);
+                Ok(true)
+            }
+            GlesFuncId::GlVertexPointer => {
+                let f = resolve_host!("glVertexPointer", extern "C" fn(i32, u32, i32, *const c_void));
+                let size = cpu.reg(Reg::R0) as i32;
+                let ty = cpu.reg(Reg::R1);
+                let stride = cpu.reg(Reg::R2) as i32;
+                let pointer_val = cpu.reg(Reg::R3);
+                let bound_vbo = self.current_bound_buffer(cpu, 0x8892);
+                let host_pointer = if bound_vbo != 0 {
+                    pointer_val as usize as *const c_void
+                } else {
+                    Self::guest_ptr_const(mem, pointer_val)
+                };
+                f(size, ty, stride, host_pointer);
+                Ok(true)
+            }
+            GlesFuncId::GlColorPointer => {
+                let f = resolve_host!("glColorPointer", extern "C" fn(i32, u32, i32, *const c_void));
+                let size = cpu.reg(Reg::R0) as i32;
+                let ty = cpu.reg(Reg::R1);
+                let stride = cpu.reg(Reg::R2) as i32;
+                let pointer_val = cpu.reg(Reg::R3);
+                let bound_vbo = self.current_bound_buffer(cpu, 0x8892);
+                let host_pointer = if bound_vbo != 0 {
+                    pointer_val as usize as *const c_void
+                } else {
+                    Self::guest_ptr_const(mem, pointer_val)
+                };
+                f(size, ty, stride, host_pointer);
+                Ok(true)
+            }
+            GlesFuncId::GlTexCoordPointer => {
+                let f = resolve_host!("glTexCoordPointer", extern "C" fn(i32, u32, i32, *const c_void));
+                let size = cpu.reg(Reg::R0) as i32;
+                let ty = cpu.reg(Reg::R1);
+                let stride = cpu.reg(Reg::R2) as i32;
+                let pointer_val = cpu.reg(Reg::R3);
+                let bound_vbo = self.current_bound_buffer(cpu, 0x8892);
+                let host_pointer = if bound_vbo != 0 {
+                    pointer_val as usize as *const c_void
+                } else {
+                    Self::guest_ptr_const(mem, pointer_val)
+                };
+                f(size, ty, stride, host_pointer);
+                Ok(true)
+            }
+            GlesFuncId::GlNormalPointer => {
+                let f = resolve_host!("glNormalPointer", extern "C" fn(u32, i32, *const c_void));
+                let ty = cpu.reg(Reg::R0);
+                let stride = cpu.reg(Reg::R1) as i32;
+                let pointer_val = cpu.reg(Reg::R2);
+                let bound_vbo = self.current_bound_buffer(cpu, 0x8892);
+                let host_pointer = if bound_vbo != 0 {
+                    pointer_val as usize as *const c_void
+                } else {
+                    Self::guest_ptr_const(mem, pointer_val)
+                };
+                f(ty, stride, host_pointer);
+                Ok(true)
+            }
+            GlesFuncId::GlAlphaFunc => {
+                let f = resolve_host!("glAlphaFunc", extern "C" fn(u32, f32));
+                let func = cpu.reg(Reg::R0);
+                let ref_val = f32::from_bits(cpu.reg(Reg::R1));
+                f(func, ref_val);
+                Ok(true)
+            }
+            GlesFuncId::GlColor4f => {
+                let f = resolve_host!("glColor4f", extern "C" fn(f32, f32, f32, f32));
+                let r = f32::from_bits(cpu.reg(Reg::R0));
+                let g = f32::from_bits(cpu.reg(Reg::R1));
+                let b = f32::from_bits(cpu.reg(Reg::R2));
+                let a = f32::from_bits(cpu.reg(Reg::R3));
+                f(r, g, b, a);
+                Ok(true)
+            }
+            GlesFuncId::GlColor4ub => {
+                let f = resolve_host!("glColor4ub", extern "C" fn(u8, u8, u8, u8));
+                let r = cpu.reg(Reg::R0) as u8;
+                let g = cpu.reg(Reg::R1) as u8;
+                let b = cpu.reg(Reg::R2) as u8;
+                let a = cpu.reg(Reg::R3) as u8;
+                f(r, g, b, a);
+                Ok(true)
+            }
+            GlesFuncId::GlClientActiveTexture => {
+                let f = resolve_host!("glClientActiveTexture", extern "C" fn(u32));
+                let tex = cpu.reg(Reg::R0);
+                self.client_active_texture = tex;
+                f(tex);
+                Ok(true)
+            }
+            GlesFuncId::GlShadeModel => {
+                let f = resolve_host!("glShadeModel", extern "C" fn(u32));
+                f(cpu.reg(Reg::R0));
+                Ok(true)
+            }
+            GlesFuncId::GlTexEnvf => {
+                let f = resolve_host!("glTexEnvf", extern "C" fn(u32, u32, f32));
+                let target = cpu.reg(Reg::R0);
+                let pname = cpu.reg(Reg::R1);
+                let param = f32::from_bits(cpu.reg(Reg::R2));
+                f(target, pname, param);
+                Ok(true)
+            }
+            GlesFuncId::GlTexEnvi => {
+                let f = resolve_host!("glTexEnvi", extern "C" fn(u32, u32, i32));
+                let target = cpu.reg(Reg::R0);
+                let pname = cpu.reg(Reg::R1);
+                let param = cpu.reg(Reg::R2) as i32;
+                f(target, pname, param);
+                Ok(true)
+            }
+            GlesFuncId::GlReadPixels => {
+                let f = resolve_host!("glReadPixels", extern "C" fn(i32, i32, i32, i32, u32, u32, *mut c_void));
+                let x = cpu.reg(Reg::R0) as i32;
+                let y = cpu.reg(Reg::R1) as i32;
+                let width = cpu.reg(Reg::R2) as i32;
+                let height = cpu.reg(Reg::R3) as i32;
+                let sp = GuestAddr::new(cpu.sp());
+                let format = mem.read_u32(sp)?;
+                let ty = mem.read_u32(sp.add(4))?;
+                let pixels_addr = mem.read_u32(sp.add(8))?;
+                let ptr = Self::guest_ptr(mem, pixels_addr);
+                if !ptr.is_null() {
+                    f(x, y, width, height, format, ty, ptr);
+                }
+                Ok(true)
+            }
+            GlesFuncId::GlBindAttribLocation => {
+                let f = resolve_host!("glBindAttribLocation", extern "C" fn(u32, u32, *const c_char));
+                let prog = cpu.reg(Reg::R0);
+                let index = cpu.reg(Reg::R1);
+                let name = self.read_guest_cstring(mem, GuestAddr::new(cpu.reg(Reg::R2)))?;
+                if let Ok(c) = CString::new(name) {
+                    f(prog, index, c.as_ptr());
+                }
+                Ok(true)
+            }
+            GlesFuncId::GlCompressedTexImage2D => {
+                let f = resolve_host!("glCompressedTexImage2D", extern "C" fn(u32, i32, u32, i32, i32, i32, i32, *const c_void));
+                let target = cpu.reg(Reg::R0);
+                let level = cpu.reg(Reg::R1) as i32;
+                let internalformat = cpu.reg(Reg::R2);
+                let width = cpu.reg(Reg::R3) as i32;
+                let sp = GuestAddr::new(cpu.sp());
+                let height = mem.read_u32(sp)? as i32;
+                let border = mem.read_u32(sp.add(4))? as i32;
+                let image_size = mem.read_u32(sp.add(8))? as i32;
+                let data_addr = mem.read_u32(sp.add(12))?;
+                let ptr = Self::guest_ptr_const(mem, data_addr);
+                f(target, level, internalformat, width, height, border, image_size, ptr);
+                Ok(true)
+            }
+            GlesFuncId::GlGenerateMipmap => {
+                let f = resolve_host!("glGenerateMipmap", extern "C" fn(u32));
+                f(cpu.reg(Reg::R0));
                 Ok(true)
             }
             _ => Ok(false),

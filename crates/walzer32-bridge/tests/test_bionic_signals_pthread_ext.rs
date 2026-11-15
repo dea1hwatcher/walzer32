@@ -145,8 +145,8 @@ fn test_pthread_equal_and_getattr() {
 
     let stackaddr = mem.read_u32(attr_addr.add(4)).unwrap();
     let stacksize = mem.read_u32(attr_addr.add(8)).unwrap();
-    assert_eq!(stackaddr, 0x7000_0000);
-    assert_eq!(stacksize, 0x0010_0000); // 1MB
+    assert_eq!(stackaddr, bridge.stub_base.add(0xA00_000).as_u32());
+    assert_eq!(stacksize, 0x0020_0000); // 2MB
 }
 
 #[test]

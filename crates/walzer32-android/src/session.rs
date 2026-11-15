@@ -332,6 +332,7 @@ pub struct Walzer32Session {
     pub compiled_jni_thunks: HashMap<(String, String, String), CompiledJniThunk>,
     pub initialized: bool,
     pub active_mt_runtime: Option<SharedGuestRuntime>,
+    pub main_stack_top: GuestAddr,
 }
 
 impl Walzer32Session {
@@ -367,9 +368,25 @@ impl Walzer32Session {
         let audio_stubs = arena_base.add(0x700_000);
         let asset_stubs = arena_base.add(0x800_000);
         let hw_buffer_stubs = arena_base.add(0x900_000);
-        let stack_top = arena_base.add(0xB00_000);
+        #[cfg(target_os = "android")]
+        let mmap_base = GuestAddr::new(0x7800_0000);
+        #[cfg(not(target_os = "android"))]
         let mmap_base = arena_base.add(0xC00_000);
         let lib_load_base = arena_base.add(0x100_0000);
+
+        #[cfg(target_os = "android")]
+        let (stack_region, stack_top, stack_size) = (
+            GuestAddr::new(0x7F00_0000),
+            GuestAddr::new(0x7F80_0000),
+            0x80_0000usize, // 8 MB dedicated stack
+        );
+
+        #[cfg(not(target_os = "android"))]
+        let (stack_region, stack_top, stack_size) = (
+            arena_base.add(0xA00_000),
+            arena_base.add(0xB00_000),
+            0x10_0000usize,
+        );
 
         // On Android commit pages for every fixed section up front.
         // ArenaMemory::commit_range(addr: GuestAddr, len: usize) -> Result<(), MemoryError>
@@ -382,16 +399,17 @@ impl Walzer32Session {
             mem.commit_range(audio_stubs,  0x100_000)?;   // Audio stubs
             mem.commit_range(asset_stubs,  0x100_000)?;   // AssetManager stubs
             mem.commit_range(hw_buffer_stubs, 0x100_000)?;// HardwareBuffer stubs
-            mem.commit_range(arena_base.add(0xA00_000), 0x200_000)?; // Stack region
-            mem.commit_range(mmap_base,    0x400_000)?;   // mmap dynamic heap
+            mem.commit_range(stack_region, stack_size)?;  // Stack region (8MB)
+            mem.commit_range(mmap_base,    0x200_0000)?;  // mmap dynamic heap (32MB dedicated pool)
         }
 
         // Suppress unused-variable warning on targets where arena_size is not used directly
         let _ = arena_size;
         #[cfg(not(target_os = "android"))]
-        let _ = gles_heap;
+        let _ = (gles_heap, stack_region, stack_size);
 
         let mut bionic = BionicBridge::new(bionic_stubs, bionic_heap, 0x400_000);
+        bionic.set_stack(stack_region, stack_size as u32);
         bionic.install_stubs(&mut mem)?;
 
         let gles = GlesBridge::new(gles_stubs, gles_heap);
@@ -432,6 +450,7 @@ impl Walzer32Session {
         }
 
         engine.cpu.set_sp(stack_top.as_u32() - 0x1000);
+        bionic.set_mmap_current(mmap_base);
         engine.set_mmap_base(mmap_base);
         engine.sync_signal_state(&bionic.signal_state);
         if let Some(futex) = engine.futex_manager() {
@@ -464,6 +483,7 @@ impl Walzer32Session {
             compiled_jni_thunks: HashMap::new(),
             initialized: true,
             active_mt_runtime: None,
+            main_stack_top: stack_top,
         };
         session.sync_fast_channels();
         Ok(session)
@@ -518,6 +538,15 @@ impl Walzer32Session {
 
     /// Load a 32-bit ELF shared library by name from raw bytes (runs DT_INIT/DT_INIT_ARRAY and JNI_OnLoad).
     pub fn load_library_bytes(&mut self, name: &str, elf_bytes: &[u8]) -> Result<LoadedLibrary, SessionError> {
+        self.load_library_bytes_opt(name, elf_bytes, true)
+    }
+
+    /// Load a 32-bit ELF shared library by name from raw bytes without invoking constructors.
+    pub fn load_library_bytes_no_init(&mut self, name: &str, elf_bytes: &[u8]) -> Result<LoadedLibrary, SessionError> {
+        self.load_library_bytes_opt(name, elf_bytes, false)
+    }
+
+    fn load_library_bytes_opt(&mut self, name: &str, elf_bytes: &[u8], run_init: bool) -> Result<LoadedLibrary, SessionError> {
         let basename = name.rsplit('/').next().unwrap_or(name);
         if let Some(existing) = self
             .loaded_libraries
@@ -615,7 +644,7 @@ impl Walzer32Session {
         }
 
         let onload_opt = loaded.find_symbol("JNI_OnLoad").filter(|&a| in_module(a));
-        if !init_fns.is_empty() || onload_opt.is_some() {
+        if run_init && (!init_fns.is_empty() || onload_opt.is_some()) {
             let saved_cpu = self.engine.cpu.clone();
             for ctor in init_fns {
                 if let Err(e) = self.call_native(ctor, &[0, 0, 0]) {
@@ -877,7 +906,7 @@ impl Walzer32Session {
     }
 
     fn run_active_mt_loop(&mut self, rt: SharedGuestRuntime) -> Result<u32, SessionError> {
-        let res = run_guest_mt_loop(&mut self.engine, &rt, 1000);
+        let res = run_guest_mt_loop(&mut self.engine, &rt, 1);
         if let Some(s) = self.engine.signal_state() {
             if let Ok(mut b) = rt.bionic.lock() {
                 b.signal_state = s.clone();
@@ -893,6 +922,19 @@ impl Walzer32Session {
     /// (`pthread_create` / `SYS_clone`), then lazily promotes execution to `SharedJit`
     /// and `SharedGuestRuntime` with real OS worker threads.
     pub fn call_native(&mut self, fn_addr: GuestAddr, args: &[u32]) -> Result<u32, SessionError> {
+        let stack_top_u32 = self.main_stack_top.as_u32();
+        let stack_bottom_u32 = stack_top_u32.saturating_sub(0x80_0000); // 8 MB stack
+        let cur_sp = self.engine.cpu.sp();
+        if cur_sp < stack_bottom_u32 || cur_sp > stack_top_u32 {
+            self.engine.cpu.set_sp(stack_top_u32 - 0x1000);
+        }
+        let saved_sp = self.engine.cpu.sp();
+        let res = self.call_native_inner(fn_addr, args);
+        self.engine.cpu.set_sp(saved_sp);
+        res
+    }
+
+    fn call_native_inner(&mut self, fn_addr: GuestAddr, args: &[u32]) -> Result<u32, SessionError> {
         if let Some(rt) = self.active_mt_runtime.take() {
             self.active_mt_runtime = self.try_reclaim_mt_runtime(rt);
         }
@@ -914,6 +956,24 @@ impl Walzer32Session {
 
         while (self.engine.cpu.pc().as_u32() & !1) != (SENTINEL_RETURN_ADDR & !1) {
             check_fastmem_fault(&mut self.engine)?;
+
+            let debug_pc = self.engine.cpu.pc().as_u32() & !1;
+            if (debug_pc & 0xfffff) == 0x5a710 {
+                let sp = self.engine.cpu.reg(walzer32_core::Reg::SP);
+                let r2 = self.engine.cpu.reg(walzer32_core::Reg::R2);
+                let r3 = self.engine.cpu.reg(walzer32_core::Reg::R3);
+                println!("=== DEBUG AT dictionaryWithObjectsAndKeys (pc=0x{:08x}, sp=0x{:08x}) ===", debug_pc, sp);
+                println!("  Pair 0: Obj=0x{:08x}, Key=0x{:08x}", r2, r3);
+                for i in 0..16 {
+                    let obj = self.engine.mem.read_u32(walzer32_core::GuestAddr::new(sp + i * 8)).unwrap_or(0);
+                    let key = self.engine.mem.read_u32(walzer32_core::GuestAddr::new(sp + i * 8 + 4)).unwrap_or(0);
+                    println!("  Pair {:02}: Obj=0x{:08x}, Key=0x{:08x}", i + 1, obj, key);
+                    if obj == 0 || key == 0 {
+                        println!("  -> hit 0 at pair index {}", i + 1);
+                        break;
+                    }
+                }
+            }
 
             match self.engine.step()? {
                 EngineStepResult::Syscall(_) => {
@@ -971,7 +1031,109 @@ impl Walzer32Session {
                     self.engine.cpu.set_reg(Reg::R0, exit_code);
                     break;
                 }
-                EngineStepResult::Continue | EngineStepResult::Breakpoint { .. } => {}
+                EngineStepResult::Breakpoint { imm } => {
+                    let sp = self.engine.cpu.sp();
+                    println!("=== HIT GUEST BREAKPOINT #{} (0x{:02x}) at pc=0x{:08x} ===", imm, imm, self.engine.cpu.pc().as_u32());
+                    println!("  r0=0x{:08x} r1=0x{:08x} r2=0x{:08x} r3=0x{:08x}",
+                        self.engine.cpu.reg(Reg::R0),
+                        self.engine.cpu.reg(Reg::R1),
+                        self.engine.cpu.reg(Reg::R2),
+                        self.engine.cpu.reg(Reg::R3),
+                    );
+                    println!("  r4=0x{:08x} r5=0x{:08x} r6=0x{:08x} r7=0x{:08x} sp=0x{:08x} lr=0x{:08x}",
+                        self.engine.cpu.reg(Reg::R4),
+                        self.engine.cpu.reg(Reg::R5),
+                        self.engine.cpu.reg(Reg::R6),
+                        self.engine.cpu.reg(Reg::R7),
+                        sp,
+                        self.engine.cpu.lr(),
+                    );
+                    if imm == 0x44 || imm == 68 {
+                        let count = self.engine.mem.read_u32(GuestAddr::new(sp)).unwrap_or(0);
+                        let objs_ptr = self.engine.cpu.reg(Reg::R2);
+                        let keys_ptr = self.engine.cpu.reg(Reg::R3);
+                        println!("=== BREAKPOINT 44: dictionaryWithObjectsAndKeys count={} objs=0x{:08x} keys=0x{:08x} ===", count, objs_ptr, keys_ptr);
+                        for i in 0..count.min(32) {
+                            let obj = self.engine.mem.read_u32(GuestAddr::new(objs_ptr + i * 4)).unwrap_or(0);
+                            let key = self.engine.mem.read_u32(GuestAddr::new(keys_ptr + i * 4)).unwrap_or(0);
+                            let mut key_str = String::new();
+                            let chars_ptr = self.engine.mem.read_u32(GuestAddr::new(key + 4)).unwrap_or(0);
+                            for off in 0..32 {
+                                if let Ok(b) = self.engine.mem.read_u8(GuestAddr::new(chars_ptr + off)) {
+                                    if b == 0 { break; }
+                                    key_str.push(b as char);
+                                }
+                            }
+                            let isa = if obj >= 0x1000 {
+                                self.engine.mem.read_u32(GuestAddr::new(obj)).unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            println!("  Pair[{:02}]: obj=0x{:08x} (isa=0x{:08x}), key=0x{:08x} (\"{}\")", i, obj, isa, key, key_str);
+                        }
+                        println!("=== CALLER STACK AT SP=0x{:08x} (sp+0x240..0x2c0) ===", sp);
+                        for off in (0x240..=0x2c0).step_by(4) {
+                            let val = self.engine.mem.read_u32(GuestAddr::new(sp + off)).unwrap_or(0);
+                            println!("  [sp+0x{:03x}] (0x{:08x}) = 0x{:08x}", off, sp + off, val);
+                        }
+                    } else if imm == 0x45 || imm == 69 {
+                        println!("=== BREAKPOINT 45: after initWithObjects:count: returned r0=0x{:08x} ===", self.engine.cpu.reg(Reg::R0));
+                    } else if imm == 0x46 || imm == 70 {
+                        let sp = self.engine.cpu.sp();
+                        println!("=== BREAKPOINT 46: BEFORE arrayWithObjects: at _unlocalizedDefaults ===");
+                        println!("  receiver (r0): 0x{:08x}", self.engine.cpu.reg(Reg::R0));
+                        println!("  selector (r1): 0x{:08x}", self.engine.cpu.reg(Reg::R1));
+                        println!("  arg1 (r2): 0x{:08x}", self.engine.cpu.reg(Reg::R2));
+                        println!("  arg2 (r3): 0x{:08x}", self.engine.cpu.reg(Reg::R3));
+                        println!("  target (r5): 0x{:08x}", self.engine.cpu.reg(Reg::R5));
+                        for i in 0..6 {
+                            let val = self.engine.mem.read_u32(GuestAddr::new(sp + i * 4)).unwrap_or(0);
+                            println!("  stack[sp+0x{:02x}]: 0x{:08x}", i * 4, val);
+                        }
+                    } else if imm == 0x47 || imm == 71 {
+                        println!("=== BREAKPOINT 47: AFTER arrayWithObjects: at _unlocalizedDefaults ===");
+                        println!("  r0: 0x{:08x}", self.engine.cpu.reg(Reg::R0));
+                        println!("  r1: 0x{:08x}", self.engine.cpu.reg(Reg::R1));
+                        println!("  r2: 0x{:08x}", self.engine.cpu.reg(Reg::R2));
+                        println!("  r3: 0x{:08x}", self.engine.cpu.reg(Reg::R3));
+                        println!("  r4: 0x{:08x}", self.engine.cpu.reg(Reg::R4));
+                        println!("  r5: 0x{:08x}", self.engine.cpu.reg(Reg::R5));
+                        println!("  r6: 0x{:08x}", self.engine.cpu.reg(Reg::R6));
+                        println!("  sp: 0x{:08x}", self.engine.cpu.sp());
+                        println!("  lr: 0x{:08x}", self.engine.cpu.lr());
+                    } else if imm == 0x48 || imm == 72 {
+                        let sp = self.engine.cpu.sp();
+                        println!("=== BREAKPOINT 48: at 0x1e87aa (loading [sp, #0x78]) ===");
+                        println!("  sp: 0x{:08x}", sp);
+                        for offset in (0x50..=0x90).step_by(4) {
+                            let val = self.engine.mem.read_u32(GuestAddr::new(sp + offset)).unwrap_or(0);
+                            println!("  [sp+0x{:02x}] (0x{:08x}) = 0x{:08x}", offset, sp + offset, val);
+                        }
+                    } else {
+                        println!("=== STACK DUMP AT SP=0x{:08x} ===", sp);
+                        for i in 0..30 {
+                            let addr = GuestAddr::new(sp + i * 4);
+                            let val = self.engine.mem.read_u32(addr).unwrap_or(0);
+                            println!("  [sp+0x{:02x}] (0x{:08x}) = 0x{:08x}", i * 4, addr.as_u32(), val);
+                        }
+                    }
+                    return Err(SessionError::Engine(walzer32_rt::EngineError::Trap(format!(
+                        "Hit guest breakpoint imm={} at pc=0x{:08x} r0=0x{:08x} r1=0x{:08x} r2=0x{:08x} r3=0x{:08x} r4=0x{:08x} r5=0x{:08x} r6=0x{:08x} r7=0x{:08x} sp=0x{:08x} lr=0x{:08x}",
+                        imm,
+                        self.engine.cpu.pc().as_u32(),
+                        self.engine.cpu.reg(Reg::R0),
+                        self.engine.cpu.reg(Reg::R1),
+                        self.engine.cpu.reg(Reg::R2),
+                        self.engine.cpu.reg(Reg::R3),
+                        self.engine.cpu.reg(Reg::R4),
+                        self.engine.cpu.reg(Reg::R5),
+                        self.engine.cpu.reg(Reg::R6),
+                        self.engine.cpu.reg(Reg::R7),
+                        self.engine.cpu.sp(),
+                        self.engine.cpu.lr(),
+                    ))));
+                }
+                EngineStepResult::Continue => {}
             }
 
             #[cfg(test)]

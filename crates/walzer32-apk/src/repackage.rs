@@ -180,8 +180,22 @@ pub fn repackage_for_arm64(
 
     // Optionally inject DEX bootstrap
     let injected_dex_bootstrap = if options.inject_dex_bootstrap {
+        // Determine the next available classesN.dex name so Multidex APKs never get duplicate entries
+        let mut max_dex_idx = 1usize;
+        for (name, _) in &all_files {
+            if name == "classes.dex" {
+                max_dex_idx = max_dex_idx.max(1);
+            } else if let Some(stripped) = name.strip_prefix("classes") {
+                if let Some(idx_str) = stripped.strip_suffix(".dex") {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        max_dex_idx = max_dex_idx.max(idx);
+                    }
+                }
+            }
+        }
+        let target_dex_name = format!("classes{}.dex", max_dex_idx + 1);
         let dex_bytes = dex::generate_walzer32_bootstrap_dex();
-        builder.add_file("classes2.dex", &dex_bytes);
+        builder.add_file(&target_dex_name, &dex_bytes);
         true
     } else {
         false

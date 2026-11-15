@@ -97,28 +97,12 @@ impl FutexManager {
             let res = cond.wait_timeout(guard, dur).unwrap();
             let mut guard = res.0;
             guard.waiters_count = guard.waiters_count.saturating_sub(1);
-            if guard.waiters_count == 0 {
-                let mut map = self.queues.lock().unwrap();
-                if let Some(q) = map.get(&uaddr) {
-                    if Arc::ptr_eq(q, &queue) {
-                        map.remove(&uaddr);
-                    }
-                }
-            }
             if res.1.timed_out() {
                 return Err(FutexError::TimedOut);
             }
         } else {
             guard = cond.wait(guard).unwrap();
             guard.waiters_count = guard.waiters_count.saturating_sub(1);
-            if guard.waiters_count == 0 {
-                let mut map = self.queues.lock().unwrap();
-                if let Some(q) = map.get(&uaddr) {
-                    if Arc::ptr_eq(q, &queue) {
-                        map.remove(&uaddr);
-                    }
-                }
-            }
         }
 
         Ok(())
@@ -126,9 +110,11 @@ impl FutexManager {
 
     /// FUTEX_WAKE: Wakes up to `val` threads waiting on uaddr.
     pub fn wake(&self, uaddr: GuestAddr, count: u32) -> u32 {
-        let map = self.queues.lock().unwrap();
-        if let Some(queue) = map.get(&uaddr).cloned() {
-            drop(map);
+        let queue = {
+            let map = self.queues.lock().unwrap();
+            map.get(&uaddr).cloned()
+        };
+        if let Some(queue) = queue {
             let (lock, cond) = &*queue;
             let guard = lock.lock().unwrap();
             let waiters = guard.waiters_count as u32;
@@ -141,6 +127,16 @@ impl FutexManager {
             to_wake
         } else {
             0
+        }
+    }
+
+    /// Wakes all threads sleeping on any futex wait queue (e.g. during runtime shutdown).
+    pub fn wake_all_queues(&self) {
+        let map = self.queues.lock().unwrap();
+        for (_, queue) in map.iter() {
+            let (lock, cond) = &**queue;
+            let _guard = lock.lock().unwrap();
+            cond.notify_all();
         }
     }
 

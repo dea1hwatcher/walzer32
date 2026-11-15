@@ -31,6 +31,7 @@ impl ArmDecoder {
                 Cond::AL,
                 Op::Branch {
                     link: true,
+                    exchange: true,
                     target: BranchTarget::Imm(offset),
                 },
                 raw,
@@ -1572,6 +1573,7 @@ impl ArmDecoder {
             let offset = ((imm24 as i32) << 8) >> 6;
             Op::Branch {
                 link,
+                exchange: false,
                 target: BranchTarget::Imm(offset),
             }
         } else {
@@ -1817,7 +1819,7 @@ impl ArmDecoder {
         // VFP 1-register extension / VCMP: bits [23:20] == 0b1D11, bits [11:9] == 0b101
         if ((raw >> 20) & 0b1011) == 0b1011 && ((raw >> 9) & 0x7) == 0b101 {
             let opc2 = (raw >> 16) & 0xF;
-            if opc2 == 0b0010 {
+            if ((raw >> 4) & 0xF) == 0 {
                 // VMOV immediate
                 let imm4h = (raw >> 16) & 0xF;
                 let imm4l = raw & 0xF;
@@ -1937,13 +1939,18 @@ impl ArmDecoder {
 
         let vfp_op = match (op_code, bit6) {
             (0b0000, 0) => VfpOp::Mla,
+            (0b0000, 1) => VfpOp::Nmla,
             (0b0001, 0) => VfpOp::Mls,
+            (0b0001, 1) => VfpOp::Nmls,
             (0b0011, 0) => VfpOp::Add,
             (0b0011, 1) => VfpOp::Sub,
             (0b0010, 0) => VfpOp::Mul,
+            (0b0010, 1) => VfpOp::Nmul,
             (0b1000, 0) => VfpOp::Div,
             (0b1010, 0) => VfpOp::Fma,
             (0b1010, 1) => VfpOp::Fms,
+            (0b1011, 0) => VfpOp::Fnma,
+            (0b1011, 1) => VfpOp::Fnms,
             _ => return Op::Unknown(raw),
         };
 
@@ -2033,6 +2040,7 @@ mod tests {
             inst.op,
             Op::Branch {
                 link: false,
+                exchange: false,
                 target: BranchTarget::Imm(8)
             }
         );
@@ -2044,6 +2052,7 @@ mod tests {
             inst.op,
             Op::Branch {
                 link: true,
+                exchange: false,
                 target: BranchTarget::Imm(-8)
             }
         );
@@ -3104,6 +3113,7 @@ mod tests {
             ("vmla.f64 D17", 0xee401ba0),
             ("vmla.f64 D8", 0xee018ba0),
             ("vmov.f64 #36", 0xeef20b04),
+            ("vmov.f32 s1, #2.0", 0xeef00a00),
             ("vmov.i32 q9, #3", 0xf2c02053),
             ("vmov.i32 q10, #4", 0xf2c04054),
             ("vmov.i32 q11, #1", 0xf2c06051),

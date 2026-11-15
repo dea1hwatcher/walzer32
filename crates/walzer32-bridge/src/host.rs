@@ -91,6 +91,7 @@ impl HostBridge {
             // with the same name (irrelevant here since names are unique).
             let libs = [
                 "libEGL.so\0",
+                "libGLESv1_CM.so\0",
                 "libGLESv2.so\0",
                 "libGLESv3.so\0",
                 "libvulkan.so\0",

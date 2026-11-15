@@ -22,8 +22,13 @@ impl Lifter {
         is_thumb: bool,
         max_insts: usize,
     ) -> Result<IrBlock, MemoryError> {
-        let mut block = IrBlock::new(entry, is_thumb);
-        let mut cur_pc = entry;
+        let aligned_entry = if is_thumb {
+            GuestAddr::new(entry.as_u32() & !1)
+        } else {
+            GuestAddr::new(entry.as_u32() & !3)
+        };
+        let mut block = IrBlock::new(aligned_entry, is_thumb);
+        let mut cur_pc = aligned_entry;
         let mut hit_invalid = false;
         let mut it_state: u8 = 0;
 
@@ -57,6 +62,16 @@ impl Lifter {
                     } else {
                         it_state = next_it;
                     }
+
+                    // In Thumb-2, 16-bit ALU instructions inside an IT block never set flags
+                    // (except compare/test instructions CMP, CMN, TST, TEQ).
+                    if len == 2 {
+                        if let Op::Alu { set_flags, op, .. } = &mut inst.op {
+                            if !op.is_test() {
+                                *set_flags = false;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -66,11 +81,32 @@ impl Lifter {
 
             // Check if this instruction terminates the basic block
             match inst.op {
-                Op::Branch { link, target } => {
+                Op::Branch { link, exchange, target } => {
                     let target_addr = match target {
                         BranchTarget::Imm(offset) => {
-                            let pc_base = if is_thumb { 4 } else { 8 };
-                            cur_pc.add(pc_base).offset(offset)
+                            if exchange {
+                                if is_thumb {
+                                    // BLX immediate from Thumb to ARM:
+                                    // Base is Align(cur_pc + 4, 4), and target is 4-byte aligned (bit 0 = 0)
+                                    let pc_base = (cur_pc.as_u32() + 4) & !3;
+                                    let addr = ((pc_base as i32) + offset) as u32 & !3;
+                                    GuestAddr::new(addr)
+                                } else {
+                                    // BLX immediate from ARM to Thumb:
+                                    // Base is cur_pc + 8, target is Thumb (bit 0 = 1)
+                                    let pc_base = cur_pc.as_u32() + 8;
+                                    let addr = (((pc_base as i32) + offset) as u32) | 1;
+                                    GuestAddr::new(addr)
+                                }
+                            } else {
+                                let pc_base = if is_thumb { 4 } else { 8 };
+                                let addr = cur_pc.add(pc_base).offset(offset);
+                                if is_thumb {
+                                    GuestAddr::new(addr.as_u32() | 1)
+                                } else {
+                                    addr
+                                }
+                            }
                         }
                         BranchTarget::Reg(r) => {
                             if link {
@@ -98,7 +134,7 @@ impl Lifter {
                                 block.exit = BlockExit::IndirectCond {
                                     cond: inst.cond,
                                     rm: r,
-                                    fallthrough: next_pc,
+                                    fallthrough: if is_thumb { GuestAddr::new(next_pc.as_u32() | 1) } else { next_pc },
                                 };
                             }
                             break;
@@ -106,6 +142,7 @@ impl Lifter {
                     };
 
                     if link {
+                        block.is_call = true;
                         let ret_addr = if is_thumb {
                             next_pc.as_u32() | 1
                         } else {
@@ -132,7 +169,7 @@ impl Lifter {
                         block.exit = BlockExit::BranchCond {
                             cond: inst.cond,
                             target: target_addr,
-                            fallthrough: next_pc,
+                            fallthrough: if is_thumb { GuestAddr::new(next_pc.as_u32() | 1) } else { next_pc },
                         };
                     }
                     break;
@@ -140,6 +177,7 @@ impl Lifter {
                 Op::BranchExchange { link, rm } => {
                     // BX / BLX
                     if link {
+                        block.is_call = true;
                         let ret_addr = if is_thumb {
                             next_pc.as_u32() | 1
                         } else {
@@ -164,7 +202,7 @@ impl Lifter {
                         block.exit = BlockExit::IndirectCond {
                             cond: inst.cond,
                             rm,
-                            fallthrough: next_pc,
+                            fallthrough: if is_thumb { GuestAddr::new(next_pc.as_u32() | 1) } else { next_pc },
                         };
                     }
                     break;
@@ -178,7 +216,7 @@ impl Lifter {
                             block.exit = BlockExit::IndirectCond {
                                 cond: inst.cond,
                                 rm: Reg::PC,
-                                fallthrough: next_pc,
+                                fallthrough: if is_thumb { GuestAddr::new(next_pc.as_u32() | 1) } else { next_pc },
                             };
                         }
                         break;
@@ -193,7 +231,7 @@ impl Lifter {
                             block.exit = BlockExit::IndirectCond {
                                 cond: inst.cond,
                                 rm: Reg::PC,
-                                fallthrough: next_pc,
+                                fallthrough: if is_thumb { GuestAddr::new(next_pc.as_u32() | 1) } else { next_pc },
                             };
                         }
                         break;
@@ -208,27 +246,35 @@ impl Lifter {
                             block.exit = BlockExit::IndirectCond {
                                 cond: inst.cond,
                                 rm: Reg::PC,
-                                fallthrough: next_pc,
+                                fallthrough: if is_thumb { GuestAddr::new(next_pc.as_u32() | 1) } else { next_pc },
                             };
                         }
                         break;
                     }
                 }
                 Op::Svc { imm } => {
-                    block.exit = BlockExit::Svc { imm, next_pc };
+                    block.exit = BlockExit::Svc {
+                        imm,
+                        next_pc: if is_thumb { GuestAddr::new(next_pc.as_u32() | 1) } else { next_pc },
+                    };
                     break;
                 }
                 Op::Bkpt { imm } => {
-                    block.exit = BlockExit::Bkpt { imm, next_pc };
+                    block.exit = BlockExit::Bkpt {
+                        imm,
+                        next_pc: if is_thumb { GuestAddr::new(next_pc.as_u32() | 1) } else { next_pc },
+                    };
                     break;
                 }
                 Op::CompareBranch { is_nonzero, rn, offset } => {
-                    let target_addr = cur_pc.add(4).offset(offset as i32);
+                    let target_raw = cur_pc.add(4).offset(offset as i32);
+                    let target_addr = GuestAddr::new(target_raw.as_u32() | 1);
+                    let ft_addr = GuestAddr::new(next_pc.as_u32() | 1);
                     block.exit = BlockExit::CompareBranch {
                         is_nonzero,
                         rn,
                         target: target_addr,
-                        fallthrough: next_pc,
+                        fallthrough: ft_addr,
                     };
                     break;
                 }
@@ -257,7 +303,11 @@ impl Lifter {
 
         // If limit was reached without a terminator, fallthrough to next_pc
         if !hit_invalid && matches!(block.exit, BlockExit::Invalid(_)) && !block.insts.is_empty() {
-            block.exit = BlockExit::Direct(cur_pc);
+            block.exit = BlockExit::Direct(if is_thumb {
+                GuestAddr::new(cur_pc.as_u32() | 1)
+            } else {
+                cur_pc
+            });
         }
 
         Ok(block)

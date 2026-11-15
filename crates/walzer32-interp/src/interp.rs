@@ -240,7 +240,42 @@ impl Interpreter {
                 cpu.set_pc(next_pc);
                 Ok(StepResult::Continue)
             }
-            Op::Branch { link, target } => {
+            Op::MulLong {
+                signed,
+                accumulate,
+                set_flags,
+                rd_hi,
+                rd_lo,
+                rm,
+                rs,
+            } => {
+                let rm_val = cpu.reg(rm);
+                let rs_val = cpu.reg(rs);
+                let mut prod: u64 = if signed {
+                    let s_rm = rm_val as i32 as i64;
+                    let s_rs = rs_val as i32 as i64;
+                    s_rm.wrapping_mul(s_rs) as u64
+                } else {
+                    (rm_val as u64).wrapping_mul(rs_val as u64)
+                };
+                if accumulate {
+                    let hi = cpu.reg(rd_hi) as u64;
+                    let lo = cpu.reg(rd_lo) as u64;
+                    let acc = (hi << 32) | lo;
+                    prod = prod.wrapping_add(acc);
+                }
+                cpu.set_reg(rd_lo, (prod & 0xFFFF_FFFF) as u32);
+                cpu.set_reg(rd_hi, (prod >> 32) as u32);
+                if set_flags {
+                    let is_neg = (prod & (1u64 << 63)) != 0;
+                    let is_zero = prod == 0;
+                    cpu.cpsr.set(Cpsr::N, is_neg);
+                    cpu.cpsr.set(Cpsr::Z, is_zero);
+                }
+                cpu.set_pc(next_pc);
+                Ok(StepResult::Continue)
+            }
+            Op::Branch { link, target, .. } => {
                 let target_addr = match target {
                     BranchTarget::Imm(offset) => {
                         // Offset is relative to PC + 8 in ARM, PC + 4 in Thumb
@@ -1254,8 +1289,7 @@ impl Interpreter {
             }
             Op::TableBranch { is_halfword, rn, rm } => {
                 let base = if rn == Reg::PC {
-                    let pc_val = pc.add(4).as_u32();
-                    GuestAddr::new(pc_val & !3)
+                    pc.add(4)
                 } else {
                     GuestAddr::new(cpu.reg(rn))
                 };
@@ -1316,6 +1350,23 @@ impl Interpreter {
                                     _ => 0.0,
                                 };
                                 res = (-s1).mul_add(s2, dst_val);
+                            }
+                            VfpOp::Nmul => {
+                                res = -(s1 * s2);
+                            }
+                            VfpOp::Nmla | VfpOp::Fnma => {
+                                let dst_val = match dst {
+                                    VfpReg::S(idx) => cpu.s_reg(idx),
+                                    _ => 0.0,
+                                };
+                                res = -(s1.mul_add(s2, dst_val));
+                            }
+                            VfpOp::Nmls | VfpOp::Fnms => {
+                                let dst_val = match dst {
+                                    VfpReg::S(idx) => cpu.s_reg(idx),
+                                    _ => 0.0,
+                                };
+                                res = s1.mul_add(s2, -dst_val);
                             }
                             VfpOp::Cmp | VfpOp::CmpZero => {
                                 let comp_val = if op == VfpOp::CmpZero { 0.0 } else { s2 };
@@ -1380,6 +1431,23 @@ impl Interpreter {
                                     _ => 0.0,
                                 };
                                 res = (-d1).mul_add(d2, dst_val);
+                            }
+                            VfpOp::Nmul => {
+                                res = -(d1 * d2);
+                            }
+                            VfpOp::Nmla | VfpOp::Fnma => {
+                                let dst_val = match dst {
+                                    VfpReg::D(idx) => cpu.d_reg(idx),
+                                    _ => 0.0,
+                                };
+                                res = -(d1.mul_add(d2, dst_val));
+                            }
+                            VfpOp::Nmls | VfpOp::Fnms => {
+                                let dst_val = match dst {
+                                    VfpReg::D(idx) => cpu.d_reg(idx),
+                                    _ => 0.0,
+                                };
+                                res = d1.mul_add(d2, -dst_val);
                             }
                             VfpOp::Cmp | VfpOp::CmpZero => {
                                 let comp_val = if op == VfpOp::CmpZero { 0.0 } else { d2 };

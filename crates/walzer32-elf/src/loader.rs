@@ -738,8 +738,6 @@ impl ElfLoader {
                                 .copied()
                                 .or_else(|| resolver.resolve(&sym_name));
 
-                            eprintln!("[ElfLoader] Reloc sym_idx={} '{}' target=0x{:08x} -> resolved={:?}", sym_idx, sym_name, target_addr.as_u32(), resolved);
-
                             if let Some(addr) = resolved {
                                 mem.write_u32(target_addr, addr.as_u32())?;
                             } else if get_symbol_binding_by_idx(sym_idx) == SymbolBinding::Weak {

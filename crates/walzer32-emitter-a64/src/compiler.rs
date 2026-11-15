@@ -139,7 +139,7 @@ impl A64Compiler {
         }
 
         // 4. Compile block exit (handles fallbacks, chaining sites, and epilogue restore)
-        Self::compile_exit(&mut asm, &block.exit, &mut patch_sites);
+        Self::compile_exit(&mut asm, &block.exit, &mut patch_sites, block.is_thumb);
 
         CompiledBlock {
             guest_entry: block.entry,
@@ -210,7 +210,7 @@ impl A64Compiler {
         // 4. Handle final exit or loop backedge
         if sb.is_loop && !sb.insts.is_empty() {
             match &sb.exit {
-                BlockExit::BranchCond { cond, target, fallthrough } if *target == sb.entry => {
+                BlockExit::BranchCond { cond, target, fallthrough } if (target.as_u32() & !1) == (sb.entry.as_u32() & !1) => {
                     // Conditional loop backedge: B.<cond> back to loop_start_cursor
                     let cur_idx = asm.cursor();
                     let offset_words = (loop_start_cursor as i32) - (cur_idx as i32);
@@ -228,25 +228,25 @@ impl A64Compiler {
                         asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
                         asm.ret(None);
                     } else {
-                        Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites);
+                        Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites, sb.is_thumb);
                     }
                 }
-                BlockExit::Direct(target) if *target == sb.entry => {
+                BlockExit::Direct(target) if (target.as_u32() & !1) == (sb.entry.as_u32() & !1) => {
                     // Unconditional loop backedge: ONLY valid if there are side exits!
                     let cur_idx = asm.cursor();
                     let offset_words = (loop_start_cursor as i32) - (cur_idx as i32);
                     if offset_words < 0 && !side_exit_stubs.is_empty() {
                         asm.b(offset_words);
                     } else {
-                        Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites);
+                        Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites, sb.is_thumb);
                     }
                 }
                 _ => {
-                    Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites);
+                    Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites, sb.is_thumb);
                 }
             }
         } else {
-            Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites);
+            Self::compile_exit(&mut asm, &sb.exit, &mut patch_sites, sb.is_thumb);
         }
 
         // 5. Emit side exit bailout stubs
@@ -364,6 +364,9 @@ impl A64Compiler {
                                     | AluOp::Cmp
                                     | AluOp::Cmn
                                     | AluOp::Tst
+                                    | AluOp::Teq
+                                    | AluOp::And
+                                    | AluOp::Bic
                             )
                 );
 
@@ -585,24 +588,44 @@ impl A64Compiler {
                         }
                     }
                     AluOp::And => {
-                        asm.and_w_reg(dst_reg, rn_reg, op2_reg);
+                        if effective_set_flags {
+                            asm.ands_w_reg(dst_reg, rn_reg, op2_reg);
+                        } else {
+                            asm.and_w_reg(dst_reg, rn_reg, op2_reg);
+                        }
                     }
                     AluOp::Orr => {
                         asm.orr_w_reg(dst_reg, rn_reg, op2_reg);
+                        if effective_set_flags {
+                            asm.tst_w_reg(dst_reg, dst_reg);
+                        }
                     }
                     AluOp::Eor => {
                         asm.eor_w_reg(dst_reg, rn_reg, op2_reg);
+                        if effective_set_flags {
+                            asm.tst_w_reg(dst_reg, dst_reg);
+                        }
                     }
                     AluOp::Bic => {
-                        asm.bic_w_reg(dst_reg, rn_reg, op2_reg);
+                        if effective_set_flags {
+                            asm.bics_w_reg(dst_reg, rn_reg, op2_reg);
+                        } else {
+                            asm.bic_w_reg(dst_reg, rn_reg, op2_reg);
+                        }
                     }
                     AluOp::Mov => {
                         if dst_reg != op2_reg {
                             asm.mov_w_reg(dst_reg, op2_reg);
                         }
+                        if effective_set_flags {
+                            asm.tst_w_reg(dst_reg, dst_reg);
+                        }
                     }
                     AluOp::Mvn => {
                         asm.mvn_w_reg(dst_reg, op2_reg);
+                        if effective_set_flags {
+                            asm.tst_w_reg(dst_reg, dst_reg);
+                        }
                     }
                     AluOp::Cmp => {
                         asm.cmp_w_reg(rn_reg, op2_reg);
@@ -613,9 +636,16 @@ impl A64Compiler {
                     AluOp::Tst => {
                         asm.tst_w_reg(rn_reg, op2_reg);
                     }
+                    AluOp::Teq => {
+                        asm.eor_w_reg(A64Reg::X11, rn_reg, op2_reg);
+                        asm.tst_w_reg(A64Reg::X11, A64Reg::X11);
+                    }
                     _ => {
                         if dst_reg != op2_reg {
                             asm.mov_w_reg(dst_reg, op2_reg);
+                        }
+                        if effective_set_flags {
+                            asm.tst_w_reg(dst_reg, dst_reg);
                         }
                     }
                 }
@@ -1502,39 +1532,55 @@ impl A64Compiler {
                 asm.mov_w_reg(A64Reg::X9, rn_reg);
 
                 let count = reg_list.count_ones() as u32;
-                if !is_load && matches!(mode, BlockAddrMode::Db) {
-                    // PUSH / STMDB: decrement before
-                    asm.sub_w_imm(A64Reg::X9, A64Reg::X9, (count * 4) as u16);
-                    let mut cur_offset = 0u32;
-                    for i in 0..16 {
-                        if (reg_list & (1 << i)) != 0 {
-                            let r = Reg::from_u8(i as u8).unwrap();
-                            let src = load_guest_reg(asm, A64Reg::X11, r);
-                            asm.add_w_imm(A64Reg::X12, A64Reg::X9, cur_offset as u16);
-                            asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
-                            asm.str_w_imm(src, A64Reg::X10, 0);
-                            cur_offset += 4;
-                        }
+                let total_bytes = (count * 4) as u16;
+
+                // 1. Calculate start_addr in X9 according to mode
+                match mode {
+                    BlockAddrMode::Ia => {} // start_addr = base
+                    BlockAddrMode::Ib => {
+                        asm.add_w_imm(A64Reg::X9, A64Reg::X9, 4);
                     }
-                    if *writeback {
-                        store_guest_reg(asm, A64Reg::X9, *rn);
+                    BlockAddrMode::Da => {
+                        asm.sub_w_imm(A64Reg::X9, A64Reg::X9, total_bytes);
+                        asm.add_w_imm(A64Reg::X9, A64Reg::X9, 4);
                     }
-                } else if *is_load && matches!(mode, BlockAddrMode::Ia) {
-                    // POP / LDMIA: increment after
-                    let mut cur_offset = 0u32;
-                    for i in 0..16 {
-                        if (reg_list & (1 << i)) != 0 {
-                            let r = Reg::from_u8(i as u8).unwrap();
-                            asm.add_w_imm(A64Reg::X12, A64Reg::X9, cur_offset as u16);
-                            asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
+                    BlockAddrMode::Db => {
+                        asm.sub_w_imm(A64Reg::X9, A64Reg::X9, total_bytes);
+                    }
+                }
+
+                // 2. Perform sequential transfers
+                let mut cur_offset = 0u32;
+                for i in 0..16 {
+                    if (reg_list & (1 << i)) != 0 {
+                        let r = Reg::from_u8(i as u8).unwrap();
+                        asm.add_w_imm(A64Reg::X12, A64Reg::X9, cur_offset as u16);
+                        asm.add_x_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
+                        if *is_load {
                             asm.ldr_w_imm(A64Reg::X11, A64Reg::X10, 0);
                             store_guest_reg(asm, A64Reg::X11, r);
-                            cur_offset += 4;
+                        } else {
+                            let src = load_guest_reg(asm, A64Reg::X11, r);
+                            asm.str_w_imm(src, A64Reg::X10, 0);
                         }
+                        cur_offset += 4;
                     }
-                    if *writeback {
-                        asm.add_w_imm(A64Reg::X9, A64Reg::X9, (count * 4) as u16);
-                        store_guest_reg(asm, A64Reg::X9, *rn);
+                }
+
+                // 3. Writeback base register if requested
+                if *writeback {
+                    let is_in_load_list = *is_load && (reg_list & (1 << rn.index())) != 0;
+                    if !is_in_load_list {
+                        let base_wb = load_guest_reg(asm, A64Reg::X12, *rn);
+                        match mode {
+                            BlockAddrMode::Ia | BlockAddrMode::Ib => {
+                                asm.add_w_imm(A64Reg::X12, base_wb, total_bytes);
+                            }
+                            BlockAddrMode::Da | BlockAddrMode::Db => {
+                                asm.sub_w_imm(A64Reg::X12, base_wb, total_bytes);
+                            }
+                        }
+                        store_guest_reg(asm, A64Reg::X12, *rn);
                     }
                 }
             }
@@ -1569,6 +1615,15 @@ impl A64Compiler {
                                 asm.ldr_s_imm(3, A64Reg::X0, dst_off);
                                 asm.fmsub_s(2, 0, 1, 3);
                             }
+                            VfpOp::Nmul => asm.fnmul_s(2, 0, 1),
+                            VfpOp::Nmla | VfpOp::Fnma => {
+                                asm.ldr_s_imm(3, A64Reg::X0, dst_off);
+                                asm.fnmadd_s(2, 0, 1, 3);
+                            }
+                            VfpOp::Nmls | VfpOp::Fnms => {
+                                asm.ldr_s_imm(3, A64Reg::X0, dst_off);
+                                asm.fnmsub_s(2, 0, 1, 3);
+                            }
                             VfpOp::Cmp => asm.fcmp_s(0, 1),
                             VfpOp::CmpZero => asm.fcmp_zero_s(0),
                         }
@@ -1594,6 +1649,15 @@ impl A64Compiler {
                             VfpOp::Fms | VfpOp::Mls => {
                                 asm.ldr_d_imm(3, A64Reg::X0, dst_off);
                                 asm.fmsub_d(2, 0, 1, 3);
+                            }
+                            VfpOp::Nmul => asm.fnmul_d(2, 0, 1),
+                            VfpOp::Nmla | VfpOp::Fnma => {
+                                asm.ldr_d_imm(3, A64Reg::X0, dst_off);
+                                asm.fnmadd_d(2, 0, 1, 3);
+                            }
+                            VfpOp::Nmls | VfpOp::Fnms => {
+                                asm.ldr_d_imm(3, A64Reg::X0, dst_off);
+                                asm.fnmsub_d(2, 0, 1, 3);
                             }
                             VfpOp::Cmp => asm.fcmp_d(0, 1),
                             VfpOp::CmpZero => asm.fcmp_zero_d(0),
@@ -2588,6 +2652,7 @@ impl A64Compiler {
         asm: &mut A64Assembler,
         exit: &BlockExit,
         patch_sites: &mut Vec<PatchSite>,
+        is_thumb: bool,
     ) {
         match exit {
             BlockExit::Direct(target) => {
@@ -2696,7 +2761,8 @@ impl A64Compiler {
                 asm.ret(None);
             }
             BlockExit::Invalid(addr) => {
-                asm.mov_imm64(A64Reg::X9, (EXIT_REASON_INVALID << 32) | (addr.as_u32() as u64));
+                let payload = (addr.as_u32() & !1) | (if is_thumb { 1 } else { 0 });
+                asm.mov_imm64(A64Reg::X9, (EXIT_REASON_INVALID << 32) | (payload as u64));
                 Self::emit_epilogue(asm);
                 asm.mov_x_reg(A64Reg::X0, A64Reg::X9);
                 asm.ret(None);
@@ -2750,7 +2816,7 @@ impl A64Compiler {
                 inst_pc,
             } => {
                 if *rn == Reg::PC {
-                    let pc_val = (inst_pc.as_u32() + 4) & !3;
+                    let pc_val = inst_pc.as_u32() + 4;
                     asm.mov_imm32(A64Reg::X12, pc_val);
                 } else {
                     let rn_reg = load_guest_reg(asm, A64Reg::X12, *rn);
@@ -2768,7 +2834,7 @@ impl A64Compiler {
                     asm.ldrb_w_uxtw(A64Reg::X10, A64Reg::X1, A64Reg::X12);
                 }
                 asm.lsl_w_imm(A64Reg::X10, A64Reg::X10, 1);
-                asm.mov_imm32(A64Reg::X9, inst_pc.as_u32() + 4);
+                asm.mov_imm32(A64Reg::X9, (inst_pc.as_u32() + 4) | 1);
                 asm.add_w_reg(A64Reg::X9, A64Reg::X9, A64Reg::X10);
                 asm.movk_x(A64Reg::X9, EXIT_REASON_INDIRECT as u16, 32);
                 Self::emit_epilogue(asm);

@@ -69,6 +69,8 @@ mod jit_guard {
         pub jmp_buf: UnsafeCell<[libc::c_long; SIGJMP_LEN]>,
         pub fault_sig: Cell<u32>,
         pub fault_guest_addr: Cell<u64>,
+        pub fault_host_pc: Cell<u64>,
+        pub fault_regs: Cell<[u32; 8]>,
     }
 
     impl ThreadFaultGuard {
@@ -78,6 +80,8 @@ mod jit_guard {
                 jmp_buf: UnsafeCell::new([0; SIGJMP_LEN]),
                 fault_sig: Cell::new(0),
                 fault_guest_addr: Cell::new(0),
+                fault_host_pc: Cell::new(0),
+                fault_regs: Cell::new([0; 8]),
             }
         }
     }
@@ -91,7 +95,7 @@ mod jit_guard {
         jit_fn: unsafe extern "C" fn(*mut CpuState, *mut u8) -> u64,
         cpu: *mut CpuState,
         mem_base: *mut u8,
-    ) -> Result<u64, (u32, u64)> {
+    ) -> Result<u64, (u32, u64, u64)> {
         GUARD.with(|g| {
             g.active.set(true);
             let buf_ptr = g.jmp_buf.get() as *mut libc::c_long;
@@ -103,7 +107,13 @@ mod jit_guard {
                 Ok(res)
             } else {
                 g.active.set(false);
-                Err((g.fault_sig.get(), g.fault_guest_addr.get()))
+                let pinned = g.fault_regs.get();
+                for i in 0..8 {
+                    unsafe {
+                        (*cpu).regs[i] = pinned[i];
+                    }
+                }
+                Err((g.fault_sig.get(), g.fault_guest_addr.get(), g.fault_host_pc.get()))
             }
         })
     }
@@ -112,20 +122,21 @@ mod jit_guard {
 /// Executes compiled AArch64 JIT code under a hardware fault guard.
 ///
 /// On Android AArch64, traps occurring inside the guest arena during JIT execution
-/// unwind cleanly via `siglongjmp` returning `Err((signal_nr, guest_fault_addr))`.
+/// unwind cleanly via `siglongjmp` returning `Err((signal_nr, guest_fault_addr, host_pc))`.
 #[inline]
 pub unsafe fn invoke_jit_guarded(
     jit_fn: unsafe extern "C" fn(*mut CpuState, *mut u8) -> u64,
     cpu: *mut CpuState,
     mem_base: *mut u8,
-) -> Result<u64, (u32, u64)> {
+) -> Result<u64, (u32, u64, u64)> {
     #[cfg(all(target_arch = "aarch64", target_os = "android"))]
     {
         unsafe { jit_guard::invoke_jit_guarded(jit_fn, cpu, mem_base) }
     }
     #[cfg(not(all(target_arch = "aarch64", target_os = "android")))]
     {
-        Ok(unsafe { jit_fn(cpu, mem_base) })
+        let _ = cpu;
+        Ok(unsafe { jit_fn(std::ptr::null_mut(), mem_base) })
     }
 }
 
@@ -891,10 +902,25 @@ extern "C" fn host_signal_handler(sig: libc::c_int, info: *mut libc::siginfo_t, 
                 let _ = cell.replace(Some(origin));
             });
 
+            let (host_pc, pinned_regs) = if !ucontext.is_null() {
+                let uctx = ucontext as *const libc::ucontext_t;
+                let pc = unsafe { (*uctx).uc_mcontext.pc };
+                let mut regs = [0u32; 8];
+                for i in 0..8 {
+                    // On AArch64 Linux/Android, pinned guest registers R0..R7 are hosted in X19..X26
+                    regs[i] = unsafe { (*uctx).uc_mcontext.regs[19 + i] as u32 };
+                }
+                (pc, regs)
+            } else {
+                (0, [0u32; 8])
+            };
+
             jit_guard::GUARD.with(|g| {
                 g.active.set(false);
                 g.fault_sig.set(guest_sig);
                 g.fault_guest_addr.set(guest_offset);
+                g.fault_host_pc.set(host_pc);
+                g.fault_regs.set(pinned_regs);
 
                 // Unblock the signal before siglongjmp (since sigsetjmp used savemask = 0)
                 unsafe {

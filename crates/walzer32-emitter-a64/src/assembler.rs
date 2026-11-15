@@ -180,6 +180,12 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// ANDS Wd, Wn, Wm (sets flags)
+    pub fn ands_w_reg(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0x6A00_0000 | (rm.index() << 16) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
     /// ORR Wd, Wn, Wm
     pub fn orr_w_reg(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg) {
         let inst = 0x2A00_0000 | (rm.index() << 16) | (rn.index() << 5) | rd.index();
@@ -206,6 +212,12 @@ impl A64Assembler {
     /// BIC Wd, Wn, Wm
     pub fn bic_w_reg(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg) {
         let inst = 0x0A20_0000 | (rm.index() << 16) | (rn.index() << 5) | rd.index();
+        self.emit(inst);
+    }
+
+    /// BICS Wd, Wn, Wm (sets flags)
+    pub fn bics_w_reg(&mut self, rd: A64Reg, rn: A64Reg, rm: A64Reg) {
+        let inst = 0x6A20_0000 | (rm.index() << 16) | (rn.index() << 5) | rd.index();
         self.emit(inst);
     }
 
@@ -799,6 +811,20 @@ impl A64Assembler {
         self.emit(inst);
     }
 
+    /// FNMUL Sd, Sn, Sm (Single-precision FP negated multiplication: -(Sn * Sm))
+    pub fn fnmul_s(&mut self, rd: u8, rn: u8, rm: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let inst = 0x1E20_8800 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FNMUL Dd, Dn, Dm (Double-precision FP negated multiplication: -(Dn * Dm))
+    pub fn fnmul_d(&mut self, rd: u8, rn: u8, rm: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32);
+        let inst = 0x1E60_8800 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
     /// FDIV Sd, Sn, Sm (Single-precision FP division)
     pub fn fdiv_s(&mut self, rd: u8, rn: u8, rm: u8) {
         assert!(rd < 32 && rn < 32 && rm < 32);
@@ -908,6 +934,34 @@ impl A64Assembler {
     pub fn fmsub_d(&mut self, rd: u8, rn: u8, rm: u8, ra: u8) {
         assert!(rd < 32 && rn < 32 && rm < 32 && ra < 32);
         let inst = 0x1F40_8000 | ((rm as u32) << 16) | ((ra as u32) << 10) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FNMADD Sd, Sn, Sm, Sa (Fused Negated Multiply-Add: Sd = -(Sa + Sn * Sm))
+    pub fn fnmadd_s(&mut self, rd: u8, rn: u8, rm: u8, ra: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && ra < 32);
+        let inst = 0x1F20_0000 | ((rm as u32) << 16) | ((ra as u32) << 10) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FNMADD Dd, Dn, Dm, Da (Fused Negated Multiply-Add: Dd = -(Da + Dn * Dm))
+    pub fn fnmadd_d(&mut self, rd: u8, rn: u8, rm: u8, ra: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && ra < 32);
+        let inst = 0x1F60_0000 | ((rm as u32) << 16) | ((ra as u32) << 10) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FNMSUB Sd, Sn, Sm, Sa (Fused Negated Multiply-Subtract: Sd = -(Sa - Sn * Sm) = Sn * Sm - Sa)
+    pub fn fnmsub_s(&mut self, rd: u8, rn: u8, rm: u8, ra: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && ra < 32);
+        let inst = 0x1F20_8000 | ((rm as u32) << 16) | ((ra as u32) << 10) | ((rn as u32) << 5) | (rd as u32);
+        self.emit(inst);
+    }
+
+    /// FNMSUB Dd, Dn, Dm, Da (Fused Negated Multiply-Subtract: Dd = -(Da - Dn * Dm) = Dn * Dm - Da)
+    pub fn fnmsub_d(&mut self, rd: u8, rn: u8, rm: u8, ra: u8) {
+        assert!(rd < 32 && rn < 32 && rm < 32 && ra < 32);
+        let inst = 0x1F60_8000 | ((rm as u32) << 16) | ((ra as u32) << 10) | ((rn as u32) << 5) | (rd as u32);
         self.emit(inst);
     }
 

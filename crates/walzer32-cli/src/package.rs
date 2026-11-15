@@ -57,9 +57,21 @@ pub fn handle_package_command(
     if let Some(plib) = primary_lib {
         options.primary_lib = Some(plib.to_string());
     }
-    if let Some(bridge_path) = custom_bridge {
-        println!("Custom Bridge:   {}", bridge_path);
-        let bridge_bytes = fs::read(bridge_path)?;
+    let default_bridge_1 = "android/app/src/main/jniLibs/arm64-v8a/libwalzer32.so";
+    let default_bridge_2 = "target/aarch64-linux-android/release/libwalzer32_android.so";
+    let bridge_to_use = custom_bridge.map(|s| s.to_string()).or_else(|| {
+        if std::path::Path::new(default_bridge_1).exists() {
+            Some(default_bridge_1.to_string())
+        } else if std::path::Path::new(default_bridge_2).exists() {
+            Some(default_bridge_2.to_string())
+        } else {
+            None
+        }
+    });
+
+    if let Some(bridge_path) = bridge_to_use {
+        println!("Host Bridge:     {}", bridge_path);
+        let bridge_bytes = fs::read(&bridge_path)?;
         options.custom_libwalzer32 = Some(bridge_bytes);
     }
     options.config_properties = config_props.to_vec();

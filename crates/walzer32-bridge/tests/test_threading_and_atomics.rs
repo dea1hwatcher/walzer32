@@ -14,9 +14,10 @@ fn test_atomic_ldrex_strex_success() {
     jni.install(&mut mem).unwrap();
     let mut engine = DbtEngine::new(mem);
 
-    // Target memory word to atomically increment: at 0x7003_0000, initial value = 42
-    let target_addr = GuestAddr::new(0x7003_0000);
+    // Target memory word to atomically increment: at 0x7003_5000, initial value = 42
+    let target_addr = GuestAddr::new(0x7003_5000);
     engine.mem.write_u32(target_addr, 42).unwrap();
+    engine.cpu.thread_id = 1;
 
     // Assembly routine:
     // PUSH {lr}
@@ -61,8 +62,9 @@ fn test_atomic_strex_fails_after_clrex() {
     jni.install(&mut mem).unwrap();
     let mut engine = DbtEngine::new(mem);
 
-    let target_addr = GuestAddr::new(0x7003_0000);
+    let target_addr = GuestAddr::new(0x7004_0000);
     engine.mem.write_u32(target_addr, 100).unwrap();
+    engine.cpu.thread_id = 2;
 
     // Assembly routine:
     // PUSH {lr}

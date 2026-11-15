@@ -2,6 +2,11 @@
 **/*.rs.bk
 Cargo.lock
 scratch/
+test_libs/
+*.apk
+*.idsig
+*.png
+*.txt
 android/.gradle/
 android/build/
 android/app/build/

@@ -283,6 +283,7 @@ pub struct SharedGuestRuntime {
     pub vulkan: Option<Arc<Mutex<VulkanBridge>>>,
     pub futex: FutexManager,
     pub thread_coordinator: ThreadExitCoordinator,
+    pub is_terminating: Arc<std::sync::atomic::AtomicBool>,
     worker_handles: Arc<Mutex<Vec<(u32, std::thread::JoinHandle<()>)>>>,
 }
 
@@ -301,6 +302,7 @@ impl SharedGuestRuntime {
             vulkan: None,
             futex,
             thread_coordinator,
+            is_terminating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             worker_handles: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -325,6 +327,7 @@ impl SharedGuestRuntime {
             vulkan: None,
             futex,
             thread_coordinator,
+            is_terminating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             worker_handles: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -387,6 +390,8 @@ impl SharedGuestRuntime {
     }
 
     pub fn join_all_workers(&self) {
+        self.is_terminating.store(true, std::sync::atomic::Ordering::Release);
+        self.futex.wake_all_queues();
         let handles = std::mem::take(&mut *self.worker_handles.lock().unwrap());
         for (_, handle) in handles {
             let _ = handle.join();
@@ -399,6 +404,7 @@ fn apply_mt_spawns_and_blocking<M: Memory + Clone + Send + Sync + 'static>(
     runtime: &SharedGuestRuntime,
     blocking: Option<BlockingBionicOp>,
     spawns: Vec<crate::bionic::PendingThreadSpawn>,
+    tid: u32,
 ) -> Result<Option<u32>, EngineError> {
     for sp in spawns {
         let child = engine.fork_thread_at(
@@ -415,7 +421,7 @@ fn apply_mt_spawns_and_blocking<M: Memory + Clone + Send + Sync + 'static>(
     if let Some(op) = blocking {
         match op {
             BlockingBionicOp::MutexLock { mutex_ptr } => {
-                futex_mutex_lock(&mut engine.mem, &runtime.futex, mutex_ptr)?;
+                futex_mutex_lock(&mut engine.mem, &runtime.futex, mutex_ptr, tid)?;
                 engine.cpu.set_reg(Reg::R0, 0);
             }
             BlockingBionicOp::CondWait {
@@ -426,14 +432,14 @@ fn apply_mt_spawns_and_blocking<M: Memory + Clone + Send + Sync + 'static>(
                 is_timedwait,
             } => {
                 if mutex_ptr.as_u32() != 0 {
-                    futex_mutex_unlock(&mut engine.mem, &runtime.futex, mutex_ptr)?;
+                    let _ = futex_mutex_unlock(&mut engine.mem, &runtime.futex, mutex_ptr, tid)?;
                 }
                 let timed_out = matches!(
                     runtime.futex.wait(&engine.mem, cond_ptr, expected_seq, timeout),
                     Err(walzer32_rt::FutexError::TimedOut)
                 );
                 if mutex_ptr.as_u32() != 0 {
-                    futex_mutex_lock(&mut engine.mem, &runtime.futex, mutex_ptr)?;
+                    futex_mutex_lock(&mut engine.mem, &runtime.futex, mutex_ptr, tid)?;
                 }
                 engine.cpu.set_reg(
                     Reg::R0,
@@ -479,11 +485,11 @@ pub fn flush_pending_mt_actions<M: Memory + Clone + Send + Sync + 'static>(
         let child = engine.fork_for_thread(&pending_clone);
         spawn_worker_engine(child, runtime.clone(), child_tid);
     }
-    let (blocking, spawns) = {
+    let (blocking, spawns, tid) = {
         let mut bionic = runtime.bionic.lock().unwrap();
-        (bionic.take_blocking_op(), bionic.drain_pending_spawns())
+        (bionic.take_blocking_op(), bionic.drain_pending_spawns(), bionic.current_thread_id.max(1))
     };
-    apply_mt_spawns_and_blocking(engine, runtime, blocking, spawns)
+    apply_mt_spawns_and_blocking(engine, runtime, blocking, spawns, tid)
 }
 
 /// Helper to invoke `dispatch_svc_mt`, spawn any newly created worker threads,
@@ -501,7 +507,7 @@ pub fn handle_mt_syscall_and_spawns<M: Memory + Clone + Send + Sync + 'static>(
 
     if let Some(imm) = engine.last_svc_imm() {
         let (blocking, spawns) = dispatch_svc_mt(imm, tid, engine, runtime)?;
-        return apply_mt_spawns_and_blocking(engine, runtime, blocking, spawns);
+        return apply_mt_spawns_and_blocking(engine, runtime, blocking, spawns, tid);
     }
     Ok(None)
 }
@@ -584,11 +590,12 @@ pub fn run_guest_mt_loop<M: Memory + Clone + Send + Sync + 'static>(
     runtime: &SharedGuestRuntime,
     tid: u32,
 ) -> Result<u32, EngineError> {
-    #[cfg(test)]
-    let mut steps: u64 = 0;
-
     loop {
-        if engine.cpu.pc() == GuestAddr::new(SENTINEL_RETURN_ADDR) {
+        if runtime.is_terminating.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+
+        if (engine.cpu.pc().as_u32() & !1) == (SENTINEL_RETURN_ADDR & !1) {
             break;
         }
 

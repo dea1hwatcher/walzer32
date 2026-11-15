@@ -56,6 +56,8 @@ pub struct IrBlock {
     pub exit: BlockExit,
     /// Number of guest code bytes consumed by this block
     pub byte_size: usize,
+    /// Whether this basic block terminates with a subroutine call (BL, BLX)
+    pub is_call: bool,
 }
 
 impl IrBlock {
@@ -67,6 +69,7 @@ impl IrBlock {
             inst_addrs: Vec::new(),
             exit: BlockExit::Invalid(entry),
             byte_size: 0,
+            is_call: false,
         }
     }
 

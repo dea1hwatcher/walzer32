@@ -215,27 +215,27 @@ fn test_thumb_atomic_ldrex_strex_clrex() {
     engine.cpu.set_reg(Reg::R1, data_base.as_u32());
     engine.cpu.set_thumb(true);
 
-    // 0x20000: LDREX r2, [r1]        -> hw1=0xE851, hw2=0xF200
+    // 0x20000: LDREX r2, [r1]        -> hw1=0xE851, hw2=0x2F00
     // 0x20004: ADDS r2, r2, #1       -> 0x3201
-    // 0x20006: STREX r0, r2, [r1]    -> hw1=0xE841, hw2=0x0200
+    // 0x20006: STREX r0, r2, [r1]    -> hw1=0xE841, hw2=0x2000
     // 0x2000A: CLREX                 -> hw1=0xF3BF, hw2=0x8F2F
-    // 0x2000E: STREX r3, r2, [r1]    -> hw1=0xE841, hw2=0x3200 (fails -> r3 = 1)
+    // 0x2000E: STREX r3, r2, [r1]    -> hw1=0xE841, hw2=0x2300 (fails -> r3 = 1)
     // 0x20012: MOVS r7, #1           -> 0x2701
     // 0x20014: MOVS r0, #0           -> 0x2000
     // 0x20016: SVC 0                 -> 0xDF00
     engine.mem.write_u16(code_base, 0xE851).unwrap();
-    engine.mem.write_u16(code_base.add(2), 0xF200).unwrap();
+    engine.mem.write_u16(code_base.add(2), 0x2F00).unwrap();
 
     engine.mem.write_u16(code_base.add(4), 0x3201).unwrap();
 
     engine.mem.write_u16(code_base.add(6), 0xE841).unwrap();
-    engine.mem.write_u16(code_base.add(8), 0x0200).unwrap();
+    engine.mem.write_u16(code_base.add(8), 0x2000).unwrap();
 
     engine.mem.write_u16(code_base.add(10), 0xF3BF).unwrap();
     engine.mem.write_u16(code_base.add(12), 0x8F2F).unwrap();
 
     engine.mem.write_u16(code_base.add(14), 0xE841).unwrap();
-    engine.mem.write_u16(code_base.add(16), 0x3200).unwrap();
+    engine.mem.write_u16(code_base.add(16), 0x2300).unwrap();
 
     engine.mem.write_u16(code_base.add(18), 0x2701).unwrap();
     engine.mem.write_u16(code_base.add(20), 0x2000).unwrap();

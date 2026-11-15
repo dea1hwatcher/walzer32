@@ -1,5 +1,7 @@
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex};
 use std::time::Duration;
+
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
 use walzer32_android::{
     get_or_init_session, reset_session, Walzer32Session,
     Java_com_walzer32_loader_Walzer32Engine_nativeGetAudioLatencyMs,
@@ -48,6 +50,7 @@ fn arm_branch(cond: u32, from_pc: u32, to_pc: u32) -> u32 {
 
 #[test]
 fn test_session_lazy_multithread_pthread_create_join() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let mut session = Walzer32Session::new(GuestAddr::new(0x7000_0000), 0x0200_0000).unwrap();
 
     let pthread_create = session.bionic.resolve("pthread_create").unwrap().as_u32();
@@ -145,6 +148,7 @@ fn test_session_lazy_multithread_pthread_create_join() {
 
 #[test]
 fn test_jni_nonblocking_while_session_locked() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     reset_session();
 
     let mut guard = get_or_init_session().unwrap();

@@ -206,6 +206,33 @@ impl ThumbDecoder {
                 let rd = Reg::from_u8((hw & 0x7) as u8).unwrap_or(Reg::R0);
                 let rm = Reg::from_u8(((hw >> 3) & 0x7) as u8).unwrap_or(Reg::R0);
 
+                if matches!(opcode, 0x2 | 0x3 | 0x4 | 0x7) {
+                    let shift_type = match opcode {
+                        0x2 => ShiftType::Lsl,
+                        0x3 => ShiftType::Lsr,
+                        0x4 => ShiftType::Asr,
+                        0x7 => ShiftType::Ror,
+                        _ => unreachable!(),
+                    };
+                    return ArmInst::new(
+                        Cond::AL,
+                        Op::Alu {
+                            op: AluOp::Mov,
+                            set_flags: true,
+                            rd,
+                            rn: Reg::R0,
+                            op2: Operand2::Reg {
+                                rm: rd,
+                                shift: Shift {
+                                    shift_type,
+                                    amount: ShiftAmount::Reg(rm),
+                                },
+                            },
+                        },
+                        raw,
+                    );
+                }
+
                 let alu_op = match opcode {
                     0x0 => AluOp::And,
                     0x1 => AluOp::Eor,
@@ -236,11 +263,22 @@ impl ThumbDecoder {
                     _ => AluOp::Mov,
                 };
 
-                let rn = if alu_op == AluOp::Rsb {
-                    Reg::R0 // NEG is 0 - Rm
-                } else {
-                    rd
-                };
+                if alu_op == AluOp::Rsb {
+                    // Thumb-1 NEG Rd, Rm is an alias for RSBS Rd, Rm, #0 (0 - Rm)
+                    return ArmInst::new(
+                        Cond::AL,
+                        Op::Alu {
+                            op: AluOp::Rsb,
+                            set_flags: true,
+                            rd,
+                            rn: rm,
+                            op2: Operand2::Imm(0),
+                        },
+                        raw,
+                    );
+                }
+
+                let rn = rd;
 
                 ArmInst::new(
                     Cond::AL,
@@ -662,6 +700,7 @@ impl ThumbDecoder {
                 cond,
                 Op::Branch {
                     link: false,
+                    exchange: false,
                     target: BranchTarget::Imm(offset),
                 },
                 raw,
@@ -677,6 +716,7 @@ impl ThumbDecoder {
             Cond::AL,
             Op::Branch {
                 link: false,
+                exchange: false,
                 target: BranchTarget::Imm(offset as i32),
             },
             raw,
@@ -705,19 +745,358 @@ impl ThumbDecoder {
                 imm25 |= 0xFE00_0000;
             }
 
+            let exchange = ((hw2 >> 12) & 1) == 0;
+            if exchange {
+                imm25 &= !3;
+            }
+
             return ArmInst::new(
                 Cond::AL,
                 Op::Branch {
                     link: true,
+                    exchange,
                     target: BranchTarget::Imm(imm25 as i32),
                 },
                 raw,
             );
         }
 
+        // Branch (B<c>.W / B.W immediate): hw1 prefix 1111 0... (0xF000..0xF7FF) with hw2 bits [15:14] == 0b10
+        if (hw1 & 0xF800) == 0xF000 && ((hw2 >> 14) & 0x3) == 0b10 {
+            let s = ((hw1 >> 10) & 1) as u32;
+            let j1 = ((hw2 >> 13) & 1) as u32;
+            let j2 = ((hw2 >> 11) & 1) as u32;
+            let imm11 = (hw2 & 0x7FF) as u32;
+            let is_uncond = ((hw2 >> 12) & 1) != 0;
+
+            if is_uncond {
+                // B.W Encoding T4
+                let imm10 = (hw1 & 0x3FF) as u32;
+                let i1 = !(j1 ^ s) & 1;
+                let i2 = !(j2 ^ s) & 1;
+                let mut imm25 = (s << 24) | (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1);
+                if s != 0 {
+                    imm25 |= 0xFE00_0000;
+                }
+                return ArmInst::new(
+                    Cond::AL,
+                    Op::Branch {
+                        link: false,
+                        exchange: false,
+                        target: BranchTarget::Imm(imm25 as i32),
+                    },
+                    raw,
+                );
+            } else {
+                // B<c>.W Encoding T3
+                let cond_bits = ((hw1 >> 6) & 0xF) as u8;
+                if cond_bits < 0b1110 {
+                    let cond = Cond::from_u8(cond_bits);
+                    let imm6 = (hw1 & 0x3F) as u32;
+                    let mut imm21 = (s << 20) | (j2 << 19) | (j1 << 18) | (imm6 << 12) | (imm11 << 1);
+                    if s != 0 {
+                        imm21 |= 0xFFE0_0000;
+                    }
+                    return ArmInst::new(
+                        cond,
+                        Op::Branch {
+                            link: false,
+                            exchange: false,
+                            target: BranchTarget::Imm(imm21 as i32),
+                        },
+                        raw,
+                    );
+                }
+            }
+        }
+
         // NOP.W hint (0xF3AF 8000)
         if hw1 == 0xF3AF && (hw2 & 0xFF00) == 0x8000 {
             return ArmInst::new(Cond::AL, Op::Nop, raw);
+        }
+
+        // Thumb-32 Data-processing (modified immediate): 1111 0 i 0 op S Rn | 0 imm3 Rd imm8
+        if (hw1 & 0xF800) == 0xF000 && (hw1 & 0x0200) == 0 && (hw2 & 0x8000) == 0 {
+            let i = ((hw1 >> 10) & 1) as u32;
+            let op_bits = (hw1 >> 5) & 0xF;
+            let set_flags = (hw1 & 0x10) != 0;
+            let rn_raw = (hw1 & 0xF) as u8;
+            let rn = Reg::from_u8(rn_raw).unwrap_or(Reg::R0);
+            let imm3 = ((hw2 >> 12) & 7) as u32;
+            let rd_raw = ((hw2 >> 8) & 0xF) as u8;
+            let rd = Reg::from_u8(rd_raw).unwrap_or(Reg::R0);
+            let imm8 = (hw2 & 0xFF) as u32;
+            let imm32 = Self::thumb_expand_imm(i, imm3, imm8);
+
+            match op_bits {
+                0b0000 => {
+                    // AND / TST
+                    if set_flags && rd_raw == 15 {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Tst,
+                                set_flags: true,
+                                rd: Reg::R0,
+                                rn,
+                                op2: Operand2::Imm(imm32),
+                            },
+                            raw,
+                        );
+                    } else {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::And,
+                                set_flags,
+                                rd,
+                                rn,
+                                op2: Operand2::Imm(imm32),
+                            },
+                            raw,
+                        );
+                    }
+                }
+                0b0001 => {
+                    // BIC
+                    return ArmInst::new(
+                        Cond::AL,
+                        Op::Alu {
+                            op: AluOp::Bic,
+                            set_flags,
+                            rd,
+                            rn,
+                            op2: Operand2::Imm(imm32),
+                        },
+                        raw,
+                    );
+                }
+                0b0010 => {
+                    // ORR / MOV
+                    if rn_raw == 15 {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Mov,
+                                set_flags,
+                                rd,
+                                rn: Reg::R0,
+                                op2: Operand2::Imm(imm32),
+                            },
+                            raw,
+                        );
+                    } else {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Orr,
+                                set_flags,
+                                rd,
+                                rn,
+                                op2: Operand2::Imm(imm32),
+                            },
+                            raw,
+                        );
+                    }
+                }
+                0b0011 => {
+                    // ORN / MVN
+                    if rn_raw == 15 {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Mvn,
+                                set_flags,
+                                rd,
+                                rn: Reg::R0,
+                                op2: Operand2::Imm(imm32),
+                            },
+                            raw,
+                        );
+                    } else {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Orr,
+                                set_flags,
+                                rd,
+                                rn,
+                                op2: Operand2::Imm(!imm32),
+                            },
+                            raw,
+                        );
+                    }
+                }
+                0b0100 => {
+                    // EOR / TEQ
+                    if set_flags && rd_raw == 15 {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Teq,
+                                set_flags: true,
+                                rd: Reg::R0,
+                                rn,
+                                op2: Operand2::Imm(imm32),
+                            },
+                            raw,
+                        );
+                    } else {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Eor,
+                                set_flags,
+                                rd,
+                                rn,
+                                op2: Operand2::Imm(imm32),
+                            },
+                            raw,
+                        );
+                    }
+                }
+                0b1000 => {
+                    // ADD / CMN
+                    if set_flags && rd_raw == 15 {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Cmn,
+                                set_flags: true,
+                                rd: Reg::R0,
+                                rn,
+                                op2: Operand2::Imm(imm32),
+                            },
+                            raw,
+                        );
+                    } else {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Add,
+                                set_flags,
+                                rd,
+                                rn,
+                                op2: Operand2::Imm(imm32),
+                            },
+                            raw,
+                        );
+                    }
+                }
+                0b1010 => {
+                    // ADC
+                    return ArmInst::new(
+                        Cond::AL,
+                        Op::Alu {
+                            op: AluOp::Adc,
+                            set_flags,
+                            rd,
+                            rn,
+                            op2: Operand2::Imm(imm32),
+                        },
+                        raw,
+                    );
+                }
+                0b1011 => {
+                    // SBC
+                    return ArmInst::new(
+                        Cond::AL,
+                        Op::Alu {
+                            op: AluOp::Sbc,
+                            set_flags,
+                            rd,
+                            rn,
+                            op2: Operand2::Imm(imm32),
+                        },
+                        raw,
+                    );
+                }
+                0b1101 => {
+                    // SUB / CMP
+                    if set_flags && rd_raw == 15 {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Cmp,
+                                set_flags: true,
+                                rd: Reg::R0,
+                                rn,
+                                op2: Operand2::Imm(imm32),
+                            },
+                            raw,
+                        );
+                    } else {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Sub,
+                                set_flags,
+                                rd,
+                                rn,
+                                op2: Operand2::Imm(imm32),
+                            },
+                            raw,
+                        );
+                    }
+                }
+                0b1110 => {
+                    // RSB
+                    return ArmInst::new(
+                        Cond::AL,
+                        Op::Alu {
+                            op: AluOp::Rsb,
+                            set_flags,
+                            rd,
+                            rn,
+                            op2: Operand2::Imm(imm32),
+                        },
+                        raw,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // Thumb-32 ADDW: 1111 0 i 1 0 0 0 0 0 Rn | 0 imm3 Rd imm8
+        if (hw1 & 0xFBE0) == 0xF200 && (hw2 & 0x8000) == 0 {
+            let i = ((hw1 >> 10) & 1) as u32;
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let imm3 = ((hw2 >> 12) & 7) as u32;
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let imm8 = (hw2 & 0xFF) as u32;
+            let imm12 = (i << 11) | (imm3 << 8) | imm8;
+            return ArmInst::new(
+                Cond::AL,
+                Op::Alu {
+                    op: AluOp::Add,
+                    set_flags: false,
+                    rd,
+                    rn,
+                    op2: Operand2::Imm(imm12),
+                },
+                raw,
+            );
+        }
+
+        // Thumb-32 SUBW: 1111 0 i 1 0 1 0 1 0 Rn | 0 imm3 Rd imm8
+        if (hw1 & 0xFBE0) == 0xF2A0 && (hw2 & 0x8000) == 0 {
+            let i = ((hw1 >> 10) & 1) as u32;
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let imm3 = ((hw2 >> 12) & 7) as u32;
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let imm8 = (hw2 & 0xFF) as u32;
+            let imm12 = (i << 11) | (imm3 << 8) | imm8;
+            return ArmInst::new(
+                Cond::AL,
+                Op::Alu {
+                    op: AluOp::Sub,
+                    set_flags: false,
+                    rd,
+                    rn,
+                    op2: Operand2::Imm(imm12),
+                },
+                raw,
+            );
         }
 
         // Thumb-32 MOVW: 1111 0 i 10 0 1 0 0 imm4 | 0 imm3 Rd imm8
@@ -756,18 +1135,18 @@ impl ThumbDecoder {
             return ArmInst::new(Cond::AL, Op::TableBranch { is_halfword, rn, rm }, raw);
         }
 
-        // Thumb-32 LDREX: 1110 1000 0101 Rn | 1111 Rt 0000 0000
-        if (hw1 & 0xFFF0) == 0xE850 && (hw2 & 0xF0FF) == 0xF000 {
+        // Thumb-32 LDREX: 1110 1000 0101 Rn | Rt 1111 imm8
+        if (hw1 & 0xFFF0) == 0xE850 && (hw2 & 0x0F00) == 0x0F00 {
             let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
-            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
             return ArmInst::new(Cond::AL, Op::AtomicLoadEx { rd, rn }, raw);
         }
 
-        // Thumb-32 STREX: 1110 1000 0100 Rn | Rd Rt 0000 0000
+        // Thumb-32 STREX: 1110 1000 0100 Rn | Rt Rd 0000 0000
         if (hw1 & 0xFFF0) == 0xE840 && (hw2 & 0x00FF) == 0x0000 {
             let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
-            let rd = Reg::from_u8(((hw2 >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
-            let rm = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8(((hw2 >> 12) & 0xF) as u8).unwrap_or(Reg::R0); // Rt: data to store
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);  // Rd: destination status
             return ArmInst::new(Cond::AL, Op::AtomicStoreEx { rd, rm, rn }, raw);
         }
 
@@ -852,6 +1231,86 @@ impl ThumbDecoder {
             let arm_raw = 0xF400_0000 | (((hw1 & 0x00FF) as u32) << 16) | (hw2 as u32);
             if let Some(inst) = ArmDecoder::decode_neon(arm_raw) {
                 return ArmInst::new(Cond::AL, inst.op, raw);
+            }
+        }
+
+        // Thumb-32 Load / Store Single Data Item: 1111 100 op1 1 op2 Rn (0xF800..0xF9FF)
+        if (hw1 & 0xFE00) == 0xF800 {
+            let b8 = (hw1 >> 8) & 1;
+            let b7 = (hw1 >> 7) & 1;
+            let b6 = (hw1 >> 6) & 1;
+            let b5 = (hw1 >> 5) & 1;
+            let b4 = (hw1 >> 4) & 1;
+
+            if !(b8 == 1 && b4 == 0) {
+                let signed = b8 == 1;
+                let size = if b6 == 1 {
+                    MemSize::Word
+                } else if b5 == 1 {
+                    MemSize::Halfword
+                } else {
+                    MemSize::Byte
+                };
+
+                let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+                let rd = Reg::from_u8(((hw2 >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+                let is_load = if rn == Reg::PC { true } else { b4 == 1 };
+
+                let addr_mode = if rn == Reg::PC {
+                    // ARM ARM A6.3.9 Load/store literal:
+                    // When Rn == 15 (PC), b7 is the U bit (1 = add, 0 = subtract)
+                    // Offset is always a 12-bit unsigned immediate (imm12)
+                    let imm12 = (hw2 & 0xFFF) as u32;
+                    AddrMode::Offset {
+                        offset: AddrOffset::Imm(imm12),
+                        add: b7 == 1,
+                    }
+                } else if b7 == 1 {
+                    let imm12 = (hw2 & 0xFFF) as u32;
+                    AddrMode::Offset {
+                        offset: AddrOffset::Imm(imm12),
+                        add: true,
+                    }
+                } else if ((hw2 >> 11) & 1) == 0 {
+                    let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+                    let shift_imm = ((hw2 >> 4) & 3) as u8;
+                    AddrMode::Offset {
+                        offset: AddrOffset::Reg {
+                            rm,
+                            shift_type: ShiftType::Lsl,
+                            shift_imm,
+                        },
+                        add: true,
+                    }
+                } else {
+                    let p = ((hw2 >> 10) & 1) != 0;
+                    let u = ((hw2 >> 9) & 1) != 0;
+                    let w = ((hw2 >> 8) & 1) != 0;
+                    let imm8 = (hw2 & 0xFF) as u32;
+                    let offset = AddrOffset::Imm(imm8);
+                    if p {
+                        if w {
+                            AddrMode::PreIndex { offset, add: u }
+                        } else {
+                            AddrMode::Offset { offset, add: u }
+                        }
+                    } else {
+                        AddrMode::PostIndex { offset, add: u }
+                    }
+                };
+
+                return ArmInst::new(
+                    Cond::AL,
+                    Op::LoadStore {
+                        is_load,
+                        size,
+                        signed,
+                        rd,
+                        rn,
+                        addr_mode,
+                    },
+                    raw,
+                );
             }
         }
 
@@ -950,6 +1409,13 @@ impl ThumbDecoder {
             return ArmInst::new(Cond::AL, Op::SimdSel { rd, rn, rm }, raw);
         }
 
+        // Thumb-32 CLZ: 0xFABm_F08m
+        if (hw1 & 0xFFF0) == 0xFAB0 && (hw2 & 0xF0F0) == 0xF080 && (hw1 & 0xF) == (hw2 & 0xF) {
+            let rm = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            return ArmInst::new(Cond::AL, Op::Clz { rd, rm }, raw);
+        }
+
         // Thumb-32 Parallel Arithmetic (SADD8, SSUB8, SADD16, SSUB16, SASX, SSAX, U..., Q..., SH..., UH...)
         if (hw1 & 0xFF00) == 0xFA00 && (hw1 & 0x0080) != 0 && (hw2 & 0xF080) == 0xF000 {
             let op1 = ((hw1 >> 4) & 0xF) as u8;
@@ -1020,6 +1486,280 @@ impl ThumbDecoder {
             return ArmInst::new(Cond::AL, Op::SimdPkh { op, rd, rn, rm, shift }, raw);
         }
 
+        // Thumb-32 Data-processing (shifted register): 1110 101 0 op S Rn | 0 imm3 Rd imm2 type Rm
+        if (hw1 & 0xFE00) == 0xEA00 && (hw2 & 0x8000) == 0 {
+            let op_bits = (hw1 >> 5) & 0xF;
+            let set_flags = (hw1 & 0x10) != 0;
+            let rn_raw = (hw1 & 0xF) as u8;
+            let rn = Reg::from_u8(rn_raw).unwrap_or(Reg::R0);
+
+            let imm3 = ((hw2 >> 12) & 7) as u8;
+            let rd_raw = ((hw2 >> 8) & 0xF) as u8;
+            let rd = Reg::from_u8(rd_raw).unwrap_or(Reg::R0);
+            let imm2 = ((hw2 >> 6) & 3) as u8;
+            let type_bits = (hw2 >> 4) & 3;
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+
+            let shift_imm = (imm3 << 2) | imm2;
+            let shift_type = match type_bits {
+                0 => ShiftType::Lsl,
+                1 => ShiftType::Lsr,
+                2 => ShiftType::Asr,
+                3 => ShiftType::Ror,
+                _ => unreachable!(),
+            };
+
+            let op2 = Operand2::Reg {
+                rm,
+                shift: Shift {
+                    shift_type,
+                    amount: ShiftAmount::Imm(shift_imm),
+                },
+            };
+
+            match op_bits {
+                0b0000 => {
+                    if set_flags && rd_raw == 15 {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Tst,
+                                set_flags: true,
+                                rd: Reg::R0,
+                                rn,
+                                op2,
+                            },
+                            raw,
+                        );
+                    } else {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::And,
+                                set_flags,
+                                rd,
+                                rn,
+                                op2,
+                            },
+                            raw,
+                        );
+                    }
+                }
+                0b0001 => {
+                    return ArmInst::new(
+                        Cond::AL,
+                        Op::Alu {
+                            op: AluOp::Bic,
+                            set_flags,
+                            rd,
+                            rn,
+                            op2,
+                        },
+                        raw,
+                    );
+                }
+                0b0010 => {
+                    if rn_raw == 15 {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Mov,
+                                set_flags,
+                                rd,
+                                rn: Reg::R0,
+                                op2,
+                            },
+                            raw,
+                        );
+                    } else {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Orr,
+                                set_flags,
+                                rd,
+                                rn,
+                                op2,
+                            },
+                            raw,
+                        );
+                    }
+                }
+                0b0011 => {
+                    if rn_raw == 15 {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Mvn,
+                                set_flags,
+                                rd,
+                                rn: Reg::R0,
+                                op2,
+                            },
+                            raw,
+                        );
+                    }
+                }
+                0b0100 => {
+                    if set_flags && rd_raw == 15 {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Teq,
+                                set_flags: true,
+                                rd: Reg::R0,
+                                rn,
+                                op2,
+                            },
+                            raw,
+                        );
+                    } else {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Eor,
+                                set_flags,
+                                rd,
+                                rn,
+                                op2,
+                            },
+                            raw,
+                        );
+                    }
+                }
+                0b1000 => {
+                    if set_flags && rd_raw == 15 {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Cmn,
+                                set_flags: true,
+                                rd: Reg::R0,
+                                rn,
+                                op2,
+                            },
+                            raw,
+                        );
+                    } else {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Add,
+                                set_flags,
+                                rd,
+                                rn,
+                                op2,
+                            },
+                            raw,
+                        );
+                    }
+                }
+                0b1010 => {
+                    return ArmInst::new(
+                        Cond::AL,
+                        Op::Alu {
+                            op: AluOp::Adc,
+                            set_flags,
+                            rd,
+                            rn,
+                            op2,
+                        },
+                        raw,
+                    );
+                }
+                0b1011 => {
+                    return ArmInst::new(
+                        Cond::AL,
+                        Op::Alu {
+                            op: AluOp::Sbc,
+                            set_flags,
+                            rd,
+                            rn,
+                            op2,
+                        },
+                        raw,
+                    );
+                }
+                0b1101 => {
+                    if set_flags && rd_raw == 15 {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Cmp,
+                                set_flags: true,
+                                rd: Reg::R0,
+                                rn,
+                                op2,
+                            },
+                            raw,
+                        );
+                    } else {
+                        return ArmInst::new(
+                            Cond::AL,
+                            Op::Alu {
+                                op: AluOp::Sub,
+                                set_flags,
+                                rd,
+                                rn,
+                                op2,
+                            },
+                            raw,
+                        );
+                    }
+                }
+                0b1110 => {
+                    return ArmInst::new(
+                        Cond::AL,
+                        Op::Alu {
+                            op: AluOp::Rsb,
+                            set_flags,
+                            rd,
+                            rn,
+                            op2,
+                        },
+                        raw,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // Thumb-32 Data-processing (shifted register) - LSL, LSR, ASR, ROR (register): 0xFA00..0xFA7F
+        // hw1: 1111 1010 00op S Rn
+        // hw2: 1111 Rd   0000 Rm
+        if (hw1 & 0xFF80) == 0xFA00 && (hw1 & 0x0080) == 0 && (hw2 & 0xF0F0) == 0xF000 {
+            let op_code = (hw1 >> 5) & 0x3;
+            let shift_type = match op_code {
+                0 => ShiftType::Lsl,
+                1 => ShiftType::Lsr,
+                2 => ShiftType::Asr,
+                3 => ShiftType::Ror,
+                _ => unreachable!(),
+            };
+            let set_flags = (hw1 & 0x10) != 0;
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+
+            return ArmInst::new(
+                Cond::AL,
+                Op::Alu {
+                    op: AluOp::Mov,
+                    set_flags,
+                    rd,
+                    rn: Reg::R0,
+                    op2: Operand2::Reg {
+                        rm: rn,
+                        shift: Shift {
+                            shift_type,
+                            amount: ShiftAmount::Reg(rm),
+                        },
+                    },
+                },
+                raw,
+            );
+        }
+
         // Thumb-32 Extend and Extend & Add (SXTAH, UXTAH, SXTAB16, UXTAB16, SXTAB, UXTAB, SXTH.W, UXTH.W, ...)
         if (hw1 & 0xFF80) == 0xFA00 && (hw1 & 0x0080) == 0 && (hw2 & 0xF0C0) == 0xF080 {
             let op_bits = (hw1 >> 4) & 7;
@@ -1081,6 +1821,72 @@ impl ThumbDecoder {
                     rt,
                     rt2,
                     vfp_reg,
+                },
+                raw,
+            );
+        }
+
+        // Thumb-32 MUL / MLA / MLS: 0xFB00
+        if (hw1 & 0xFFF0) == 0xFB00 {
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let ra_raw = ((hw2 >> 12) & 0xF) as u8;
+            let ra = Reg::from_u8(ra_raw).unwrap_or(Reg::R0);
+            let rd = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let op1 = (hw2 >> 4) & 0xF;
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+
+            if op1 == 0 {
+                let op = if ra_raw == 15 {
+                    MulOp::Mul
+                } else {
+                    MulOp::Mla
+                };
+                return ArmInst::new(
+                    Cond::AL,
+                    Op::Mul {
+                        op,
+                        set_flags: false,
+                        rd,
+                        rn: ra,
+                        rm,
+                        rs: rn,
+                    },
+                    raw,
+                );
+            } else if op1 == 1 {
+                return ArmInst::new(
+                    Cond::AL,
+                    Op::Mul {
+                        op: MulOp::Mls,
+                        set_flags: false,
+                        rd,
+                        rn: ra,
+                        rm,
+                        rs: rn,
+                    },
+                    raw,
+                );
+            }
+        }
+
+        // Thumb-32 SMULL / UMULL / SMLAL / UMLAL: 0xFB80, 0xFBA0, 0xFBC0, 0xFBE0
+        if (hw1 & 0xFF90) == 0xFB80 && (hw2 & 0x00F0) == 0x0000 {
+            let signed = (hw1 & 0x0020) == 0;
+            let accumulate = (hw1 & 0x0040) != 0;
+            let rn = Reg::from_u8((hw1 & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd_lo = Reg::from_u8(((hw2 >> 12) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rd_hi = Reg::from_u8(((hw2 >> 8) & 0xF) as u8).unwrap_or(Reg::R0);
+            let rm = Reg::from_u8((hw2 & 0xF) as u8).unwrap_or(Reg::R0);
+            return ArmInst::new(
+                Cond::AL,
+                Op::MulLong {
+                    signed,
+                    accumulate,
+                    set_flags: false,
+                    rd_hi,
+                    rd_lo,
+                    rm,
+                    rs: rn,
                 },
                 raw,
             );
@@ -1228,6 +2034,23 @@ impl ThumbDecoder {
         }
 
         ArmInst::new(Cond::AL, Op::Unknown(raw), raw)
+    }
+
+    #[inline]
+    pub fn thumb_expand_imm(i: u32, imm3: u32, imm8: u32) -> u32 {
+        let imm12 = (i << 11) | (imm3 << 8) | imm8;
+        let top4 = imm12 >> 8;
+        match top4 {
+            0 => imm8,
+            1 => imm8 | (imm8 << 16),
+            2 => (imm8 << 8) | (imm8 << 24),
+            3 => imm8 | (imm8 << 8) | (imm8 << 16) | (imm8 << 24),
+            _ => {
+                let unrotated = 0x80 | (imm12 & 0x7F);
+                let rot = (imm12 >> 7) & 0x1F;
+                unrotated.rotate_right(rot)
+            }
+        }
     }
 }
 
@@ -1951,13 +2774,13 @@ mod tests {
         assert_eq!(size, 4);
         assert_eq!(inst.op, Op::TableBranch { is_halfword: true, rn: Reg::R1, rm: Reg::R2 });
 
-        // LDREX r2, [r1] -> hw1=0xE851, hw2=0xF200
-        let (inst, size) = ThumbDecoder::decode(0xE851, Some(0xF200));
+        // LDREX r2, [r1] -> hw1=0xE851, hw2=0x2F00 (Rt=R2 at bits 15..12, 1111 at bits 11..8)
+        let (inst, size) = ThumbDecoder::decode(0xE851, Some(0x2F00));
         assert_eq!(size, 4);
         assert_eq!(inst.op, Op::AtomicLoadEx { rd: Reg::R2, rn: Reg::R1 });
 
-        // STREX r0, r2, [r1] -> hw1=0xE841, hw2=0x0200
-        let (inst, size) = ThumbDecoder::decode(0xE841, Some(0x0200));
+        // STREX r0, r2, [r1] -> hw1=0xE841, hw2=0x2000 (Rt=R2 at bits 15..12, Rd=R0 at bits 11..8)
+        let (inst, size) = ThumbDecoder::decode(0xE841, Some(0x2000));
         assert_eq!(size, 4);
         assert_eq!(inst.op, Op::AtomicStoreEx { rd: Reg::R0, rm: Reg::R2, rn: Reg::R1 });
 
@@ -1965,5 +2788,216 @@ mod tests {
         let (inst, size) = ThumbDecoder::decode(0xF3BF, Some(0x8F2F));
         assert_eq!(size, 4);
         assert_eq!(inst.op, Op::Clrex);
+    }
+
+    #[test]
+    fn test_thumb_register_shifts() {
+        // Thumb-32 LSR.W R9, R0, R7 -> hw1=0xFA20, hw2=0xF907
+        let (inst, sz) = ThumbDecoder::decode(0xFA20, Some(0xF907));
+        assert_eq!(sz, 4);
+        assert_eq!(
+            inst.op,
+            Op::Alu {
+                op: AluOp::Mov,
+                set_flags: false,
+                rd: Reg::R9,
+                rn: Reg::R0,
+                op2: Operand2::Reg {
+                    rm: Reg::R0,
+                    shift: Shift {
+                        shift_type: ShiftType::Lsr,
+                        amount: ShiftAmount::Reg(Reg::R7),
+                    },
+                },
+            }
+        );
+
+        // 16-bit Thumb LSRS R1, R2 -> opcode=3 (010000 0011 010 001 = 0x40D1)
+        let (inst16, sz16) = ThumbDecoder::decode(0x40D1, None);
+        assert_eq!(sz16, 2);
+        assert_eq!(
+            inst16.op,
+            Op::Alu {
+                op: AluOp::Mov,
+                set_flags: true,
+                rd: Reg::R1,
+                rn: Reg::R0,
+                op2: Operand2::Reg {
+                    rm: Reg::R1,
+                    shift: Shift {
+                        shift_type: ShiftType::Lsr,
+                        amount: ShiftAmount::Reg(Reg::R2),
+                    },
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_thumb_data_proc_imm() {
+        // MOV.W R0, #0x100 -> hw1=0xF44F, hw2=0x7080
+        let (inst, sz) = ThumbDecoder::decode(0xF44F, Some(0x7080));
+        assert_eq!(sz, 4);
+        assert_eq!(
+            inst.op,
+            Op::Alu {
+                op: AluOp::Mov,
+                set_flags: false,
+                rd: Reg::R0,
+                rn: Reg::R0,
+                op2: Operand2::Imm(0x100),
+            }
+        );
+
+        // ADDW R0, R1, #0x842 -> hw1=0xF601, hw2=0x0042
+        let (addw, sz_addw) = ThumbDecoder::decode(0xF601, Some(0x0042));
+        assert_eq!(sz_addw, 4);
+        assert_eq!(
+            addw.op,
+            Op::Alu {
+                op: AluOp::Add,
+                set_flags: false,
+                rd: Reg::R0,
+                rn: Reg::R1,
+                op2: Operand2::Imm(0x842),
+            }
+        );
+    }
+
+    #[test]
+    fn test_thumb_load_store_single() {
+        // STR.W R1, [R0, R5, LSL #2] -> hw1=0xF840, hw2=0x1025
+        let (inst, sz) = ThumbDecoder::decode(0xF840, Some(0x1025));
+        assert_eq!(sz, 4);
+        assert_eq!(
+            inst.op,
+            Op::LoadStore {
+                is_load: false,
+                size: MemSize::Word,
+                signed: false,
+                rd: Reg::R1,
+                rn: Reg::R0,
+                addr_mode: AddrMode::Offset {
+                    offset: AddrOffset::Reg {
+                        rm: Reg::R5,
+                        shift_type: ShiftType::Lsl,
+                        shift_imm: 2,
+                    },
+                    add: true,
+                },
+            }
+        );
+
+        // LDR.W R1, [R0, #0x42] -> hw1=0xF8D0, hw2=0x1042
+        let (ldr, sz_ldr) = ThumbDecoder::decode(0xF8D0, Some(0x1042));
+        assert_eq!(sz_ldr, 4);
+        assert_eq!(
+            ldr.op,
+            Op::LoadStore {
+                is_load: true,
+                size: MemSize::Word,
+                signed: false,
+                rd: Reg::R1,
+                rn: Reg::R0,
+                addr_mode: AddrMode::Offset {
+                    offset: AddrOffset::Imm(0x42),
+                    add: true,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_thumb_data_proc_shifted_reg() {
+        // ADD.W R6, R6, R0, LSL #1 -> hw1=0xEB06, hw2=0x0640
+        let (inst, sz) = ThumbDecoder::decode(0xEB06, Some(0x0640));
+        assert_eq!(sz, 4);
+        assert_eq!(
+            inst.op,
+            Op::Alu {
+                op: AluOp::Add,
+                set_flags: false,
+                rd: Reg::R6,
+                rn: Reg::R6,
+                op2: Operand2::Reg {
+                    rm: Reg::R0,
+                    shift: Shift {
+                        shift_type: ShiftType::Lsl,
+                        amount: ShiftAmount::Imm(1),
+                    },
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_thumb_bc_w_and_b_w() {
+        // BEQ.W -> hw1=0xF000, hw2=0x817F
+        let (inst, sz) = ThumbDecoder::decode(0xF000, Some(0x817F));
+        assert_eq!(sz, 4);
+        assert_eq!(inst.cond, Cond::EQ);
+        assert_eq!(
+            inst.op,
+            Op::Branch {
+                link: false,
+                exchange: false,
+                target: BranchTarget::Imm(766),
+            }
+        );
+    }
+
+    #[test]
+    fn test_thumb_clz() {
+        // CLZ R0, R0 -> hw1=0xFAB0, hw2=0xF080
+        let (inst, sz) = ThumbDecoder::decode(0xFAB0, Some(0xF080));
+        assert_eq!(sz, 4);
+        assert_eq!(inst.cond, Cond::AL);
+        assert_eq!(inst.op, Op::Clz { rd: Reg::R0, rm: Reg::R0 });
+
+        // CLZ R3, R5 -> hw1=0xFAB5, hw2=0xF385
+        let (inst, sz) = ThumbDecoder::decode(0xFAB5, Some(0xF385));
+        assert_eq!(sz, 4);
+        assert_eq!(inst.cond, Cond::AL);
+        assert_eq!(inst.op, Op::Clz { rd: Reg::R3, rm: Reg::R5 });
+    }
+
+    #[test]
+    fn test_thumb_literal_load_negative() {
+        // LDR.W SB, [PC, #-0x44] -> hw1=0xF85F, hw2=0x9044
+        let (inst, sz) = ThumbDecoder::decode(0xF85F, Some(0x9044));
+        assert_eq!(sz, 4);
+        assert_eq!(inst.cond, Cond::AL);
+        assert_eq!(
+            inst.op,
+            Op::LoadStore {
+                is_load: true,
+                size: MemSize::Word,
+                signed: false,
+                rd: Reg::R9,
+                rn: Reg::PC,
+                addr_mode: AddrMode::Offset {
+                    offset: AddrOffset::Imm(0x44),
+                    add: false,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_thumb_neg_rsb() {
+        // RSBS r2, r5, #0 (NEG r2, r5) -> 0x426A
+        let (inst, sz) = ThumbDecoder::decode(0x426A, None);
+        assert_eq!(sz, 2);
+        assert_eq!(inst.cond, Cond::AL);
+        assert_eq!(
+            inst.op,
+            Op::Alu {
+                op: AluOp::Rsb,
+                set_flags: true,
+                rd: Reg::R2,
+                rn: Reg::R5,
+                op2: Operand2::Imm(0),
+            }
+        );
     }
 }

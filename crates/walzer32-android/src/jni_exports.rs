@@ -69,6 +69,22 @@ pub unsafe extern "C" fn walzer32_proxy_jni_onload(vm: *mut c_void, reserved: *m
     unsafe { JNI_OnLoad(vm, reserved) }
 }
 
+/// Automatic ELF .init_array constructor called by Bionic when libwalzer32.so is loaded as DT_NEEDED
+#[cfg(target_os = "android")]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static WALZER32_INIT_ARRAY: unsafe extern "C" fn() = {
+    unsafe extern "C" fn init() {
+        log_i!("Walzer32: .init_array constructor invoked by Bionic Linker");
+        if let Ok(mut guard) = get_or_init_session() {
+            if let Some(session) = guard.as_mut() {
+                let _ = session.ensure_bundled_apk_loaded();
+            }
+        }
+    }
+    init
+};
+
 /// JNI Export: Initialize Walzer32 DBT Engine from Android Application
 ///
 /// Java Signature:
@@ -1079,6 +1095,28 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeGetContent
     std::ptr::null_mut()
 }
 
+fn objc_get_sel(session: &mut crate::session::Walzer32Session, sel_reg: GuestAddr, name: &[u8]) -> Option<u32> {
+    let addr = session.alloc_guest_bytes(name).ok()?;
+    session.call_native(sel_reg, &[addr]).ok()
+}
+
+fn objc_get_cls(session: &mut crate::session::Walzer32Session, lookup_cls: GuestAddr, name: &[u8]) -> Option<u32> {
+    let addr = session.alloc_guest_bytes(name).ok()?;
+    session.call_native(lookup_cls, &[addr]).ok()
+}
+
+fn objc_send_msg0(session: &mut crate::session::Walzer32Session, msg_lkp: GuestAddr, recv: u32, sel: u32) -> Option<u32> {
+    if recv == 0 || sel == 0 { return None; }
+    let imp = session.call_native(msg_lkp, &[recv, sel]).ok()?;
+    session.call_native(GuestAddr(imp), &[recv, sel]).ok()
+}
+
+fn objc_send_msg1(session: &mut crate::session::Walzer32Session, msg_lkp: GuestAddr, recv: u32, sel: u32, arg1: u32) -> Option<u32> {
+    if recv == 0 || sel == 0 { return None; }
+    let imp = session.call_native(msg_lkp, &[recv, sel]).ok()?;
+    session.call_native(GuestAddr(imp), &[recv, sel, arg1]).ok()
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit(
     _env: JNIEnv,
@@ -1100,6 +1138,101 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit(
                 }
             } else {
                 log_i!("Walzer32: Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit not found in guest libs");
+            }
+
+            // Hook Cocos2D mainLoop into libuikit's nativeRender loop
+            let main_loop_sym = session.find_loaded_symbol("mainLoop");
+            let set_hook_sym = session.find_loaded_symbol("setMainLoopHook");
+            log_i!("Walzer32: mainLoop at {:?}, setMainLoopHook at {:?}", main_loop_sym, set_hook_sym);
+
+            if let (Some(ml), Some(sh)) = (main_loop_sym, set_hook_sym) {
+                match session.call_native(sh, &[ml.as_u32()]) {
+                    Ok(res) => log_i!("Walzer32: Successfully registered mainLoop (0x{:08x}) via setMainLoopHook (res 0x{:08x})", ml.as_u32(), res),
+                    Err(e) => log_e!("Walzer32: setMainLoopHook error: {:?}", e),
+                }
+            }
+
+            if let Some(gh) = session.find_loaded_symbol("getMainLoopHook") {
+                match session.call_native(gh, &[]) {
+                    Ok(hook_val) => log_i!("Walzer32: Verified getMainLoopHook() = 0x{:08x}", hook_val),
+                    Err(e) => log_e!("Walzer32: getMainLoopHook error: {:?}", e),
+                }
+            }
+
+            // Inspect and verify Objective-C runtime state (CCDirector, UIApplication, Scene)
+            let lookup_class_sym = session.find_loaded_symbol("objc_lookup_class");
+            let sel_register_name_sym = session.find_loaded_symbol("sel_registerName");
+            let msg_lookup_sym = session.find_loaded_symbol("objc_msg_lookup");
+
+            log_i!("Walzer32: objc_lookup_class: {:?}, sel_registerName: {:?}, objc_msg_lookup: {:?}",
+                lookup_class_sym, sel_register_name_sym, msg_lookup_sym);
+
+            if let (Some(lookup_cls), Some(sel_reg), Some(msg_lkp)) = (lookup_class_sym, sel_register_name_sym, msg_lookup_sym) {
+                if let Some(cls_director) = objc_get_cls(session, lookup_cls, b"CCDirector\0") {
+                    let sel_shared_dir = objc_get_sel(session, sel_reg, b"sharedDirector\0").unwrap_or(0);
+                    let sel_running_scene = objc_get_sel(session, sel_reg, b"runningScene\0").unwrap_or(0);
+                    let director = objc_send_msg0(session, msg_lkp, cls_director, sel_shared_dir).unwrap_or(0);
+                    let mut running_scene = objc_send_msg0(session, msg_lkp, director, sel_running_scene).unwrap_or(0);
+                    log_i!("Walzer32: [CCDirector sharedDirector] = 0x{:08x}, runningScene = 0x{:08x}", director, running_scene);
+
+                    if running_scene == 0 {
+                        let cls_app = objc_get_cls(session, lookup_cls, b"UIApplication\0").unwrap_or(0);
+                        let sel_shared_app = objc_get_sel(session, sel_reg, b"sharedApplication\0").unwrap_or(0);
+                        let sel_delegate = objc_get_sel(session, sel_reg, b"delegate\0").unwrap_or(0);
+                        let sel_set_delegate = objc_get_sel(session, sel_reg, b"setDelegate:\0").unwrap_or(0);
+                        let app = objc_send_msg0(session, msg_lkp, cls_app, sel_shared_app).unwrap_or(0);
+                        let mut delegate = objc_send_msg0(session, msg_lkp, app, sel_delegate).unwrap_or(0);
+                        log_i!("Walzer32: [UIApplication sharedApplication] = 0x{:08x}, delegate = 0x{:08x}", app, delegate);
+
+                        if delegate == 0 {
+                            log_i!("Walzer32: Delegate is nil, instantiating BigAirAppDelegate...");
+                            if let Some(cls_delegate) = objc_get_cls(session, lookup_cls, b"BigAirAppDelegate\0") {
+                                let sel_alloc = objc_get_sel(session, sel_reg, b"alloc\0").unwrap_or(0);
+                                let sel_init = objc_get_sel(session, sel_reg, b"init\0").unwrap_or(0);
+                                let raw_del = objc_send_msg0(session, msg_lkp, cls_delegate, sel_alloc).unwrap_or(0);
+                                delegate = objc_send_msg0(session, msg_lkp, raw_del, sel_init).unwrap_or(0);
+                                log_i!("Walzer32: Instantiated BigAirAppDelegate = 0x{:08x}", delegate);
+                                if delegate != 0 && app != 0 {
+                                    let _ = objc_send_msg1(session, msg_lkp, app, sel_set_delegate, delegate);
+                                    log_i!("Walzer32: Assigned delegate to UIApplication");
+                                }
+                            }
+                        }
+
+                        if delegate != 0 {
+                            let sel_launch = objc_get_sel(session, sel_reg, b"applicationDidFinishLaunching:\0").unwrap_or(0);
+                            log_i!("Walzer32: Triggering [delegate applicationDidFinishLaunching: app] (sel 0x{:08x})...", sel_launch);
+                            let launch_res = objc_send_msg1(session, msg_lkp, delegate, sel_launch, app);
+                            log_i!("Walzer32: applicationDidFinishLaunching returned {:?}", launch_res);
+
+                            running_scene = objc_send_msg0(session, msg_lkp, director, sel_running_scene).unwrap_or(0);
+                            log_i!("Walzer32: After launch, runningScene = 0x{:08x}", running_scene);
+                        }
+
+                        // Direct scene fallback if runningScene is still 0
+                        if running_scene == 0 && director != 0 {
+                            log_i!("Walzer32: runningScene still 0, instantiating NoodleIntroScene directly...");
+                            if let Some(cls_intro) = objc_get_cls(session, lookup_cls, b"NoodleIntroScene\0") {
+                                let sel_node = objc_get_sel(session, sel_reg, b"node\0").unwrap_or(0);
+                                let sel_run_with_scene = objc_get_sel(session, sel_reg, b"runWithScene:\0").unwrap_or(0);
+                                let intro_scene = objc_send_msg0(session, msg_lkp, cls_intro, sel_node).unwrap_or(0);
+                                log_i!("Walzer32: [NoodleIntroScene node] = 0x{:08x}", intro_scene);
+                                if intro_scene != 0 {
+                                    let run_res = objc_send_msg1(session, msg_lkp, director, sel_run_with_scene, intro_scene);
+                                    log_i!("Walzer32: [director runWithScene: intro_scene] returned {:?}", run_res);
+                                    let running_scene_final = objc_send_msg0(session, msg_lkp, director, sel_running_scene).unwrap_or(0);
+                                    log_i!("Walzer32: Final runningScene = 0x{:08x}", running_scene_final);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Also ensure UIApplication appDidBecomeActive is called to transition app state
+            if let Some(app_active) = session.jni_registry.find_by_symbol("Java_com_noodlecake_lib_uikit_UIApplication_appDidBecomeActive") {
+                log_i!("Walzer32: Triggering appDidBecomeActive at 0x{:08x}...", app_active.fn_ptr.as_u32());
+                let _ = session.call_native(app_active.fn_ptr, &[env_ptr, 1]);
             }
         }
     }
@@ -1141,11 +1274,11 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender(
 ) {
     static FRAME_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let f = FRAME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if f == 0 || f.is_multiple_of(300) {
-        log_i!("Walzer32: nativeRender frame {}", f);
-    }
     if let Ok(mut guard) = get_or_init_session() {
         if let Some(session) = guard.as_mut() {
+            if f == 0 || f.is_multiple_of(300) {
+                log_i!("Walzer32: nativeRender frame {}, total_draw_calls {}, swap_count {}", f, session.gles.total_draw_calls, session.gles.swap_count);
+            }
             let _ = session.on_draw_frame();
             let env_ptr = session.jni.env_ptr.as_u32();
             if let Some(info) = session.jni_registry.find_by_symbol("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender") {
@@ -1157,6 +1290,16 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender(
                             log_e!("Walzer32: guest nativeRender error: {:?}", e);
                         }
                     }
+                }
+            }
+
+            // Fallback direct mainLoop tick if total_draw_calls is still 0 after frame 5
+            if session.gles.total_draw_calls == 0 && f >= 5 {
+                if let Some(ml) = session.find_loaded_symbol("mainLoop") {
+                    if f.is_multiple_of(60) {
+                        log_i!("Walzer32: total_draw_calls is 0 at frame {}, ticking mainLoop directly...", f);
+                    }
+                    let _ = session.call_native(ml, &[]);
                 }
             }
         }

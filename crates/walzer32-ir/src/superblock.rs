@@ -116,21 +116,24 @@ impl TraceBuilder {
         max_blocks: usize,
         max_insts: usize,
     ) -> Result<Superblock, MemoryError> {
-        let mut sb = Superblock::new(entry, is_thumb);
-        let mut cur_pc = entry;
+        let align_mask = if is_thumb { !1u32 } else { !3u32 };
+        let entry_aligned = GuestAddr::new(entry.as_u32() & align_mask);
+        let mut sb = Superblock::new(entry_aligned, is_thumb);
+        let mut cur_pc = entry_aligned;
         let mut visited = HashSet::new();
 
         while sb.block_count < max_blocks && sb.insts.len() < max_insts {
-            if visited.contains(&cur_pc) {
-                if cur_pc == entry && !sb.insts.is_empty() {
+            let cur_aligned = GuestAddr::new(cur_pc.as_u32() & align_mask);
+            if visited.contains(&cur_aligned) {
+                if cur_aligned == entry_aligned && !sb.insts.is_empty() {
                     sb.is_loop = true;
                 }
                 break;
             }
-            visited.insert(cur_pc);
+            visited.insert(cur_aligned);
 
             let remaining_insts = max_insts - sb.insts.len();
-            let block = Lifter::lift_block_with_limit(mem, cur_pc, is_thumb, remaining_insts)?;
+            let block = Lifter::lift_block_with_limit(mem, cur_aligned, is_thumb, remaining_insts)?;
             if block.insts.is_empty() {
                 break;
             }
@@ -140,12 +143,29 @@ impl TraceBuilder {
 
             let exit = block.exit.clone();
 
+            // Superblocks must be strictly intra-procedural traces.
+            // Function calls (BL, BLX) transfer control to another procedure and set LR.
+            // Inlining callees into superblocks violates AAPCS stack frame invariants upon side exits.
+            if block.is_call {
+                sb.insts.extend(block.insts);
+                sb.inst_addrs.extend(block.inst_addrs);
+                sb.exit = exit;
+                break;
+            }
+
             match exit {
                 BlockExit::Direct(target) => {
                     sb.insts.extend(block.insts);
                     sb.inst_addrs.extend(block.inst_addrs);
-                    if target == entry {
+                    let target_aligned = GuestAddr::new(target.as_u32() & align_mask);
+                    if target_aligned == entry_aligned {
                         sb.is_loop = true;
+                        sb.exit = BlockExit::Direct(target);
+                        break;
+                    }
+                    if target.is_thumb() != is_thumb {
+                        // Direct branch crosses Thumb <-> ARM ISA mode boundary (e.g. BLX).
+                        // A superblock cannot cross architecture modes. Terminate trace here!
                         sb.exit = BlockExit::Direct(target);
                         break;
                     }
@@ -153,7 +173,8 @@ impl TraceBuilder {
                     sb.exit = BlockExit::Direct(target);
                 }
                 BlockExit::BranchCond { cond, target, fallthrough } => {
-                    if target == entry {
+                    let target_aligned = GuestAddr::new(target.as_u32() & align_mask);
+                    if target_aligned == entry_aligned {
                         // Loop backedge taken
                         sb.insts.extend(block.insts);
                         sb.inst_addrs.extend(block.inst_addrs);
@@ -180,8 +201,10 @@ impl TraceBuilder {
                 }
                 _ => {
                     // Indirect, SVC, BKPT, Invalid terminate the trace
-                    sb.insts.extend(block.insts);
-                    sb.inst_addrs.extend(block.inst_addrs);
+                    if !matches!(exit, BlockExit::Invalid(_)) {
+                        sb.insts.extend(block.insts);
+                        sb.inst_addrs.extend(block.inst_addrs);
+                    }
                     sb.exit = exit;
                     break;
                 }
