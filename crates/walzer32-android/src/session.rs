@@ -758,6 +758,30 @@ impl Walzer32Session {
         total
     }
 
+    /// Returns the total GLES draw calls across both single-threaded and active multi-threaded runtimes.
+    pub fn gles_total_draw_calls(&self) -> u64 {
+        if let Some(rt) = &self.active_mt_runtime {
+            if let Some(g) = &rt.gles {
+                if let Ok(guard) = g.lock() {
+                    return guard.total_draw_calls;
+                }
+            }
+        }
+        self.gles.total_draw_calls
+    }
+
+    /// Returns the total GLES swap buffers count across both single-threaded and active multi-threaded runtimes.
+    pub fn gles_swap_count(&self) -> u64 {
+        if let Some(rt) = &self.active_mt_runtime {
+            if let Some(g) = &rt.gles {
+                if let Ok(guard) = g.lock() {
+                    return guard.swap_count;
+                }
+            }
+        }
+        self.gles.swap_count
+    }
+
     /// Synchronizes fast non-blocking UI/Audio/Telemetry channels with current session state.
     pub fn sync_fast_channels(&self) {
         let fc = fast_channels();

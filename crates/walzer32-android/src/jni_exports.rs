@@ -1112,6 +1112,8 @@ static CACHED_PUSH_SCENE_IMP: std::sync::atomic::AtomicU32 = std::sync::atomic::
 static CACHED_SET_NEXT_SCENE_IMP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static CACHED_SCENE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static CACHED_VISIT_IMP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CACHED_LAYER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CACHED_LAYER_DRAW_IMP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn objc_send_msg0(session: &mut crate::session::Walzer32Session, msg_lkp: GuestAddr, recv: u32, sel: u32) -> Option<u32> {
     if recv == 0 || sel == 0 { return None; }
@@ -1332,6 +1334,42 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit(
 
                         CACHED_SCENE.store(active_scene, std::sync::atomic::Ordering::Relaxed);
                         log_i!("Walzer32: Configured active scene 0x{:08x} on director 0x{:08x}", active_scene, director);
+
+                        // Instantiate CCLayerColor and attach to active_scene
+                        if cocos_base != 0 {
+                            let layer_with_color_imp = cocos_base + 0x10e931; // +[CCLayerColor layerWithColor:]
+                            let layer_draw_imp = cocos_base + 0x10ed95; // -[CCLayerColor draw]
+                            let node_add_child_imp = cocos_base + 0x000c2281; // -[CCNode addChild:]
+                            CACHED_LAYER_DRAW_IMP.store(layer_draw_imp, std::sync::atomic::Ordering::Relaxed);
+
+                            let cls_layer_color = objc_get_cls(session, lookup_cls, b"CCLayerColor\0")
+                                .unwrap_or(cocos_base + 0x18d9a0);
+                            log_i!("Walzer32: CCLayerColor class = 0x{:08x}", cls_layer_color);
+
+                            // Color: 0xFFFF5533 (vibrant orange/red ccColor4B)
+                            let color_val: u32 = 0xFFFF5533;
+                            if let Ok(layer) = session.call_native(GuestAddr(layer_with_color_imp), &[cls_layer_color, 0, color_val]) {
+                                if layer != 0 {
+                                    log_i!("Walzer32: Successfully created CCLayerColor = 0x{:08x}", layer);
+                                    let _ = session.engine.mem.write_u8(GuestAddr::new(layer + 0x24), 1); // visible_ = 1
+                                    let _ = session.engine.mem.write_u8(GuestAddr::new(layer + 0xdc), 1); // isRunning_ = 1
+                                    let _ = session.engine.mem.write_u32(GuestAddr::new(layer + 0x3c), w_f32.to_bits());
+                                    let _ = session.engine.mem.write_u32(GuestAddr::new(layer + 0x40), h_f32.to_bits());
+                                    let _ = session.engine.mem.write_u32(GuestAddr::new(layer + 0x44), w_f32.to_bits());
+                                    let _ = session.engine.mem.write_u32(GuestAddr::new(layer + 0x48), h_f32.to_bits());
+
+                                    let sel_add_child = objc_get_sel(session, sel_reg, b"addChild:\0").unwrap_or(0);
+                                    let add_direct_res = session.call_native(GuestAddr(node_add_child_imp), &[active_scene, sel_add_child, layer]);
+                                    log_i!("Walzer32: Direct -[CCNode addChild:] returned {:?}", add_direct_res);
+
+                                    CACHED_LAYER.store(layer, std::sync::atomic::Ordering::Relaxed);
+                                } else {
+                                    log_e!("Walzer32: CCLayerColor layerWithColor returned 0");
+                                }
+                            } else {
+                                log_e!("Walzer32: CCLayerColor layerWithColor call failed");
+                            }
+                        }
                     }
                 }
             }
@@ -1384,7 +1422,7 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender(
     if let Ok(mut guard) = get_or_init_session() {
         if let Some(session) = guard.as_mut() {
             if f == 0 || f.is_multiple_of(300) {
-                log_i!("Walzer32: nativeRender frame {}, total_draw_calls {}, swap_count {}", f, session.gles.total_draw_calls, session.gles.swap_count);
+                log_i!("Walzer32: nativeRender frame {}, total_draw_calls {}, swap_count {}", f, session.gles_total_draw_calls(), session.gles_swap_count());
             }
             let _ = session.on_draw_frame();
             let env_ptr = session.jni.env_ptr.as_u32();
@@ -1409,7 +1447,7 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender(
                 let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x14), 0);
                 let res = session.call_native(GuestAddr(draw_imp), &[director, 0]);
                 if f == 0 || f.is_multiple_of(60) {
-                    log_i!("Walzer32: Frame {} -[CCDirectorAndroid drawScene] res: {:?}, total_draw_calls: {}", f, res, session.gles.total_draw_calls);
+                    log_i!("Walzer32: Frame {} -[CCDirectorAndroid drawScene] res: {:?}, total_draw_calls: {}", f, res, session.gles_total_draw_calls());
                 }
             }
 
@@ -1421,7 +1459,36 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender(
                 let _ = session.engine.mem.write_u8(GuestAddr::new(scene + 0x24), 1);
                 let vres = session.call_native(GuestAddr(visit_imp), &[scene, 0]);
                 if f == 0 || f.is_multiple_of(60) {
-                    log_i!("Walzer32: Frame {} direct [scene visit] res: {:?}, total_draw_calls: {}", f, vres, session.gles.total_draw_calls);
+                    log_i!("Walzer32: Frame {} direct [scene visit] res: {:?}, total_draw_calls: {}", f, vres, session.gles_total_draw_calls());
+                }
+            }
+
+            // 3. Direct [CCLayerColor draw] call via cached IMP
+            let layer = CACHED_LAYER.load(std::sync::atomic::Ordering::Relaxed);
+            let layer_draw_imp = CACHED_LAYER_DRAW_IMP.load(std::sync::atomic::Ordering::Relaxed);
+            if layer != 0 && layer_draw_imp != 0 {
+                if let Some(fp) = session.gles.resolve_host_symbol("glEnableClientState") {
+                    let enable_cs: extern "C" fn(u32) = unsafe { std::mem::transmute(fp) };
+                    enable_cs(0x8074); // GL_VERTEX_ARRAY
+                    enable_cs(0x8076); // GL_COLOR_ARRAY
+                }
+                if let Some(fp_matrix) = session.gles.resolve_host_symbol("glMatrixMode") {
+                    let matrix_fn: extern "C" fn(u32) = unsafe { std::mem::transmute(fp_matrix) };
+                    if let Some(fp_ident) = session.gles.resolve_host_symbol("glLoadIdentity") {
+                        let ident_fn: extern "C" fn() = unsafe { std::mem::transmute(fp_ident) };
+                        if let Some(fp_ortho) = session.gles.resolve_host_symbol("glOrthof") {
+                            let ortho_fn: extern "C" fn(f32, f32, f32, f32, f32, f32) = unsafe { std::mem::transmute(fp_ortho) };
+                            matrix_fn(0x1701); // GL_PROJECTION
+                            ident_fn();
+                            ortho_fn(0.0, 2520.0, 0.0, 1080.0, -1000.0, 1000.0);
+                            matrix_fn(0x1700); // GL_MODELVIEW
+                            ident_fn();
+                        }
+                    }
+                }
+                let lres = session.call_native(GuestAddr(layer_draw_imp), &[layer, 0]);
+                if f == 0 || f.is_multiple_of(60) {
+                    log_i!("Walzer32: Frame {} direct [CCLayerColor draw] res: {:?}, total_draw_calls: {}", f, lres, session.gles_total_draw_calls());
                 }
             }
         }

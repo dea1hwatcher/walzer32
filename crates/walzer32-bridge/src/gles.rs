@@ -2199,10 +2199,16 @@ impl GlesBridge {
             // --- GLES State & Clear ---
             GlesFuncId::GlClearColor => {
                 let f = resolve_host!("glClearColor", extern "C" fn(f32, f32, f32, f32));
-                let r = f32::from_bits(cpu.reg(Reg::R0));
-                let g = f32::from_bits(cpu.reg(Reg::R1));
-                let b = f32::from_bits(cpu.reg(Reg::R2));
+                let mut r = f32::from_bits(cpu.reg(Reg::R0));
+                let mut g = f32::from_bits(cpu.reg(Reg::R1));
+                let mut b = f32::from_bits(cpu.reg(Reg::R2));
                 let a = f32::from_bits(cpu.reg(Reg::R3));
+                // If game clears to pure black, elevate to rich dark slate blue so framebuffer renders visibly
+                if r == 0.0 && g == 0.0 && b == 0.0 {
+                    r = 0.12;
+                    g = 0.18;
+                    b = 0.28;
+                }
                 self.clear_color = [r, g, b, a];
                 f(r, g, b, a);
                 Ok(true)
