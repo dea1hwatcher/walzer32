@@ -1,6 +1,6 @@
 use std::ffi::c_void;
 use walzer32_bridge::{KeyEvent, TouchEvent};
-use walzer32_core::GuestAddr;
+use walzer32_core::{GuestAddr, Memory};
 use crate::session::{
     fast_channels, get_or_init_session, reset_session, try_get_or_init_session,
 };
@@ -1105,6 +1105,14 @@ fn objc_get_cls(session: &mut crate::session::Walzer32Session, lookup_cls: Guest
     session.call_native(lookup_cls, &[addr]).ok()
 }
 
+static CACHED_DIRECTOR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CACHED_DRAW_SCENE_IMP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CACHED_RUN_WITH_SCENE_IMP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CACHED_PUSH_SCENE_IMP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CACHED_SET_NEXT_SCENE_IMP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CACHED_SCENE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CACHED_VISIT_IMP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 fn objc_send_msg0(session: &mut crate::session::Walzer32Session, msg_lkp: GuestAddr, recv: u32, sel: u32) -> Option<u32> {
     if recv == 0 || sel == 0 { return None; }
     let imp = session.call_native(msg_lkp, &[recv, sel]).ok()?;
@@ -1159,6 +1167,26 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit(
                 }
             }
 
+            // Look up direct function pointers in libcocos2d.so
+            let cocos_base = session.loaded_libraries.get("libcocos2d.so").map(|l| l.load_base.as_u32()).unwrap_or(0);
+            log_i!("Walzer32: libcocos2d.so load_base = 0x{:08x}", cocos_base);
+            if cocos_base != 0 {
+                // Direct thumb entry points in libcocos2d.so:
+                let draw_scene_imp = cocos_base + 0x119745; // -[CCDirectorAndroid drawScene]
+                let run_with_scene_imp = cocos_base + 0x10d5fd; // -[CCDirector runWithScene:]
+                let push_scene_imp = cocos_base + 0x10d6e5; // -[CCDirector pushScene:]
+                let set_next_scene_imp = cocos_base + 0x10da89; // -[CCDirector setNextScene]
+                let visit_imp = cocos_base + 0x000c28cd; // -[CCNode visit]
+
+                CACHED_DRAW_SCENE_IMP.store(draw_scene_imp, std::sync::atomic::Ordering::Relaxed);
+                CACHED_RUN_WITH_SCENE_IMP.store(run_with_scene_imp, std::sync::atomic::Ordering::Relaxed);
+                CACHED_PUSH_SCENE_IMP.store(push_scene_imp, std::sync::atomic::Ordering::Relaxed);
+                CACHED_SET_NEXT_SCENE_IMP.store(set_next_scene_imp, std::sync::atomic::Ordering::Relaxed);
+                CACHED_VISIT_IMP.store(visit_imp, std::sync::atomic::Ordering::Relaxed);
+                log_i!("Walzer32: Cached cocos2d IMPs: drawScene=0x{:08x}, runWithScene=0x{:08x}, pushScene=0x{:08x}, setNextScene=0x{:08x}, visit=0x{:08x}",
+                    draw_scene_imp, run_with_scene_imp, push_scene_imp, set_next_scene_imp, visit_imp);
+            }
+
             // Inspect and verify Objective-C runtime state (CCDirector, UIApplication, Scene)
             let lookup_class_sym = session.find_loaded_symbol("objc_lookup_class");
             let sel_register_name_sym = session.find_loaded_symbol("sel_registerName");
@@ -1170,61 +1198,140 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit(
             if let (Some(lookup_cls), Some(sel_reg), Some(msg_lkp)) = (lookup_class_sym, sel_register_name_sym, msg_lookup_sym) {
                 if let Some(cls_director) = objc_get_cls(session, lookup_cls, b"CCDirector\0") {
                     let sel_shared_dir = objc_get_sel(session, sel_reg, b"sharedDirector\0").unwrap_or(0);
-                    let sel_running_scene = objc_get_sel(session, sel_reg, b"runningScene\0").unwrap_or(0);
                     let director = objc_send_msg0(session, msg_lkp, cls_director, sel_shared_dir).unwrap_or(0);
-                    let mut running_scene = objc_send_msg0(session, msg_lkp, director, sel_running_scene).unwrap_or(0);
-                    log_i!("Walzer32: [CCDirector sharedDirector] = 0x{:08x}, runningScene = 0x{:08x}", director, running_scene);
+                    if director != 0 {
+                        CACHED_DIRECTOR.store(director, std::sync::atomic::Ordering::Relaxed);
+                        log_i!("Walzer32: Cached [CCDirector sharedDirector]=0x{:08x}", director);
 
-                    if running_scene == 0 {
-                        let cls_app = objc_get_cls(session, lookup_cls, b"UIApplication\0").unwrap_or(0);
-                        let sel_shared_app = objc_get_sel(session, sel_reg, b"sharedApplication\0").unwrap_or(0);
-                        let sel_delegate = objc_get_sel(session, sel_reg, b"delegate\0").unwrap_or(0);
-                        let sel_set_delegate = objc_get_sel(session, sel_reg, b"setDelegate:\0").unwrap_or(0);
-                        let app = objc_send_msg0(session, msg_lkp, cls_app, sel_shared_app).unwrap_or(0);
-                        let mut delegate = objc_send_msg0(session, msg_lkp, app, sel_delegate).unwrap_or(0);
-                        log_i!("Walzer32: [UIApplication sharedApplication] = 0x{:08x}, delegate = 0x{:08x}", app, delegate);
+                        // Setup director dimensions and clean flags
+                        let w_f32 = width as f32;
+                        let h_f32 = height as f32;
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x7c), w_f32.to_bits());
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x80), h_f32.to_bits());
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x84), w_f32.to_bits());
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x88), h_f32.to_bits());
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x44), 0); // isPaused_ = false
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x14), 0); // drawWhiteBackground_ = false
+                    }
 
-                        if delegate == 0 {
-                            log_i!("Walzer32: Delegate is nil, instantiating BigAirAppDelegate...");
-                            if let Some(cls_delegate) = objc_get_cls(session, lookup_cls, b"BigAirAppDelegate\0") {
-                                let sel_alloc = objc_get_sel(session, sel_reg, b"alloc\0").unwrap_or(0);
-                                let sel_init = objc_get_sel(session, sel_reg, b"init\0").unwrap_or(0);
-                                let raw_del = objc_send_msg0(session, msg_lkp, cls_delegate, sel_alloc).unwrap_or(0);
-                                delegate = objc_send_msg0(session, msg_lkp, raw_del, sel_init).unwrap_or(0);
-                                log_i!("Walzer32: Instantiated BigAirAppDelegate = 0x{:08x}", delegate);
-                                if delegate != 0 && app != 0 {
-                                    let _ = objc_send_msg1(session, msg_lkp, app, sel_set_delegate, delegate);
-                                    log_i!("Walzer32: Assigned delegate to UIApplication");
-                                }
+                    // Attempt app delegate launch first to allow game setup
+                    let cls_app = objc_get_cls(session, lookup_cls, b"UIApplication\0").unwrap_or(0);
+                    let sel_shared_app = objc_get_sel(session, sel_reg, b"sharedApplication\0").unwrap_or(0);
+                    let sel_delegate = objc_get_sel(session, sel_reg, b"delegate\0").unwrap_or(0);
+                    let sel_set_delegate = objc_get_sel(session, sel_reg, b"setDelegate:\0").unwrap_or(0);
+                    let app = objc_send_msg0(session, msg_lkp, cls_app, sel_shared_app).unwrap_or(0);
+                    let mut delegate = objc_send_msg0(session, msg_lkp, app, sel_delegate).unwrap_or(0);
+
+                    if delegate == 0 {
+                        log_i!("Walzer32: Delegate is nil, instantiating BigAirAppDelegate...");
+                        if let Some(cls_delegate) = objc_get_cls(session, lookup_cls, b"BigAirAppDelegate\0") {
+                            let sel_alloc = objc_get_sel(session, sel_reg, b"alloc\0").unwrap_or(0);
+                            let sel_init = objc_get_sel(session, sel_reg, b"init\0").unwrap_or(0);
+                            let raw_del = objc_send_msg0(session, msg_lkp, cls_delegate, sel_alloc).unwrap_or(0);
+                            delegate = objc_send_msg0(session, msg_lkp, raw_del, sel_init).unwrap_or(0);
+                            log_i!("Walzer32: Instantiated BigAirAppDelegate = 0x{:08x}", delegate);
+                            if delegate != 0 && app != 0 {
+                                let _ = objc_send_msg1(session, msg_lkp, app, sel_set_delegate, delegate);
                             }
                         }
+                    }
 
-                        if delegate != 0 {
-                            let sel_launch = objc_get_sel(session, sel_reg, b"applicationDidFinishLaunching:\0").unwrap_or(0);
-                            log_i!("Walzer32: Triggering [delegate applicationDidFinishLaunching: app] (sel 0x{:08x})...", sel_launch);
-                            let launch_res = objc_send_msg1(session, msg_lkp, delegate, sel_launch, app);
-                            log_i!("Walzer32: applicationDidFinishLaunching returned {:?}", launch_res);
+                    if delegate != 0 {
+                        let sel_launch = objc_get_sel(session, sel_reg, b"applicationDidFinishLaunching:\0").unwrap_or(0);
+                        let launch_res = objc_send_msg1(session, msg_lkp, delegate, sel_launch, app);
+                        log_i!("Walzer32: applicationDidFinishLaunching returned {:?}", launch_res);
+                    }
 
-                            running_scene = objc_send_msg0(session, msg_lkp, director, sel_running_scene).unwrap_or(0);
-                            log_i!("Walzer32: After launch, runningScene = 0x{:08x}", running_scene);
+                    // Check if director has runningScene_ or nextScene_
+                    let mut running_scene = session.engine.mem.read_u32(GuestAddr::new(director + 0x48)).unwrap_or(0);
+                    let mut next_scene = session.engine.mem.read_u32(GuestAddr::new(director + 0x50)).unwrap_or(0);
+                    log_i!("Walzer32: Post-delegate director runningScene_=0x{:08x}, nextScene_=0x{:08x}", running_scene, next_scene);
+
+                    // If neither exists, instantiate MenuScene (or NoodleIntroScene fallback)
+                    if running_scene == 0 && next_scene == 0 {
+                        let sel_node = objc_get_sel(session, sel_reg, b"node\0").unwrap_or(0);
+                        let mut target_scene = 0;
+                        if let Some(cls_menu) = objc_get_cls(session, lookup_cls, b"MenuScene\0") {
+                            if sel_node != 0 {
+                                target_scene = objc_send_msg0(session, msg_lkp, cls_menu, sel_node).unwrap_or(0);
+                                log_i!("Walzer32: [MenuScene node] = 0x{:08x}", target_scene);
+                            }
                         }
-
-                        // Direct scene fallback if runningScene is still 0
-                        if running_scene == 0 && director != 0 {
-                            log_i!("Walzer32: runningScene still 0, instantiating NoodleIntroScene directly...");
+                        if target_scene == 0 {
                             if let Some(cls_intro) = objc_get_cls(session, lookup_cls, b"NoodleIntroScene\0") {
-                                let sel_node = objc_get_sel(session, sel_reg, b"node\0").unwrap_or(0);
-                                let sel_run_with_scene = objc_get_sel(session, sel_reg, b"runWithScene:\0").unwrap_or(0);
-                                let intro_scene = objc_send_msg0(session, msg_lkp, cls_intro, sel_node).unwrap_or(0);
-                                log_i!("Walzer32: [NoodleIntroScene node] = 0x{:08x}", intro_scene);
-                                if intro_scene != 0 {
-                                    let run_res = objc_send_msg1(session, msg_lkp, director, sel_run_with_scene, intro_scene);
-                                    log_i!("Walzer32: [director runWithScene: intro_scene] returned {:?}", run_res);
-                                    let running_scene_final = objc_send_msg0(session, msg_lkp, director, sel_running_scene).unwrap_or(0);
-                                    log_i!("Walzer32: Final runningScene = 0x{:08x}", running_scene_final);
+                                if sel_node != 0 {
+                                    target_scene = objc_send_msg0(session, msg_lkp, cls_intro, sel_node).unwrap_or(0);
+                                    log_i!("Walzer32: [NoodleIntroScene node] = 0x{:08x}", target_scene);
                                 }
                             }
                         }
+                        if target_scene == 0 {
+                            if let Some(cls_scene) = objc_get_cls(session, lookup_cls, b"CCScene\0") {
+                                if sel_node != 0 {
+                                    target_scene = objc_send_msg0(session, msg_lkp, cls_scene, sel_node).unwrap_or(0);
+                                    log_i!("Walzer32: [CCScene node] = 0x{:08x}", target_scene);
+                                }
+                            }
+                        }
+
+                        if target_scene != 0 {
+                            running_scene = target_scene;
+                            next_scene = target_scene;
+                        }
+                    }
+
+                    let active_scene = if running_scene != 0 { running_scene } else { next_scene };
+                    if active_scene != 0 && director != 0 {
+                        let w_f32 = width as f32;
+                        let h_f32 = height as f32;
+
+                        // Guarantee CCNode invariants on active_scene:
+                        // visible_ at 0x24 = 1, isRunning_ at 0xdc = 1, isTransformDirty_ at 0xe4 = 1
+                        let _ = session.engine.mem.write_u8(GuestAddr::new(active_scene + 0x24), 1);
+                        let _ = session.engine.mem.write_u8(GuestAddr::new(active_scene + 0xdc), 1);
+                        let _ = session.engine.mem.write_u8(GuestAddr::new(active_scene + 0xe4), 1);
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(active_scene + 0x3c), w_f32.to_bits());
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(active_scene + 0x40), h_f32.to_bits());
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(active_scene + 0x44), w_f32.to_bits());
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(active_scene + 0x48), h_f32.to_bits());
+
+                        // Also ensure children of active_scene are visible_ = 1
+                        let children_obj = session.engine.mem.read_u32(GuestAddr::new(active_scene + 0xcc)).unwrap_or(0);
+                        if children_obj != 0 {
+                            let data_ptr = session.engine.mem.read_u32(GuestAddr::new(children_obj)).unwrap_or(0);
+                            if data_ptr != 0 {
+                                let num_children = session.engine.mem.read_u32(GuestAddr::new(data_ptr)).unwrap_or(0);
+                                let arr_ptr = session.engine.mem.read_u32(GuestAddr::new(data_ptr + 8)).unwrap_or(0);
+                                log_i!("Walzer32: active_scene children: count={}, arr=0x{:08x}", num_children, arr_ptr);
+                                for i in 0..num_children.min(32) {
+                                    if let Ok(ch) = session.engine.mem.read_u32(GuestAddr::new(arr_ptr + i * 4)) {
+                                        if ch != 0 {
+                                            let _ = session.engine.mem.write_u8(GuestAddr::new(ch + 0x24), 1);
+                                            let _ = session.engine.mem.write_u8(GuestAddr::new(ch + 0xdc), 1);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Write to director: runningScene_ = active_scene, nextScene_ = 0
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x48), active_scene);
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x50), 0);
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x44), 0);
+                        let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x14), 0);
+
+                        // Trigger onEnter and onEnterTransitionDidFinish
+                        let sel_on_enter = objc_get_sel(session, sel_reg, b"onEnter\0").unwrap_or(0);
+                        if sel_on_enter != 0 {
+                            let _ = objc_send_msg0(session, msg_lkp, active_scene, sel_on_enter);
+                        }
+                        let sel_enter_done = objc_get_sel(session, sel_reg, b"onEnterTransitionDidFinish\0").unwrap_or(0);
+                        if sel_enter_done != 0 {
+                            let _ = objc_send_msg0(session, msg_lkp, active_scene, sel_enter_done);
+                        }
+
+                        CACHED_SCENE.store(active_scene, std::sync::atomic::Ordering::Relaxed);
+                        log_i!("Walzer32: Configured active scene 0x{:08x} on director 0x{:08x}", active_scene, director);
                     }
                 }
             }
@@ -1293,13 +1400,28 @@ pub unsafe extern "C" fn Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender(
                 }
             }
 
-            // Fallback direct mainLoop tick if total_draw_calls is still 0 after frame 5
-            if session.gles.total_draw_calls == 0 && f >= 5 {
-                if let Some(ml) = session.find_loaded_symbol("mainLoop") {
-                    if f.is_multiple_of(60) {
-                        log_i!("Walzer32: total_draw_calls is 0 at frame {}, ticking mainLoop directly...", f);
-                    }
-                    let _ = session.call_native(ml, &[]);
+            // 1. Direct CCDirectorAndroid drawScene call via cached IMP
+            let director = CACHED_DIRECTOR.load(std::sync::atomic::Ordering::Relaxed);
+            let draw_imp = CACHED_DRAW_SCENE_IMP.load(std::sync::atomic::Ordering::Relaxed);
+            if director != 0 && draw_imp != 0 {
+                // Ensure director flags: isPaused_ = false, drawWhiteBackground_ = false
+                let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x44), 0);
+                let _ = session.engine.mem.write_u32(GuestAddr::new(director + 0x14), 0);
+                let res = session.call_native(GuestAddr(draw_imp), &[director, 0]);
+                if f == 0 || f.is_multiple_of(60) {
+                    log_i!("Walzer32: Frame {} -[CCDirectorAndroid drawScene] res: {:?}, total_draw_calls: {}", f, res, session.gles.total_draw_calls);
+                }
+            }
+
+            // 2. Direct [scene visit] call via cached IMP
+            let scene = CACHED_SCENE.load(std::sync::atomic::Ordering::Relaxed);
+            let visit_imp = CACHED_VISIT_IMP.load(std::sync::atomic::Ordering::Relaxed);
+            if scene != 0 && visit_imp != 0 {
+                // Ensure scene visible_ is 1
+                let _ = session.engine.mem.write_u8(GuestAddr::new(scene + 0x24), 1);
+                let vres = session.call_native(GuestAddr(visit_imp), &[scene, 0]);
+                if f == 0 || f.is_multiple_of(60) {
+                    log_i!("Walzer32: Frame {} direct [scene visit] res: {:?}, total_draw_calls: {}", f, vres, session.gles.total_draw_calls);
                 }
             }
         }
